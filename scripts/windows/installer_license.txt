@@ -1,0 +1,5 @@
+OKILTV Windows Build
+
+This package bundles the staged Windows application output for local installation testing.
+
+No additional license text has been provided in this repository.

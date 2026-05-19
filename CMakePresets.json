@@ -1,0 +1,105 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "qt-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "qt/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_CXX_STANDARD_REQUIRED": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "OKILTV_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "qt-win64-base",
+      "hidden": true,
+      "inherits": "qt-base",
+      "toolchainFile": "$env{QT_WIN_SDK_ROOT}/lib/cmake/Qt6/qt.toolchain.cmake",
+      "cacheVariables": {
+        "QT_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/build/toolchains/mingw-w64-x86_64.cmake",
+        "QT_HOST_PATH": "$env{QT_HOST_PATH}",
+        "QT_HOST_PATH_CMAKE_DIR": "$env{QT_HOST_PATH}/lib/cmake",
+        "OKILTV_BUILD_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "qt-linux-base",
+      "hidden": true,
+      "inherits": "qt-base"
+    },
+    {
+      "name": "qt-linux-debug",
+      "inherits": "qt-linux-base",
+      "displayName": "Qt Linux Debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "qt-linux-release",
+      "inherits": "qt-linux-base",
+      "displayName": "Qt Linux Release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "qt-win64-debug",
+      "inherits": "qt-win64-base",
+      "displayName": "Qt Win64 Debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "qt-win64-release",
+      "inherits": "qt-win64-base",
+      "displayName": "Qt Win64 Release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "qt-win64-debug",
+      "configurePreset": "qt-win64-debug"
+    },
+    {
+      "name": "qt-linux-debug",
+      "configurePreset": "qt-linux-debug"
+    },
+    {
+      "name": "qt-linux-release",
+      "configurePreset": "qt-linux-release"
+    },
+    {
+      "name": "qt-win64-release",
+      "configurePreset": "qt-win64-release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "qt-win64-debug",
+      "configurePreset": "qt-win64-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "qt-linux-debug",
+      "configurePreset": "qt-linux-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

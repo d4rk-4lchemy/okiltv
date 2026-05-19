@@ -1,0 +1,9 @@
+Checks: >-
+  -*,
+  bugprone-*,
+  performance-*,
+  clang-analyzer-*,
+  -performance-enum-size,
+  -clang-analyzer-optin.performance.Padding
+HeaderFilterRegex: '.*qt/src/.*'
+FormatStyle: none
