@@ -19,7 +19,8 @@ public:
         TypeRole,
         TypeLabelRole,
         IsActiveRole,
-        LastRefreshedRole
+        LastRefreshedRole,
+        GroupCountRole
     };
     Q_ENUM(Roles)
 

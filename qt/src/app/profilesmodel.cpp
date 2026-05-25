@@ -1,5 +1,7 @@
 #include "profilesmodel.h"
 
+#include <QDateTime>
+
 namespace OKILTV::App {
 
 using namespace Core;
@@ -12,16 +14,17 @@ ProfilesModel::ProfilesModel(SettingsManager *settings, QObject *parent)
 
 int ProfilesModel::rowCount(const QModelIndex &parent) const
 {
-    return parent.isValid() ? 0 : static_cast<int>(m_settings->current().profiles.size());
+    return parent.isValid() ? 0 : static_cast<int>(m_settings->sourceSummaries().size());
 }
 
 QVariant ProfilesModel::data(const QModelIndex &index, const int role) const
 {
-    if (!index.isValid() || index.row() < 0 || index.row() >= m_settings->current().profiles.size()) {
+    const auto summaries = m_settings->sourceSummaries();
+    if (!index.isValid() || index.row() < 0 || index.row() >= summaries.size()) {
         return {};
     }
 
-    const auto &profile = m_settings->current().profiles.at(index.row());
+    const auto &profile = summaries.at(index.row());
     switch (role) {
     case IdRole:
         return guidToString(profile.id);
@@ -35,6 +38,8 @@ QVariant ProfilesModel::data(const QModelIndex &index, const int role) const
         return profile.isActive;
     case LastRefreshedRole:
         return profile.lastRefreshed.toUTC().toString(Qt::ISODateWithMs);
+    case GroupCountRole:
+        return profile.groupCount;
     default:
         return {};
     }
@@ -48,7 +53,8 @@ QHash<int, QByteArray> ProfilesModel::roleNames() const
         { TypeRole, "type" },
         { TypeLabelRole, "typeLabel" },
         { IsActiveRole, "isActive" },
-        { LastRefreshedRole, "lastRefreshed" }
+        { LastRefreshedRole, "lastRefreshed" },
+        { GroupCountRole, "groupCount" }
     };
 }
 
@@ -60,11 +66,20 @@ QString ProfilesModel::activeProfileId() const
 
 QVariantMap ProfilesModel::get(const int row) const
 {
-    if (row < 0 || row >= m_settings->current().profiles.size()) {
+    const auto summaries = m_settings->sourceSummaries();
+    if (row < 0 || row >= summaries.size()) {
         return {};
     }
-
-    return toVariantMap(m_settings->current().profiles.at(row));
+    const auto summary = summaries.at(row);
+    auto result = toVariantMap(summary);
+    const auto detail = m_settings->profileDetailById(summary.id);
+    if (detail.has_value()) {
+        const auto detailMap = toVariantMap(detail.value());
+        for (auto it = detailMap.cbegin(); it != detailMap.cend(); ++it) {
+            result.insert(it.key(), it.value());
+        }
+    }
+    return result;
 }
 
 QString ProfilesModel::addXtreamProfile(
@@ -84,10 +99,10 @@ QString ProfilesModel::addXtreamProfile(
     profile.xmltvUrl = xmltvUrl.trimmed();
     profile.autoRefreshIntervalHours = normalizeAutoRefreshIntervalHours(autoRefreshIntervalHours);
 
-    beginInsertRows({}, rowCount(), rowCount());
-    m_settings->current().profiles.push_back(profile);
-    endInsertRows();
-    m_settings->save();
+    if (!m_settings->addProfile(profile)) {
+        return {};
+    }
+    reload();
     return guidToString(profile.id);
 }
 
@@ -104,10 +119,10 @@ QString ProfilesModel::addM3uUrlProfile(
     profile.xmltvUrl = xmltvUrl.trimmed();
     profile.autoRefreshIntervalHours = normalizeAutoRefreshIntervalHours(autoRefreshIntervalHours);
 
-    beginInsertRows({}, rowCount(), rowCount());
-    m_settings->current().profiles.push_back(profile);
-    endInsertRows();
-    m_settings->save();
+    if (!m_settings->addProfile(profile)) {
+        return {};
+    }
+    reload();
     return guidToString(profile.id);
 }
 
@@ -119,10 +134,10 @@ QString ProfilesModel::addM3uFileProfile(const QString &name, const QString &fil
     profile.m3uFilePath = filePath.trimmed();
     profile.xmltvUrl = xmltvUrl.trimmed();
 
-    beginInsertRows({}, rowCount(), rowCount());
-    m_settings->current().profiles.push_back(profile);
-    endInsertRows();
-    m_settings->save();
+    if (!m_settings->addProfile(profile)) {
+        return {};
+    }
+    reload();
     return guidToString(profile.id);
 }
 
@@ -134,9 +149,33 @@ bool ProfilesModel::replaceProfile(const QString &profileId, const QVariantMap &
         return false;
     }
 
-    auto &profile = m_settings->current().profiles[row];
+    const auto summary = m_settings->sourceSummaries().at(row);
+    auto profile = m_settings->profileById(summary.id).value_or(ServerProfile {});
+    profile.id = summary.id;
+    profile.name = summary.name;
+    profile.type = summary.type;
+    profile.autoRefreshIntervalHours = summary.autoRefreshIntervalHours;
+    profile.lastRefreshed = summary.lastRefreshed;
+    profile.xtreamServerTimezone = summary.xtreamServerTimezone;
+    profile.isActive = summary.isActive;
     if (changes.contains(QStringLiteral("name"))) {
         profile.name = changes.value(QStringLiteral("name")).toString().trimmed();
+    }
+    if (changes.contains(QStringLiteral("type"))) {
+        auto rawType = static_cast<int>(profile.type);
+        const auto parsedType = changes.value(QStringLiteral("type")).toInt();
+        if (parsedType == static_cast<int>(ProfileType::Xtream)
+            || parsedType == static_cast<int>(ProfileType::M3UUrl)
+            || parsedType == static_cast<int>(ProfileType::M3UFile)) {
+            rawType = parsedType;
+        }
+        if (rawType == static_cast<int>(ProfileType::M3UUrl)) {
+            profile.type = ProfileType::M3UUrl;
+        } else if (rawType == static_cast<int>(ProfileType::M3UFile)) {
+            profile.type = ProfileType::M3UFile;
+        } else {
+            profile.type = ProfileType::Xtream;
+        }
     }
     if (changes.contains(QStringLiteral("xtreamBaseUrl"))) {
         profile.xtreamBaseUrl = changes.value(QStringLiteral("xtreamBaseUrl")).toString().trimmed();
@@ -163,8 +202,23 @@ bool ProfilesModel::replaceProfile(const QString &profileId, const QVariantMap &
         profile.autoRefreshIntervalHours = normalizeAutoRefreshIntervalHours(
             changes.value(QStringLiteral("autoRefreshIntervalHours")).toInt());
     }
+    if (changes.contains(QStringLiteral("lastRefreshed"))) {
+        auto parsed = QDateTime::fromString(
+            changes.value(QStringLiteral("lastRefreshed")).toString(),
+            Qt::ISODateWithMs);
+        if (!parsed.isValid()) {
+            parsed = QDateTime::fromString(
+                changes.value(QStringLiteral("lastRefreshed")).toString(),
+                Qt::ISODate);
+        }
+        if (parsed.isValid()) {
+            profile.lastRefreshed = parsed.toUTC();
+        }
+    }
 
-    m_settings->save();
+    if (!m_settings->replaceProfile(summary.id, profile)) {
+        return false;
+    }
     emit dataChanged(index(row, 0), index(row, 0));
     return true;
 }
@@ -177,17 +231,14 @@ bool ProfilesModel::removeProfile(const QString &profileId)
         return false;
     }
 
-    beginRemoveRows({}, row, row);
-    m_settings->current().profiles.removeAt(row);
-    endRemoveRows();
-
-    const auto &activeProfileId = m_settings->current().activeProfileId;
-    if (activeProfileId.has_value() && *activeProfileId == parsedId) {
-        m_settings->setActiveProfileId(std::nullopt);
+    const auto oldActive = activeProfileId();
+    if (!m_settings->removeProfile(parsedId)) {
+        return false;
+    }
+    if (oldActive != activeProfileId()) {
         emit activeProfileIdChanged();
     }
-
-    m_settings->save();
+    reload();
     return true;
 }
 
@@ -219,8 +270,9 @@ void ProfilesModel::reload()
 
 int ProfilesModel::indexOfProfile(const QUuid &profileId) const
 {
-    for (auto index = 0; index < m_settings->current().profiles.size(); ++index) {
-        if (m_settings->current().profiles.at(index).id == profileId) {
+    const auto summaries = m_settings->sourceSummaries();
+    for (auto index = 0; index < summaries.size(); ++index) {
+        if (summaries.at(index).id == profileId) {
             return index;
         }
     }

@@ -28,6 +28,9 @@ public:
     static QString dataDirectory();
     static QString debugDumpDirectory();
     static QString settingsFile();
+    static QString sourceSummariesFile();
+    static QString sourcesDirectory();
+    static QString sourceDetailFile(const QUuid &profileId);
     static QString databaseFile();
     static QString epgCacheDirectory();
     static QString epgCacheFile(const QUuid &profileId);

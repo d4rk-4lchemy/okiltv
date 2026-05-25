@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(OKILTVQt VERSION 0.4.0 LANGUAGES CXX)
+project(OKILTVQt VERSION 0.4.1 LANGUAGES CXX)
 
 option(OKILTV_BUILD_TESTS "Build Qt test targets" ON)
 
@@ -114,8 +114,12 @@ qt_add_executable(OKILTVQt
     src/core/redaction.h
     src/core/settingsmanager.cpp
     src/core/settingsmanager.h
+    src/core/sourcestore.cpp
+    src/core/sourcestore.h
     src/core/xtreamservice.cpp
     src/core/xtreamservice.h
+    src/player/catchupstreamsession.cpp
+    src/player/catchupstreamsession.h
     src/player/mpvplayer.cpp
     src/player/mpvplayer.h
     src/player/mpvvideoitem.cpp

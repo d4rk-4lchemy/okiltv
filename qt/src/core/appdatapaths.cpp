@@ -146,6 +146,22 @@ QString AppDataPaths::settingsFile()
     return QDir(dataDirectory()).filePath(QStringLiteral("settings.json"));
 }
 
+QString AppDataPaths::sourceSummariesFile()
+{
+    return QDir(dataDirectory()).filePath(QStringLiteral("source-summaries.json"));
+}
+
+QString AppDataPaths::sourcesDirectory()
+{
+    return ensureExists(QDir(dataDirectory()).filePath(QStringLiteral("sources")));
+}
+
+QString AppDataPaths::sourceDetailFile(const QUuid &profileId)
+{
+    return QDir(sourcesDirectory()).filePath(
+        QStringLiteral("%1.json").arg(profileId.toString(QUuid::WithoutBraces).toLower()));
+}
+
 QString AppDataPaths::databaseFile()
 {
     return QDir(dataDirectory()).filePath(QStringLiteral("iptv.db"));

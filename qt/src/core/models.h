@@ -48,6 +48,18 @@ struct ServerProfile
     bool isActive { false };
 };
 
+struct SourceSummary
+{
+    QUuid id { QUuid::createUuid() };
+    QString name;
+    ProfileType type { ProfileType::Xtream };
+    int autoRefreshIntervalHours { 24 };
+    QString xtreamServerTimezone;
+    QDateTime lastRefreshed;
+    int groupCount { 0 };
+    bool isActive { false };
+};
+
 struct ChannelCategory
 {
     QString id;
@@ -175,11 +187,14 @@ int normalizeMultiviewMaxTiles(int value);
 
 QJsonObject toJson(const ServerProfile &profile);
 ServerProfile serverProfileFromJson(const QJsonObject &object);
+QJsonObject toJson(const SourceSummary &summary);
+SourceSummary sourceSummaryFromJson(const QJsonObject &object);
 
 QJsonObject toJson(const AppSettings &settings);
 AppSettings appSettingsFromJson(const QJsonObject &object);
 
 QVariantMap toVariantMap(const ServerProfile &profile);
+QVariantMap toVariantMap(const SourceSummary &summary);
 QVariantMap toVariantMap(const ChannelCategory &category);
 QVariantMap toVariantMap(const Channel &channel);
 QVariantMap toVariantMap(const EpgEntry &entry);

@@ -13,6 +13,8 @@ namespace OKILTV::Core {
 
 namespace {
 
+constexpr qint64 kXtreamLiveOriginDurationBackoffSeconds = 65;
+
 QString trimmedBaseUrl(const QString &value)
 {
     auto base = value.trimmed();
@@ -248,17 +250,30 @@ std::optional<CatchupPlaybackTarget> CatchupUrlResolver::resolve(
             target.programStartUtc,
             profile.xtreamServerTimezone,
             &effectiveTimezoneId);
+        const auto nowUtc = QDateTime::currentDateTimeUtc();
+        const auto programmeStillLive = nowUtc < target.programStopUtc;
+        qint64 durationMinutes = 0;
+        if (programmeStillLive) {
+            const auto adjustedNowMinuteEpoch = static_cast<qint64>(
+                std::floor(static_cast<double>(nowUtc.addSecs(-kXtreamLiveOriginDurationBackoffSeconds).toSecsSinceEpoch()) / 60.0));
+            const auto programStartMinuteEpoch = static_cast<qint64>(
+                std::floor(static_cast<double>(target.programStartUtc.toSecsSinceEpoch()) / 60.0));
+            durationMinutes = std::max<qint64>(1, adjustedNowMinuteEpoch - programStartMinuteEpoch);
+        } else {
+            durationMinutes = static_cast<qint64>(((target.durationSeconds + 59) / 60) + 1);
+        }
+
         target.url = QStringLiteral("%1/timeshift/%2/%3/%4/%5/%6.%7")
             .arg(trimmedBaseUrl(profile.xtreamBaseUrl))
             .arg(QString::fromUtf8(QUrl::toPercentEncoding(profile.xtreamUsername)))
             .arg(QString::fromUtf8(QUrl::toPercentEncoding(profile.xtreamPassword)))
-            .arg(static_cast<qint64>(((target.durationSeconds + 59) / 60) + 1))
+            .arg(durationMinutes)
             .arg(startInProviderTimezone.toString(QStringLiteral("yyyy-MM-dd:HH-mm")))
             .arg(channel.id)
             .arg(extension);
         DebugLogger::instance().log(
             QStringLiteral("catchup.resolve.xtream"),
-            QStringLiteral("source=%1 streamUrl=%2 ext=%3 startUtc=%4 startProviderTz=%5 timezone=%6 durationSec=%7 url=%8")
+            QStringLiteral("source=%1 streamUrl=%2 ext=%3 startUtc=%4 startProviderTz=%5 timezone=%6 durationSec=%7 durationMin=%8 liveProgram=%9 url=%10")
                 .arg(sourceName(channel.source),
                      channel.streamUrl,
                      extension,
@@ -266,6 +281,8 @@ std::optional<CatchupPlaybackTarget> CatchupUrlResolver::resolve(
                      startInProviderTimezone.toString(Qt::ISODateWithMs),
                      effectiveTimezoneId)
                 .arg(target.durationSeconds)
+                .arg(durationMinutes)
+                .arg(programmeStillLive ? QStringLiteral("true") : QStringLiteral("false"))
                 .arg(target.url));
         return target;
     }

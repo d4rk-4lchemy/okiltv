@@ -258,10 +258,38 @@ void SourceGroupsModel::setHideUnchecked(const bool value)
         updateDraftStateForCurrentProfile();
     }
 
+    rebuildVisibleGroups();
     emit hideUncheckedChanged();
     if (wasDirty != dirty()) {
         emit dirtyChanged();
     }
+}
+
+QString SourceGroupsModel::searchText() const
+{
+    return m_searchText;
+}
+
+void SourceGroupsModel::setSearchText(const QString &value)
+{
+    const auto normalized = value.trimmed();
+    if (m_searchText == normalized) {
+        return;
+    }
+
+    m_searchText = normalized;
+    rebuildVisibleGroups();
+    emit searchTextChanged();
+}
+
+QVariantList SourceGroupsModel::visibleGroups() const
+{
+    return m_visibleGroups;
+}
+
+QStringList SourceGroupsModel::visibleGroupIds() const
+{
+    return m_visibleGroupIds;
 }
 
 QVariantMap SourceGroupsModel::get(const int row) const
@@ -427,6 +455,7 @@ void SourceGroupsModel::reload()
                 m_groups = std::move(groups);
                 endResetModel();
                 m_hideUnchecked = result.hideUnchecked;
+                rebuildVisibleGroups();
                 if (hideUncheckedStateChanged) {
                     emit hideUncheckedChanged();
                 }
@@ -515,6 +544,7 @@ bool SourceGroupsModel::moveGroup(const QString &groupId, int targetIndex)
     }
 
     emit groupsChanged();
+    rebuildVisibleGroups();
     if (wasDirty != dirty()) {
         emit dirtyChanged();
     }
@@ -590,6 +620,7 @@ bool SourceGroupsModel::reorderVisibleGroups(const QStringList &visibleOrderedId
     }
 
     emit groupsChanged();
+    rebuildVisibleGroups();
     if (wasDirty != dirty()) {
         emit dirtyChanged();
     }
@@ -684,6 +715,7 @@ bool SourceGroupsModel::updateSelection(const QStringList &groupIds, const bool 
     for (const auto row : changedRows) {
         emit dataChanged(index(row, 0), index(row, 0), { SelectedRole });
     }
+    rebuildVisibleGroups();
     emit groupsChanged();
     if (wasDirty != dirty()) {
         emit dirtyChanged();
@@ -708,6 +740,8 @@ void SourceGroupsModel::clearLoadedGroups()
     beginResetModel();
     m_groups.clear();
     endResetModel();
+    m_searchText.clear();
+    rebuildVisibleGroups();
     m_hideUnchecked = false;
     if (hideUncheckedStateChanged) {
         emit hideUncheckedChanged();
@@ -720,6 +754,32 @@ void SourceGroupsModel::clearLoadedGroups()
 void SourceGroupsModel::applyDraftStateForCurrentProfile()
 {
     reload();
+}
+
+void SourceGroupsModel::rebuildVisibleGroups()
+{
+    QVariantList visibleGroups;
+    QStringList visibleIds;
+    const auto query = m_searchText.trimmed().toLower();
+    for (const auto &group : m_groups) {
+        const auto matchesSearch = query.isEmpty() || group.name.toLower().contains(query);
+        const auto passesHideFilter = !m_hideUnchecked || group.selected;
+        if (!matchesSearch || !passesHideFilter) {
+            continue;
+        }
+
+        visibleGroups.push_back(QVariantMap {
+            { QStringLiteral("id"), group.id },
+            { QStringLiteral("name"), group.name },
+            { QStringLiteral("count"), group.count },
+            { QStringLiteral("selected"), group.selected }
+        });
+        visibleIds.push_back(group.id);
+    }
+
+    m_visibleGroups = std::move(visibleGroups);
+    m_visibleGroupIds = std::move(visibleIds);
+    emit visibleGroupsChanged();
 }
 
 void SourceGroupsModel::updateDraftStateForCurrentProfile()

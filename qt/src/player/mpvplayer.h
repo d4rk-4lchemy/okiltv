@@ -27,6 +27,7 @@ public:
         double cacheLimitSeconds;
         double hysteresisSeconds;
         qint64 maxBytes;
+        qint64 maxBackBytes;
     };
 
     explicit MpvPlayer(QObject *parent = nullptr);
@@ -34,6 +35,7 @@ public:
 
     static qint64 demuxerMaxBytesForBufferSeconds(double bufferSeconds);
     static double cacheWindowSecondsForBufferTarget(double bufferTargetSeconds);
+    static double steadyStateBackBufferSeconds();
     static double steadyStateCacheLimitSecondsForBufferTarget(double bufferTargetSeconds);
     static double steadyStateCacheHysteresisSecondsForBufferTarget(double bufferTargetSeconds);
 
@@ -47,6 +49,7 @@ public:
 
     QString diagnostics() const;
     bool isAvailable() const;
+    bool catchupStreamProtocolAvailable() const;
 
     void setRenderUpdateTarget(QObject *target);
 
@@ -72,6 +75,7 @@ public:
     std::optional<double> demuxerCacheDurationSeconds() const;
     std::optional<std::pair<double, double>> demuxerSeekableRangeSeconds() const;
     std::optional<double> cacheSpeedBytesPerSecond() const;
+    std::optional<bool> demuxerCacheReaderEof() const;
     double bufferTargetSeconds() const;
     std::optional<int> videoWidth() const;
     std::optional<int> videoHeight() const;
@@ -106,6 +110,8 @@ signals:
     void videoReconfigured();
     void pauseStateChanged(bool paused);
     void bufferingStateChanged(bool buffering);
+    void playbackRestarted();
+    void playbackStopped();
     void playbackEnded();
     void errorOccurred(const QString &message);
 
@@ -140,6 +146,7 @@ private:
     bool loadApi();
     QString resolvedLibraryPath() const;
     bool ensureRenderContext();
+    bool registerCatchupStreamProtocol();
     void startEventThread();
     void processEvents();
     void refreshCachedTelemetryFast();
@@ -171,6 +178,7 @@ private:
     double m_steadyStateCacheLimitSeconds { 6.0 };
     double m_steadyStateCacheHysteresisSeconds { 5.0 };
     qint64 m_steadyStateDemuxerMaxBytes { static_cast<qint64>(96) * 1024 * 1024 };
+    qint64 m_steadyStateDemuxerMaxBackBytes { static_cast<qint64>(64) * 1024 * 1024 };
     QString m_userAgent;
     bool m_startupBufferingStrictMode { true };
     bool m_reinitializePending { false };

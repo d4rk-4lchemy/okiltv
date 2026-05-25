@@ -249,13 +249,15 @@ void CoreTests::settingsCompatibilityRoundTrips()
 
     SettingsManager settings(settingsPath);
     settings.load();
+    const auto activeProfile = settings.activeProfile();
 
     QVERIFY(settings.current().activeProfileId.has_value());
     QCOMPARE(guidToString(settings.current().activeProfileId.value()), QStringLiteral("0d9e36cc-4d10-4f54-bf08-326a5ca2d7f9"));
-    QCOMPARE(settings.current().profiles.first().m3uUrl, QStringLiteral("https://example.com/playlist.m3u"));
-    QCOMPARE(settings.current().profiles.first().type, ProfileType::M3UUrl);
-    QCOMPARE(settings.current().profiles.first().xtreamServerTimezone, QStringLiteral("Asia/Dubai"));
-    QCOMPARE(settings.current().profiles.first().autoRefreshIntervalHours, 12);
+    QVERIFY(activeProfile.has_value());
+    QCOMPARE(activeProfile->m3uUrl, QStringLiteral("https://example.com/playlist.m3u"));
+    QCOMPARE(activeProfile->type, ProfileType::M3UUrl);
+    QCOMPARE(activeProfile->xtreamServerTimezone, QStringLiteral("Asia/Dubai"));
+    QCOMPARE(activeProfile->autoRefreshIntervalHours, 12);
     QCOMPARE(settings.current().lastSection, QStringLiteral("guide"));
     QCOMPARE(settings.current().preventDisplaySleep, false);
     QCOMPARE(settings.current().guidePreviewEnabled, false);
@@ -326,11 +328,8 @@ void CoreTests::settingsCompatibilityRoundTrips()
     QCOMPARE(document.object().value(QStringLiteral("multiviewMaxTiles")).toInt(), 9);
     QCOMPARE(document.object().value(QStringLiteral("multiviewPreferHwdec")).toBool(), false);
     QCOMPARE(document.object().value(QStringLiteral("multiviewRetainSelectionOnPromotion")).toBool(), true);
-    QVERIFY(document.object().value(QStringLiteral("profiles")).toArray().first().toObject().contains(QStringLiteral("m3UUrl")));
-    QVERIFY(document.object().value(QStringLiteral("profiles")).toArray().first().toObject().contains(QStringLiteral("xtreamServerTimezone")));
-    QVERIFY(document.object().value(QStringLiteral("profiles")).toArray().first().toObject().contains(QStringLiteral("autoRefreshIntervalHours")));
-    QCOMPARE(document.object().value(QStringLiteral("profiles")).toArray().first().toObject().value(QStringLiteral("autoRefreshIntervalHours")).toInt(), 12);
-    QCOMPARE(document.object().value(QStringLiteral("profiles")).toArray().first().toObject().value(QStringLiteral("type")).toInt(), 1);
+    QVERIFY(document.object().value(QStringLiteral("profilesMigratedToSourceStore")).toBool(false));
+    QCOMPARE(document.object().value(QStringLiteral("profiles")).toArray().size(), 0);
 }
 
 void CoreTests::settingsCompatibilityDefaultsNewPlayerTuningFields()
@@ -1209,6 +1208,32 @@ void CoreTests::catchupUrlResolverBuildsXtreamAndM3uTargets()
     QCOMPARE(
         xtreamInvalidTimezoneTarget->url,
         QStringLiteral("https://xtream.example/timeshift/bob/pw/43/2026-03-17:18-00/99.m3u8"));
+
+    EpgEntry liveProgram;
+    liveProgram.start = QDateTime::currentDateTimeUtc().addSecs(-60 * 60);
+    liveProgram.stop = QDateTime::currentDateTimeUtc().addSecs(40 * 60);
+    const auto beforeResolve = QDateTime::currentDateTimeUtc();
+    const auto liveTarget = xtreamResolver.resolve(xtreamChannel, liveProgram);
+    const auto afterResolve = QDateTime::currentDateTimeUtc();
+    QVERIFY(liveTarget.has_value());
+    const QRegularExpression durationPattern(
+        QStringLiteral(R"(/timeshift/[^/]+/[^/]+/(\d+)/\d{4}-\d{2}-\d{2}:\d{2}-\d{2}/)"));
+    const auto match = durationPattern.match(liveTarget->url);
+    QVERIFY(match.hasMatch());
+    bool parsedDurationOk = false;
+    const auto observedDurationMinutes = match.captured(1).toLongLong(&parsedDurationOk);
+    QVERIFY(parsedDurationOk);
+    const auto startMinuteEpoch = static_cast<qint64>(std::floor(static_cast<double>(liveProgram.start.toUTC().toSecsSinceEpoch()) / 60.0));
+    const auto expectedLowerBound = std::max<qint64>(
+        1,
+        static_cast<qint64>(std::floor(static_cast<double>(beforeResolve.addSecs(-65).toSecsSinceEpoch()) / 60.0))
+            - startMinuteEpoch);
+    const auto expectedUpperBound = std::max<qint64>(
+        1,
+        static_cast<qint64>(std::floor(static_cast<double>(afterResolve.addSecs(-65).toSecsSinceEpoch()) / 60.0))
+            - startMinuteEpoch);
+    QVERIFY(observedDurationMinutes >= expectedLowerBound);
+    QVERIFY(observedDurationMinutes <= expectedUpperBound);
 
     Channel m3uChannel;
     m3uChannel.source = ChannelSource::M3U;

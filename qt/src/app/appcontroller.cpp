@@ -28,9 +28,11 @@
 #include <QNetworkRequest>
 #include <QProcessEnvironment>
 #include <QQuickWindow>
+#include <QRegularExpression>
 #include <QSet>
 #include <QSysInfo>
 #include <QTimer>
+#include <QTimeZone>
 
 #include <algorithm>
 #include <cmath>
@@ -44,6 +46,7 @@ namespace {
 constexpr auto kFavouritesCategoryId = "__favourites__";
 constexpr int kNewSourceAutoSelectThreshold = 20;
 constexpr int kWatchStatsFlushIntervalMs = 60 * 1000;
+constexpr int kCatchupMinElapsedSeconds = 10 * 60;
 
 struct LoadProfileResult
 {
@@ -129,6 +132,28 @@ QString formatEpoch(const QDateTime &value)
     return value.isValid() ? QString::number(value.toUTC().toSecsSinceEpoch()) : QStringLiteral("<invalid>");
 }
 
+std::optional<QRegularExpressionMatch> matchXtreamTimeshiftUrl(const QString &url)
+{
+    static const QRegularExpression pattern(
+        QStringLiteral(R"(^(.*?/timeshift/[^/?#]+/[^/?#]+/)(\d+)/(\d{4}-\d{2}-\d{2}:\d{2}-\d{2})/([^/?#]+)([?#].*)?$)"),
+        QRegularExpression::CaseInsensitiveOption);
+    const auto match = pattern.match(url.trimmed());
+    if (!match.hasMatch()) {
+        return std::nullopt;
+    }
+    return match;
+}
+
+QString shiftedXtreamTimestamp(const QString &timestamp, const qint64 offsetSeconds)
+{
+    auto parsed = QDateTime::fromString(timestamp, QStringLiteral("yyyy-MM-dd:HH-mm"));
+    if (!parsed.isValid()) {
+        return {};
+    }
+    parsed.setTimeZone(QTimeZone::UTC);
+    return parsed.addSecs(offsetSeconds).toString(QStringLiteral("yyyy-MM-dd:HH-mm"));
+}
+
 QString resolveCatchupRedirectIfPresent(const QString &url, const int timeoutMs, bool *redirectApplied, QString *errorText)
 {
     if (redirectApplied != nullptr) {
@@ -200,6 +225,7 @@ QString resolveCatchupRedirectIfPresent(const QString &url, const int timeoutMs,
 }
 
 CatchupValidation validateCatchupRequest(
+    const SettingsManager *settingsManager,
     const AppSettings &settings,
     const ChannelListModel *channelListModel,
     const QVariantMap &channelVariant,
@@ -277,11 +303,17 @@ CatchupValidation validateCatchupRequest(
         return validation;
     }
 
-    for (const auto &profile : settings.profiles) {
-        if (profile.id == resolvedChannel->profileId) {
-            validation.profile = profile;
-            break;
+    const auto isRunningProgram = program.start < now && now < program.stop;
+    if (isRunningProgram) {
+        const auto elapsedSeconds = std::max<qint64>(0, program.start.secsTo(now));
+        if (elapsedSeconds <= kCatchupMinElapsedSeconds) {
+            validation.reason = QStringLiteral("Catch-up becomes available after 10 minutes of programme runtime.");
+            return validation;
         }
+    }
+
+    if (settingsManager != nullptr) {
+        validation.profile = settingsManager->profileById(resolvedChannel->profileId);
     }
 
     validation.enabled = true;
@@ -522,6 +554,11 @@ bool AppController::epgCacheBootstrapPending() const
     return m_epgCacheBootstrapPending;
 }
 
+int AppController::catchupMinElapsedSeconds() const
+{
+    return kCatchupMinElapsedSeconds;
+}
+
 void AppController::initialize()
 {
     Core::DebugLogger::instance().log(
@@ -543,8 +580,8 @@ void AppController::initialize()
         m_settings->current().remuxRecordingsToMkv);
 
     auto preferencesChanged = false;
-    for (const auto &profile : m_settings->current().profiles) {
-        preferencesChanged = syncProfileGroupPreferences(profile.id, m_database->loadChannels(profile.id))
+    for (const auto &summary : m_settings->sourceSummaries()) {
+        preferencesChanged = syncProfileGroupPreferences(summary.id, m_database->loadChannels(summary.id))
             || preferencesChanged;
     }
     if (preferencesChanged) {
@@ -674,19 +711,18 @@ void AppController::loadProfile(const QString &profileId)
 
                 syncProfileGroupPreferences(result.profile.id, result.channels);
                 const auto activeProfileBeforeSave = activeProfileId();
-                for (auto &profile : m_settings->current().profiles) {
-                    if (profile.id == result.profile.id) {
-                        if (result.sourceRefreshSucceeded) {
-                            profile.lastRefreshed = result.profile.lastRefreshed;
-                        }
-                        if (!result.profile.xtreamServerTimezone.trimmed().isEmpty()) {
-                            profile.xtreamServerTimezone = result.profile.xtreamServerTimezone.trimmed();
-                        }
-                    }
+                if (result.sourceRefreshSucceeded) {
+                    m_settings->setProfileLastRefreshed(result.profile.id, result.profile.lastRefreshed);
+                    m_settings->setProfileGroupCount(result.profile.id, result.categories.size());
+                }
+                if (!result.profile.xtreamServerTimezone.trimmed().isEmpty()) {
+                    m_settings->setProfileXtreamServerTimezone(
+                        result.profile.id,
+                        result.profile.xtreamServerTimezone.trimmed());
                 }
 
                 if (!m_settings->current().activeProfileId.has_value()
-                    && m_settings->current().profiles.size() == 1) {
+                    && m_settings->sourceSummaries().size() == 1) {
                     m_settings->setActiveProfileId(result.profile.id);
                 }
 
@@ -932,31 +968,32 @@ void AppController::triggerScheduledSourceAutoRefresh()
 
     const auto nowUtc = QDateTime::currentDateTimeUtc();
     QStringList dueProfileIds;
-    dueProfileIds.reserve(m_settings->current().profiles.size());
+    const auto sourceSummaries = m_settings->sourceSummaries();
+    dueProfileIds.reserve(sourceSummaries.size());
 
-    for (const auto &profile : m_settings->current().profiles) {
-        if (profile.type == ProfileType::M3UFile) {
+    for (const auto &summary : sourceSummaries) {
+        if (summary.type == ProfileType::M3UFile) {
             continue;
         }
 
-        const auto intervalHours = std::max(0, profile.autoRefreshIntervalHours);
+        const auto intervalHours = std::max(0, summary.autoRefreshIntervalHours);
         if (intervalHours == 0) {
             continue;
         }
 
-        if (!profile.lastRefreshed.isValid()) {
-            dueProfileIds.push_back(guidToString(profile.id));
+        if (!summary.lastRefreshed.isValid()) {
+            dueProfileIds.push_back(guidToString(summary.id));
             continue;
         }
 
-        const auto elapsedSeconds = profile.lastRefreshed.toUTC().secsTo(nowUtc);
+        const auto elapsedSeconds = summary.lastRefreshed.toUTC().secsTo(nowUtc);
         if (elapsedSeconds < 0) {
             continue;
         }
 
         const auto intervalSeconds = static_cast<qint64>(intervalHours) * 60 * 60;
         if (elapsedSeconds >= intervalSeconds) {
-            dueProfileIds.push_back(guidToString(profile.id));
+            dueProfileIds.push_back(guidToString(summary.id));
         }
     }
 
@@ -1323,7 +1360,7 @@ bool AppController::activatePreviousChannel()
 
 QVariantMap AppController::catchupActionState(const QVariantMap &channel, const QVariantMap &program) const
 {
-    const auto validation = validateCatchupRequest(m_settings->current(), m_channelListModel, channel, program);
+    const auto validation = validateCatchupRequest(m_settings, m_settings->current(), m_channelListModel, channel, program);
     return {
         { QStringLiteral("visible"), validation.visible },
         { QStringLiteral("enabled"), validation.enabled },
@@ -1333,6 +1370,14 @@ QVariantMap AppController::catchupActionState(const QVariantMap &channel, const 
 
 void AppController::playCatchup(const QVariantMap &channelVariant, const QVariantMap &programVariant)
 {
+    playCatchupAtOffset(channelVariant, programVariant, -1.0);
+}
+
+void AppController::playCatchupAtOffset(
+    const QVariantMap &channelVariant,
+    const QVariantMap &programVariant,
+    const double targetSeconds)
+{
     DebugLogger::instance().log(
         QStringLiteral("catchup.resolve.input"),
         QStringLiteral("rawStart=%1 rawStop=%2 channelId=%3 profileId=%4")
@@ -1341,6 +1386,7 @@ void AppController::playCatchup(const QVariantMap &channelVariant, const QVarian
                  channelVariant.value(QStringLiteral("id")).toString(),
                  channelVariant.value(QStringLiteral("profileId")).toString()));
     const auto validation = validateCatchupRequest(
+        m_settings,
         m_settings->current(),
         m_channelListModel,
         channelVariant,
@@ -1381,9 +1427,42 @@ void AppController::playCatchup(const QVariantMap &channelVariant, const QVarian
     const auto catchupProgram = validation.program.value();
     const auto playbackTarget = target.value();
     const auto catchupGeneration = ++m_catchupPlayGeneration;
-    auto startCatchupPlayback = [this, catchupChannel, catchupProgram, playbackTarget, resolvedCatchupUrl](
+    const auto requestedSeekSeconds = std::isfinite(targetSeconds) && targetSeconds >= 0.0
+        ? std::optional<double>(targetSeconds)
+        : std::nullopt;
+    QString initialCatchupUrl = resolvedCatchupUrl;
+    std::optional<double> initialStreamBaseOffsetSeconds = std::nullopt;
+    std::optional<double> initialTimelinePositionSeconds = requestedSeekSeconds;
+    auto initialSeekSeconds = requestedSeekSeconds;
+    if (requestedSeekSeconds.has_value() && matchXtreamTimeshiftUrl(resolvedCatchupUrl).has_value()) {
+        const auto match = matchXtreamTimeshiftUrl(resolvedCatchupUrl).value();
+        const auto catchupAvailableSeconds = std::max<qint64>(
+            0,
+            playbackTarget.programStartUtc.toUTC().secsTo(std::min(QDateTime::currentDateTimeUtc(), playbackTarget.programStopUtc.toUTC())));
+        const auto boundedTargetSeconds = std::max(0.0, std::min(static_cast<double>(catchupAvailableSeconds), requestedSeekSeconds.value()));
+        initialTimelinePositionSeconds = boundedTargetSeconds;
+        const auto minuteOffsetSeconds = static_cast<qint64>(std::floor(boundedTargetSeconds / 60.0)) * 60LL;
+        const auto shiftedTimestamp = shiftedXtreamTimestamp(match.captured(3), minuteOffsetSeconds);
+        if (!shiftedTimestamp.isEmpty()) {
+            auto parsedOriginDurationMinutes = false;
+            const auto originDurationMinutes = match.captured(2).toLongLong(&parsedOriginDurationMinutes);
+            const auto minuteOffsetMinutes = minuteOffsetSeconds / 60LL;
+            const auto durationMinutes = parsedOriginDurationMinutes
+                ? std::max<qint64>(1, originDurationMinutes - minuteOffsetMinutes)
+                : 1LL;
+            initialCatchupUrl = QStringLiteral("%1%2/%3/%4%5")
+                                    .arg(match.captured(1))
+                                    .arg(durationMinutes)
+                                    .arg(shiftedTimestamp)
+                                    .arg(match.captured(4))
+                                    .arg(match.captured(5));
+            initialStreamBaseOffsetSeconds = static_cast<double>(minuteOffsetSeconds);
+            initialSeekSeconds = std::nullopt;
+        }
+    }
+    auto startCatchupPlayback = [this, catchupChannel, catchupProgram, playbackTarget, resolvedCatchupUrl, initialCatchupUrl, initialSeekSeconds, initialStreamBaseOffsetSeconds, initialTimelinePositionSeconds](
                                     const quint64 generation,
-                                    const QString &effectiveCatchupUrl,
+                                    const QString &resolvedInitialUrl,
                                     const bool redirectApplied,
                                     const QString &redirectResolutionError) {
         if (generation != m_catchupPlayGeneration) {
@@ -1399,16 +1478,22 @@ void AppController::playCatchup(const QVariantMap &channelVariant, const QVarian
             QStringLiteral("Starting catch-up playback for %1 (source=%2 effective=%3 redirectApplied=%4 reason=%5).")
                 .arg(catchupChannel.name,
                      redactSensitiveUrl(resolvedCatchupUrl),
-                     redactSensitiveUrl(effectiveCatchupUrl),
+                     redactSensitiveUrl(resolvedInitialUrl),
                      redirectApplied ? QStringLiteral("true") : QStringLiteral("false"),
                      redirectResolutionError.trimmed().isEmpty() ? QStringLiteral("none") : redirectResolutionError.trimmed()));
+        if (m_multiViewController != nullptr && m_multiViewController->layoutMode() != QStringLiteral("off")) {
+            m_multiViewController->setLayoutMode(QStringLiteral("off"));
+        }
         m_playerController->playCatchupChannel(
             catchupChannel,
-            effectiveCatchupUrl,
+            resolvedInitialUrl,
             catchupProgramLabel(catchupProgram),
             playbackTarget.programStartUtc,
             playbackTarget.programStopUtc,
-            resolvedCatchupUrl);
+            resolvedCatchupUrl,
+            initialSeekSeconds,
+            initialStreamBaseOffsetSeconds,
+            initialTimelinePositionSeconds);
 
         if (m_shellController->activeOverlay() == QStringLiteral("guide")) {
             m_shellController->clearOverlay();
@@ -1418,15 +1503,15 @@ void AppController::playCatchup(const QVariantMap &channelVariant, const QVarian
     const auto shouldResolveRedirect =
         validation.profile.has_value() && validation.profile->type == ProfileType::Xtream;
     if (!shouldResolveRedirect) {
-        startCatchupPlayback(catchupGeneration, resolvedCatchupUrl, false, QString {});
+        startCatchupPlayback(catchupGeneration, initialCatchupUrl, false, QString {});
         return;
     }
 
-    m_backgroundTasks.addFuture(QtConcurrent::run([this, catchupGeneration, resolvedCatchupUrl, startCatchupPlayback]() {
+    m_backgroundTasks.addFuture(QtConcurrent::run([this, catchupGeneration, initialCatchupUrl, startCatchupPlayback]() {
         bool redirectApplied = false;
         QString redirectResolutionError;
         const auto effectiveCatchupUrl = resolveCatchupRedirectIfPresent(
-            resolvedCatchupUrl,
+            initialCatchupUrl,
             1800,
             &redirectApplied,
             &redirectResolutionError);

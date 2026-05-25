@@ -57,6 +57,7 @@ private:
     QTimer m_windowsRenderStatsTimer;
     QPointer<QQuickWindow> m_boundWindow;
     QMetaObject::Connection m_isPlayingChangedConnection;
+    QMetaObject::Connection m_playbackPlayerObjectChangedConnection;
     QMetaObject::Connection m_windowVisibilityChangedConnection;
     bool m_windowedRenderHeartbeatEnabled { false };
     bool m_windowsPacingDiagEnabled { false };

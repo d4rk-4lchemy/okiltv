@@ -38,6 +38,7 @@ class AppController final : public QObject
     Q_PROPERTY(QString epgLastRefreshText READ epgLastRefreshText NOTIFY epgRefreshStateChanged)
     Q_PROPERTY(bool epgRefreshInProgress READ epgRefreshInProgress NOTIFY epgRefreshStateChanged)
     Q_PROPERTY(bool epgCacheBootstrapPending READ epgCacheBootstrapPending NOTIFY epgRefreshStateChanged)
+    Q_PROPERTY(int catchupMinElapsedSeconds READ catchupMinElapsedSeconds CONSTANT)
 
 public:
     ~AppController() override;
@@ -67,6 +68,7 @@ public:
     QString epgLastRefreshText() const;
     bool epgRefreshInProgress() const;
     bool epgCacheBootstrapPending() const;
+    int catchupMinElapsedSeconds() const;
 
 public slots:
     void initialize();
@@ -75,6 +77,7 @@ public slots:
     Q_INVOKABLE void refreshActiveEpg();
     Q_INVOKABLE bool activatePreviousChannel();
     Q_INVOKABLE void playCatchup(const QVariantMap &channel, const QVariantMap &program);
+    Q_INVOKABLE void playCatchupAtOffset(const QVariantMap &channel, const QVariantMap &program, double targetSeconds);
     Q_INVOKABLE QVariantMap catchupActionState(const QVariantMap &channel, const QVariantMap &program) const;
     void dumpDebugReport();
     Q_INVOKABLE QString debugSummary() const;

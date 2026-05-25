@@ -258,6 +258,41 @@ ServerProfile serverProfileFromJson(const QJsonObject &object)
     return profile;
 }
 
+QJsonObject toJson(const SourceSummary &summary)
+{
+    QJsonObject object;
+    object.insert(QStringLiteral("id"), guidToString(summary.id));
+    object.insert(QStringLiteral("name"), summary.name);
+    object.insert(QStringLiteral("type"), profileTypeToInt(summary.type));
+    object.insert(
+        QStringLiteral("autoRefreshIntervalHours"),
+        normalizeAutoRefreshIntervalHours(summary.autoRefreshIntervalHours));
+    object.insert(QStringLiteral("xtreamServerTimezone"), summary.xtreamServerTimezone);
+    object.insert(QStringLiteral("lastRefreshed"), dateTimeToJsonString(summary.lastRefreshed));
+    object.insert(QStringLiteral("groupCount"), std::max(0, summary.groupCount));
+    object.insert(QStringLiteral("isActive"), summary.isActive);
+    return object;
+}
+
+SourceSummary sourceSummaryFromJson(const QJsonObject &object)
+{
+    SourceSummary summary;
+    summary.id = parseGuid(object.value(QStringLiteral("id")).toString());
+    if (summary.id.isNull()) {
+        summary.id = QUuid::createUuid();
+    }
+
+    summary.name = object.value(QStringLiteral("name")).toString();
+    summary.type = profileTypeFromJsonValue(object.value(QStringLiteral("type")));
+    summary.autoRefreshIntervalHours = normalizeAutoRefreshIntervalHours(
+        object.value(QStringLiteral("autoRefreshIntervalHours")).toInt(summary.autoRefreshIntervalHours));
+    summary.xtreamServerTimezone = object.value(QStringLiteral("xtreamServerTimezone")).toString().trimmed();
+    summary.lastRefreshed = dateTimeFromJsonValue(object.value(QStringLiteral("lastRefreshed")));
+    summary.groupCount = std::max(0, object.value(QStringLiteral("groupCount")).toInt(0));
+    summary.isActive = object.value(QStringLiteral("isActive")).toBool(false);
+    return summary;
+}
+
 QJsonObject toJson(const AppSettings &settings)
 {
     QJsonObject object;

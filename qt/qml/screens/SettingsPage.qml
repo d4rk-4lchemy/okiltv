@@ -130,6 +130,11 @@ Item {
         return Number.isNaN(parsed) ? NaN : parsed
     }
 
+    function decimalInputInRange(rawText, minimumValue, maximumValue) {
+        const parsed = root.parseDecimalInput(rawText)
+        return !Number.isNaN(parsed) && parsed >= minimumValue && parsed <= maximumValue
+    }
+
     function formatDecimalInput(value) {
         const parsed = Number(value)
         if (Number.isNaN(parsed)) {
@@ -950,7 +955,7 @@ Item {
                                 spacing: 4
 
                                 Text {
-                                    text: "Guide past window"
+                                    text: "EPG look-back"
                                     color: Theme.textPrimary
                                     font.pixelSize: 14
                                     font.bold: true
@@ -1128,19 +1133,21 @@ Item {
                             Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
                             Layout.preferredWidth: root.numericFieldWidth
                             inputMethodHints: Qt.ImhFormattedNumbersOnly
-                            validator: DoubleValidator {
-                                bottom: 0.1
-                                top: 120.0
-                                decimals: 1
-                                notation: DoubleValidator.StandardNotation
+                            validator: RegularExpressionValidator {
+                                regularExpression: /^\d{0,3}([.,]\d?)?$/
                             }
                             onTextEdited: {
-                                const parsed = root.parseDecimalInput(text)
-                                if (!Number.isNaN(parsed)) {
+                                if (root.decimalInputInRange(text, 0.1, 120.0)) {
+                                    const parsed = root.parseDecimalInput(text)
                                     root.settings.waitForDataStreamSeconds = parsed
                                 }
                             }
-                            onEditingFinished: text = root.formatDecimalInput(root.settings.waitForDataStreamSeconds)
+                            onEditingFinished: {
+                                if (root.decimalInputInRange(text, 0.1, 120.0)) {
+                                    root.settings.waitForDataStreamSeconds = root.parseDecimalInput(text)
+                                }
+                                text = root.formatDecimalInput(root.settings.waitForDataStreamSeconds)
+                            }
 
                             Binding {
                                 target: waitForStreamField
@@ -1230,19 +1237,21 @@ Item {
                             Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
                             Layout.preferredWidth: root.numericFieldWidth
                             inputMethodHints: Qt.ImhFormattedNumbersOnly
-                            validator: DoubleValidator {
-                                bottom: 0.1
-                                top: 60.0
-                                decimals: 1
-                                notation: DoubleValidator.StandardNotation
+                            validator: RegularExpressionValidator {
+                                regularExpression: /^\d{0,2}([.,]\d?)?$/
                             }
                             onTextEdited: {
-                                const parsed = root.parseDecimalInput(text)
-                                if (!Number.isNaN(parsed)) {
+                                if (root.decimalInputInRange(text, 0.1, 60.0)) {
+                                    const parsed = root.parseDecimalInput(text)
                                     root.settings.bufferSizeSeconds = parsed
                                 }
                             }
-                            onEditingFinished: text = root.formatDecimalInput(root.settings.bufferSizeSeconds)
+                            onEditingFinished: {
+                                if (root.decimalInputInRange(text, 0.1, 60.0)) {
+                                    root.settings.bufferSizeSeconds = root.parseDecimalInput(text)
+                                }
+                                text = root.formatDecimalInput(root.settings.bufferSizeSeconds)
+                            }
 
                             Binding {
                                 target: bufferSizeField
