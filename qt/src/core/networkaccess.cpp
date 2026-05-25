@@ -110,11 +110,16 @@ QByteArray BlockingNetworkAccess::get(const QUrl &url) const
     loop.exec();
     timer.stop();
 
-    const auto payload = reply->readAll();
     const auto error = reply->error();
     const auto errorString = reply->errorString();
     const auto statusCode =
         reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    QByteArray payload;
+    if (!timedOut && reply->isOpen()) {
+        // Timeout path aborts/closes reply; reading from a closed reply emits
+        // Qt warning noise: "QIODevice::read ... device not open".
+        payload = reply->readAll();
+    }
     reply->deleteLater();
 
     auto replyObservation = makeObservation(url);

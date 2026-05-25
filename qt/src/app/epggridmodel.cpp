@@ -1,6 +1,7 @@
 #include "epggridmodel.h"
 
 #include <QtConcurrent>
+#include <QTimer>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -14,8 +15,9 @@ namespace {
 
 constexpr int kViewportMinDurationMinutes = 60;
 constexpr int kViewportTimePrefetchMinutes = 120;
-constexpr int kViewportRowPrefetch = 3;
+constexpr int kViewportRowPrefetch = 12;
 constexpr int kViewportRangeBucketMinutes = 30;
+constexpr int kOffscreenWarmupDelayMs = 100;
 constexpr qint64 kSecondsPerMinute = 60;
 constexpr qint64 kSecondsPerHour = 60 * kSecondsPerMinute;
 
@@ -572,6 +574,7 @@ void EpgGridModel::setVisibleRowRange(int firstRow, int lastRow)
 
     if (previousFirst < 0 || previousLast < previousFirst) {
         emitProgramsChangedForRange(m_visibleRowStart, m_visibleRowEnd);
+        scheduleOffscreenRowWarmup();
         return;
     }
 
@@ -581,6 +584,8 @@ void EpgGridModel::setVisibleRowRange(int firstRow, int lastRow)
     if (m_visibleRowEnd > previousLast) {
         emitProgramsChangedForRange(previousLast + 1, m_visibleRowEnd);
     }
+
+    scheduleOffscreenRowWarmup();
 }
 
 void EpgGridModel::emitProgramsChangedForRow(const int row)
@@ -623,6 +628,49 @@ void EpgGridModel::emitProgramsChangedForVisibleRows()
 void EpgGridModel::invalidateProgramTilesCache()
 {
     m_programTilesCacheByRow.clear();
+}
+
+void EpgGridModel::scheduleOffscreenRowWarmup()
+{
+    if (m_rows.isEmpty() || m_visibleRowStart < 0 || m_visibleRowEnd < m_visibleRowStart) {
+        return;
+    }
+
+    const auto generation = ++m_rowWarmupGeneration;
+    QTimer::singleShot(kOffscreenWarmupDelayMs, this, [this, generation]() {
+        if (generation != m_rowWarmupGeneration) {
+            return;
+        }
+
+        if (m_rows.isEmpty() || m_visibleRowStart < 0 || m_visibleRowEnd < m_visibleRowStart) {
+            return;
+        }
+
+        const auto from = std::max(0, m_visibleRowStart - kViewportRowPrefetch);
+        const auto to = std::min(static_cast<int>(m_rows.size()) - 1, m_visibleRowEnd + kViewportRowPrefetch);
+        warmProgramTilesForRows(from, to);
+    });
+}
+
+void EpgGridModel::warmProgramTilesForRows(int firstRow, int lastRow)
+{
+    if (m_rows.isEmpty()) {
+        return;
+    }
+
+    firstRow = std::clamp(firstRow, 0, static_cast<int>(m_rows.size()) - 1);
+    lastRow = std::clamp(lastRow, 0, static_cast<int>(m_rows.size()) - 1);
+    if (lastRow < firstRow) {
+        return;
+    }
+
+    for (auto rowIndex = firstRow; rowIndex <= lastRow; ++rowIndex) {
+        if (m_programTilesCacheByRow.contains(rowIndex)) {
+            continue;
+        }
+        const auto &row = m_rows.at(rowIndex);
+        buildPrograms(rowIndex, row);
+    }
 }
 
 void EpgGridModel::applyRows(
@@ -680,6 +728,7 @@ void EpgGridModel::applyRows(
     emit visibleTimeSlotsChanged();
     emit windowChanged();
     emit selectedProgramChanged();
+    scheduleOffscreenRowWarmup();
 }
 
 QList<EpgGridModel::Row> EpgGridModel::buildRows(

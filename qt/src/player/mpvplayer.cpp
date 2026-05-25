@@ -2,6 +2,7 @@
 
 #include "../core/models.h"
 #include "../core/debuglogger.h"
+#include "catchupstreamsession.h"
 
 #include <QCoreApplication>
 #include <QFileInfo>
@@ -17,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <type_traits>
 
 namespace OKILTV::Player {
@@ -125,6 +127,16 @@ struct mpv_render_param
     void *data;
 };
 
+struct mpv_stream_cb_info
+{
+    void *cookie;
+    qint64 (*read_fn)(void *cookie, char *buf, quint64 nbytes);
+    qint64 (*seek_fn)(void *cookie, qint64 offset);
+    qint64 (*size_fn)(void *cookie);
+    void (*close_fn)(void *cookie);
+    void (*cancel_fn)(void *cookie);
+};
+
 struct mpv_node;
 struct mpv_node_list
 {
@@ -168,10 +180,12 @@ QString secondsOptionValue(const double value)
 }
 
 constexpr qint64 kMiB = 1024LL * 1024LL;
-constexpr qint64 kDemuxerMaxBytesFloor = 64 * kMiB;
-constexpr qint64 kDemuxerMaxBytesCeil = 512 * kMiB;
+constexpr qint64 kDemuxerMaxBytesFloor = 8 * kMiB;
+constexpr qint64 kDemuxerMaxBytesCeil = 8 * 1024 * kMiB;
 constexpr qint64 kSteadyStateDemuxerMaxBytesFloor = 8 * kMiB;
-constexpr double kDemuxerBytesPerSecond = 16.0 * static_cast<double>(kMiB);
+constexpr qint64 kSteadyStateDemuxerMaxBackBytesFloor = 8 * kMiB;
+constexpr double kDemuxerBytesPerSecond = 2.0 * static_cast<double>(kMiB);
+constexpr double kSteadyStateBackBufferSeconds = 30.0;
 constexpr double kMpvNetworkTimeoutFloorSeconds = 20.0;
 constexpr double kMpvNetworkTimeoutCeilSeconds = 300.0;
 constexpr double kMpvNetworkTimeoutWaitMultiplier = 6.0;
@@ -186,6 +200,69 @@ double effectiveMpvNetworkTimeoutSeconds(const double waitForDataStreamSeconds, 
     const auto derivedFromBuffer = normalizedBuffer * kMpvNetworkTimeoutBufferMultiplier;
     const auto timeoutSeconds = std::max({derivedFromWait, derivedFromBuffer, kMpvNetworkTimeoutFloorSeconds});
     return std::clamp(timeoutSeconds, kMpvNetworkTimeoutFloorSeconds, kMpvNetworkTimeoutCeilSeconds);
+}
+
+using CatchupSessionHandle = std::shared_ptr<CatchupStreamSession>;
+
+qint64 catchupStreamRead(void *cookie, char *buffer, const quint64 maxBytes)
+{
+    auto *handle = static_cast<CatchupSessionHandle *>(cookie);
+    if (handle == nullptr || !(*handle)) {
+        return -1;
+    }
+    return (*handle)->read(buffer, maxBytes);
+}
+
+qint64 catchupStreamSeek(void *, qint64)
+{
+    return -1;
+}
+
+qint64 catchupStreamSize(void *)
+{
+    return -1;
+}
+
+void catchupStreamClose(void *cookie)
+{
+    auto *handle = static_cast<CatchupSessionHandle *>(cookie);
+    if (handle == nullptr) {
+        return;
+    }
+    if (*handle) {
+        (*handle)->cancelRead();
+    }
+    delete handle;
+}
+
+void catchupStreamCancel(void *cookie)
+{
+    auto *handle = static_cast<CatchupSessionHandle *>(cookie);
+    if (handle != nullptr && *handle) {
+        (*handle)->cancelRead();
+    }
+}
+
+int catchupStreamOpen(void *, char *uri, mpv_stream_cb_info *info)
+{
+    if (uri == nullptr || info == nullptr) {
+        return -1;
+    }
+    auto session = CatchupStreamSession::find(QString::fromUtf8(uri));
+    if (!session) {
+        Core::DebugLogger::instance().log(
+            QStringLiteral("mpv"),
+            QStringLiteral("Catch-up stream callback open failed; unknown URI %1.")
+                .arg(QString::fromUtf8(uri)));
+        return -1;
+    }
+    info->cookie = new CatchupSessionHandle(std::move(session));
+    info->read_fn = catchupStreamRead;
+    info->seek_fn = catchupStreamSeek;
+    info->size_fn = catchupStreamSize;
+    info->close_fn = catchupStreamClose;
+    info->cancel_fn = catchupStreamCancel;
+    return 0;
 }
 
 } // namespace
@@ -212,6 +289,7 @@ struct MpvPlayer::Api
     using RenderContextRenderFn = int (*)(mpv_render_context *, mpv_render_param *);
     using RenderContextUpdateFn = quint64 (*)(mpv_render_context *);
     using RenderContextReportSwapFn = void (*)(mpv_render_context *);
+    using StreamCbAddRoFn = int (*)(mpv_handle *, const char *, void *, int (*)(void *, char *, mpv_stream_cb_info *));
 
     QLibrary library;
     CreateFn create = nullptr;
@@ -234,6 +312,7 @@ struct MpvPlayer::Api
     RenderContextRenderFn renderContextRender = nullptr;
     RenderContextUpdateFn renderContextUpdate = nullptr;
     RenderContextReportSwapFn renderContextReportSwap = nullptr;
+    StreamCbAddRoFn streamCbAddRo = nullptr;
 };
 
 struct MpvPlayer::State
@@ -281,17 +360,20 @@ double MpvPlayer::cacheWindowSecondsForBufferTarget(const double bufferTargetSec
     return std::clamp(std::max(normalizedTarget * 3.0, normalizedTarget + 8.0), 10.0, 120.0);
 }
 
+double MpvPlayer::steadyStateBackBufferSeconds()
+{
+    return kSteadyStateBackBufferSeconds;
+}
+
 double MpvPlayer::steadyStateCacheLimitSecondsForBufferTarget(const double bufferTargetSeconds)
 {
-    const auto normalizedTarget = Core::normalizePlayerBufferSeconds(bufferTargetSeconds);
-    return std::clamp(normalizedTarget + 3.0, 0.1, 120.0);
+    return Core::normalizePlayerBufferSeconds(bufferTargetSeconds);
 }
 
 double MpvPlayer::steadyStateCacheHysteresisSecondsForBufferTarget(const double bufferTargetSeconds)
 {
     const auto normalizedTarget = Core::normalizePlayerBufferSeconds(bufferTargetSeconds);
-    const auto cacheLimitSeconds = steadyStateCacheLimitSecondsForBufferTarget(bufferTargetSeconds);
-    return std::clamp(normalizedTarget + 2.0, 0.1, cacheLimitSeconds);
+    return std::clamp(roundToSingleDecimal(normalizedTarget - 1.0), 0.1, normalizedTarget);
 }
 
 void MpvPlayer::configureLibraryPath(const QString &path)
@@ -426,15 +508,19 @@ bool MpvPlayer::setSteadyStateBufferingPolicy(const SteadyStateBufferingPolicy &
         0.1,
         normalizedCacheLimitSeconds);
     const auto normalizedMaxBytes = std::clamp(policy.maxBytes, kSteadyStateDemuxerMaxBytesFloor, kDemuxerMaxBytesCeil);
+    const auto normalizedMaxBackBytes =
+        std::clamp(policy.maxBackBytes, kSteadyStateDemuxerMaxBackBytesFloor, normalizedMaxBytes);
 
     const auto changed =
         std::abs(m_steadyStateCacheLimitSeconds - normalizedCacheLimitSeconds) > 0.0001
         || std::abs(m_steadyStateCacheHysteresisSeconds - normalizedHysteresisSeconds) > 0.0001
-        || m_steadyStateDemuxerMaxBytes != normalizedMaxBytes;
+        || m_steadyStateDemuxerMaxBytes != normalizedMaxBytes
+        || m_steadyStateDemuxerMaxBackBytes != normalizedMaxBackBytes;
 
     m_steadyStateCacheLimitSeconds = normalizedCacheLimitSeconds;
     m_steadyStateCacheHysteresisSeconds = normalizedHysteresisSeconds;
     m_steadyStateDemuxerMaxBytes = normalizedMaxBytes;
+    m_steadyStateDemuxerMaxBackBytes = normalizedMaxBackBytes;
 
     QMutexLocker locker(&m_state->mutex);
     if (!changed || !m_state->initialized || m_state->handle == nullptr) {
@@ -446,24 +532,33 @@ bool MpvPlayer::setSteadyStateBufferingPolicy(const SteadyStateBufferingPolicy &
     const auto hysteresisOk =
         setRuntimeDoubleOption("demuxer-hysteresis-secs", m_steadyStateCacheHysteresisSeconds);
     const auto maxBytesOk = setRuntimeInt64Option("demuxer-max-bytes", m_steadyStateDemuxerMaxBytes);
+    const auto maxBackBytesOk =
+        setRuntimeInt64Option("demuxer-max-back-bytes", m_steadyStateDemuxerMaxBackBytes);
 
     Core::DebugLogger::instance().log(
         QStringLiteral("mpv"),
         QStringLiteral(
-            "Applied steady-state buffering policy: cache-limit=%1s hysteresis=%2s max-bytes=%3.")
+            "Applied steady-state buffering policy: cache-limit=%1s hysteresis=%2s max-bytes=%3 max-back-bytes=%4.")
             .arg(m_steadyStateCacheLimitSeconds, 0, 'f', 1)
             .arg(m_steadyStateCacheHysteresisSeconds, 0, 'f', 1)
-            .arg(m_steadyStateDemuxerMaxBytes));
+            .arg(m_steadyStateDemuxerMaxBytes)
+            .arg(m_steadyStateDemuxerMaxBackBytes));
 
-    return readaheadOk && cacheOk && hysteresisOk && maxBytesOk;
+    return readaheadOk && cacheOk && hysteresisOk && maxBytesOk && maxBackBytesOk;
 }
 
 void MpvPlayer::resetSteadyStateBuffering()
 {
     const auto cacheLimitSeconds = steadyStateCacheLimitSecondsForBufferTarget(m_bufferSeconds);
     const auto hysteresisSeconds = steadyStateCacheHysteresisSecondsForBufferTarget(m_bufferSeconds);
-    const auto maxBytes = demuxerMaxBytesForBufferSeconds(cacheLimitSeconds);
-    setSteadyStateBufferingPolicy({ .cacheLimitSeconds = cacheLimitSeconds, .hysteresisSeconds = hysteresisSeconds, .maxBytes = maxBytes });
+    const auto maxBackBytes = demuxerMaxBytesForBufferSeconds(steadyStateBackBufferSeconds());
+    const auto maxBytes = demuxerMaxBytesForBufferSeconds(cacheLimitSeconds + steadyStateBackBufferSeconds());
+    setSteadyStateBufferingPolicy({
+        .cacheLimitSeconds = cacheLimitSeconds,
+        .hysteresisSeconds = hysteresisSeconds,
+        .maxBytes = maxBytes,
+        .maxBackBytes = maxBackBytes,
+    });
 }
 
 QString MpvPlayer::diagnostics() const
@@ -474,6 +569,11 @@ QString MpvPlayer::diagnostics() const
 bool MpvPlayer::isAvailable() const
 {
     return QFileInfo::exists(resolvedLibraryPath()) || QFileInfo::exists(QCoreApplication::applicationDirPath() + u'/' + kLibraryName);
+}
+
+bool MpvPlayer::catchupStreamProtocolAvailable() const
+{
+    return m_api != nullptr && m_api->streamCbAddRo != nullptr;
 }
 
 void MpvPlayer::setRenderUpdateTarget(QObject *target)
@@ -540,9 +640,12 @@ bool MpvPlayer::ensureInitialized()
 
     m_steadyStateCacheLimitSeconds = steadyStateCacheLimitSecondsForBufferTarget(m_bufferSeconds);
     m_steadyStateCacheHysteresisSeconds = steadyStateCacheHysteresisSecondsForBufferTarget(m_bufferSeconds);
-    m_steadyStateDemuxerMaxBytes = demuxerMaxBytesForBufferSeconds(m_steadyStateCacheLimitSeconds);
+    m_steadyStateDemuxerMaxBackBytes = demuxerMaxBytesForBufferSeconds(steadyStateBackBufferSeconds());
+    m_steadyStateDemuxerMaxBytes =
+        demuxerMaxBytesForBufferSeconds(m_steadyStateCacheLimitSeconds + steadyStateBackBufferSeconds());
     const auto networkTimeoutSeconds = effectiveMpvNetworkTimeoutSeconds(m_waitForDataStreamSeconds, m_bufferSeconds);
     applyOption("demuxer-max-bytes", QString::number(m_steadyStateDemuxerMaxBytes));
+    applyOption("demuxer-max-back-bytes", QString::number(m_steadyStateDemuxerMaxBackBytes));
     applyOption("demuxer-readahead-secs", secondsOptionValue(m_steadyStateCacheLimitSeconds));
     applyOption("demuxer-hysteresis-secs", secondsOptionValue(m_steadyStateCacheHysteresisSeconds));
     applyOption("cache-secs", secondsOptionValue(m_steadyStateCacheLimitSeconds));
@@ -557,6 +660,7 @@ bool MpvPlayer::ensureInitialized()
     // Deinterlacing is controlled directly by the user setting. mpv/yadif decides per-frame
     // handling internally; app logic does not gate filter activation by source scan type.
     applyOption("deinterlace", m_deinterlaceEnabled ? QStringLiteral("yes") : QStringLiteral("no"));
+    registerCatchupStreamProtocol();
 
     const auto initCode = m_api->initialize(m_state->handle);
     if (initCode < 0) {
@@ -570,12 +674,13 @@ bool MpvPlayer::ensureInitialized()
     Core::DebugLogger::instance().log(
         QStringLiteral("mpv"),
         QStringLiteral(
-            "Configured stream tuning: wait-for-data=%1s buffer=%2s steady-cache-limit=%3s hysteresis=%4s max-bytes=%5 network-timeout=%6s.")
+            "Configured stream tuning: wait-for-data=%1s buffer=%2s steady-cache-limit=%3s hysteresis=%4s max-bytes=%5 max-back-bytes=%6 network-timeout=%7s.")
             .arg(m_waitForDataStreamSeconds, 0, 'f', 1)
             .arg(m_bufferSeconds, 0, 'f', 1)
             .arg(m_steadyStateCacheLimitSeconds, 0, 'f', 1)
             .arg(m_steadyStateCacheHysteresisSeconds, 0, 'f', 1)
             .arg(m_steadyStateDemuxerMaxBytes)
+            .arg(m_steadyStateDemuxerMaxBackBytes)
             .arg(networkTimeoutSeconds, 0, 'f', 1));
 
     if (m_api->requestLogMessages != nullptr) {
@@ -666,6 +771,28 @@ bool MpvPlayer::ensureRenderContext()
         QStringLiteral("Render context created with current OpenGL context %1.")
             .arg(reinterpret_cast<quintptr>(context), 0, 16));
     m_api->renderContextSetUpdateCallback(m_state->renderContext, &MpvPlayer::onRenderUpdate, this);
+    return true;
+}
+
+bool MpvPlayer::registerCatchupStreamProtocol()
+{
+    if (m_api->streamCbAddRo == nullptr || m_state->handle == nullptr) {
+        Core::DebugLogger::instance().log(
+            QStringLiteral("mpv"),
+            QStringLiteral("libmpv stream_cb unavailable; catch-up owned stream disabled."));
+        return false;
+    }
+    const auto result = m_api->streamCbAddRo(m_state->handle, "okiltv-catchup", nullptr, &catchupStreamOpen);
+    if (result < 0) {
+        Core::DebugLogger::instance().log(
+            QStringLiteral("mpv"),
+            QStringLiteral("mpv_stream_cb_add_ro(okiltv-catchup) failed: %1")
+                .arg(QString::fromUtf8(m_api->errorString(result))));
+        return false;
+    }
+    Core::DebugLogger::instance().log(
+        QStringLiteral("mpv"),
+        QStringLiteral("Registered okiltv-catchup stream callback protocol."));
     return true;
 }
 
@@ -1098,6 +1225,11 @@ std::optional<double> MpvPlayer::cacheSpeedBytesPerSecond() const
     return m_cachedTelemetry.cacheSpeedBytesPerSecond;
 }
 
+std::optional<bool> MpvPlayer::demuxerCacheReaderEof() const
+{
+    return propertyNodeBoolField("demuxer-cache-state", "eof");
+}
+
 double MpvPlayer::bufferTargetSeconds() const
 {
     return m_bufferSeconds;
@@ -1422,6 +1554,7 @@ bool MpvPlayer::loadApi()
     resolve(m_api->commandString, "mpv_command_string");
     resolve(m_api->free, "mpv_free");
     resolve(m_api->freeNodeContents, "mpv_free_node_contents");
+    resolve(m_api->streamCbAddRo, "mpv_stream_cb_add_ro");
     if (m_api->command == nullptr && m_api->commandString == nullptr) {
         m_diagnostics = QStringLiteral("mpv-2.dll is missing both mpv_command and mpv_command_string.");
         Core::DebugLogger::instance().log(QStringLiteral("mpv"), m_diagnostics);
@@ -1577,6 +1710,7 @@ void MpvPlayer::processEvents()
                     : QStringLiteral("Received MPV_EVENT_END_FILE reason=%1.").arg(reason));
             if (reason == kMpvEndFileStop || reason == kMpvEndFileRedirect || reason == kMpvEndFileQuit) {
                 // Intentional stop/replace — not a stream failure, do not disturb PlayerController state.
+                queueOnOwnerThread([this]() { emit playbackStopped(); });
                 break;
             }
             if (reason == kMpvEndFileError) {
@@ -1603,6 +1737,7 @@ void MpvPlayer::processEvents()
             Core::DebugLogger::instance().log(QStringLiteral("mpv"), QStringLiteral("Received MPV_EVENT_PLAYBACK_RESTART."));
             m_trackListRefreshPending.store(true);
             m_slowTelemetryRefreshPending.store(true);
+            queueOnOwnerThread([this]() { emit playbackRestarted(); });
             break;
         case kMpvEventShutdown:
             Core::DebugLogger::instance().log(QStringLiteral("mpv"), QStringLiteral("Received MPV_EVENT_SHUTDOWN."));

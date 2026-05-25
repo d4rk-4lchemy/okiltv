@@ -1,5 +1,7 @@
 #include "models.h"
 
+#include <algorithm>
+
 namespace OKILTV::Core {
 
 namespace {
@@ -28,6 +30,21 @@ QVariantMap toVariantMap(const ServerProfile &profile)
         { QStringLiteral("autoRefreshIntervalHours"), normalizeAutoRefreshIntervalHours(profile.autoRefreshIntervalHours) },
         { QStringLiteral("lastRefreshed"), profile.lastRefreshed.toUTC().toString(Qt::ISODateWithMs) },
         { QStringLiteral("isActive"), profile.isActive }
+    };
+}
+
+QVariantMap toVariantMap(const SourceSummary &summary)
+{
+    return {
+        { QStringLiteral("id"), guidToString(summary.id) },
+        { QStringLiteral("name"), summary.name },
+        { QStringLiteral("type"), profileTypeToInt(summary.type) },
+        { QStringLiteral("typeLabel"), profileTypeLabel(summary.type) },
+        { QStringLiteral("autoRefreshIntervalHours"), normalizeAutoRefreshIntervalHours(summary.autoRefreshIntervalHours) },
+        { QStringLiteral("xtreamServerTimezone"), summary.xtreamServerTimezone },
+        { QStringLiteral("lastRefreshed"), summary.lastRefreshed.toUTC().toString(Qt::ISODateWithMs) },
+        { QStringLiteral("groupCount"), std::max(0, summary.groupCount) },
+        { QStringLiteral("isActive"), summary.isActive }
     };
 }
 

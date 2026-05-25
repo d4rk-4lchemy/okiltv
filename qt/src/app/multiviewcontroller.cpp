@@ -134,6 +134,11 @@ int layoutRowsForModeValue(const QString &mode)
     return 1;
 }
 
+bool catchupMultiviewBlocked(PlayerController *playerController)
+{
+    return playerController != nullptr && playerController->playbackMode() == QStringLiteral("catchup");
+}
+
 } // namespace
 
 MultiViewController::MultiViewController(
@@ -239,7 +244,7 @@ QVariantList MultiViewController::tiles() const
             tile.insert(
                 QStringLiteral("errorText"),
                 m_playerController->channelLoadFailed() ? QStringLiteral("Channel couldn't be loaded") : QString {});
-            tile.insert(QStringLiteral("playerObject"), QVariant::fromValue(static_cast<QObject *>(m_playerController->player())));
+            tile.insert(QStringLiteral("playerObject"), QVariant::fromValue(m_playerController->playbackPlayerObject()));
         } else {
             const auto secondaryIndex = static_cast<std::size_t>(slotIndex - 1);
             if (secondaryIndex < m_secondarySlots.size()) {
@@ -321,6 +326,10 @@ bool MultiViewController::assignResolvedChannel(const Channel &channel)
 
 void MultiViewController::cycleLayout()
 {
+    if (catchupMultiviewBlocked(m_playerController)) {
+        emit statusMessageRequested(QStringLiteral("Multiview is unavailable during catch-up playback."));
+        return;
+    }
     if (!multiviewEnabled()) {
         emit statusMessageRequested(QStringLiteral("Multiview is disabled in Settings."));
         return;
@@ -338,6 +347,10 @@ void MultiViewController::cycleLayout()
 
 void MultiViewController::setLayoutMode(const QString &mode)
 {
+    if (catchupMultiviewBlocked(m_playerController) && normalizedLayoutModeValue(mode) != QStringLiteral("off")) {
+        emit statusMessageRequested(QStringLiteral("Multiview is unavailable during catch-up playback."));
+        return;
+    }
     auto normalized = normalizedLayoutModeValue(mode);
     if (normalized != QStringLiteral("off") && !multiviewEnabled()) {
         emit statusMessageRequested(QStringLiteral("Multiview is disabled in Settings."));
@@ -358,6 +371,10 @@ void MultiViewController::setLayoutMode(const QString &mode)
 
 bool MultiViewController::togglePictureInPicture(const int channelId)
 {
+    if (catchupMultiviewBlocked(m_playerController)) {
+        emit statusMessageRequested(QStringLiteral("Multiview is unavailable during catch-up playback."));
+        return false;
+    }
     if (!multiviewEnabled()) {
         emit statusMessageRequested(QStringLiteral("Multiview is disabled in Settings."));
         return false;
@@ -409,6 +426,10 @@ bool MultiViewController::togglePictureInPicture(const int channelId)
 
 bool MultiViewController::toggleGrid()
 {
+    if (catchupMultiviewBlocked(m_playerController)) {
+        emit statusMessageRequested(QStringLiteral("Multiview is unavailable during catch-up playback."));
+        return false;
+    }
     if (!multiviewEnabled()) {
         emit statusMessageRequested(QStringLiteral("Multiview is disabled in Settings."));
         return false;

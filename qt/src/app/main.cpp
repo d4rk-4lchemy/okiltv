@@ -191,7 +191,7 @@ CoreServices constructCoreServices(const StartupLogFn &startupStep)
     });
     startupStep(QStringLiteral("Loading settings from %1").arg(services.settings->settingsFilePath()));
     services.settings->load();
-    startupStep(QStringLiteral("Settings loaded. Profiles=%1").arg(services.settings->current().profiles.size()));
+    startupStep(QStringLiteral("Settings loaded. Profiles=%1").arg(services.settings->sourceSummaries().size()));
 
     startupStep(QStringLiteral("Available SQL drivers: %1").arg(QSqlDatabase::drivers().join(QStringLiteral(", "))));
     services.database = constructComponent<OKILTV::Core::DatabaseService>(startupStep, QStringLiteral("DatabaseService"), []() {

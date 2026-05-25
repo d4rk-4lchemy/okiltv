@@ -20,6 +20,9 @@ class SourceGroupsModel final : public QAbstractListModel
     Q_PROPERTY(bool dirty READ dirty NOTIFY dirtyChanged)
     Q_PROPERTY(bool autoPersist READ autoPersist WRITE setAutoPersist NOTIFY autoPersistChanged)
     Q_PROPERTY(bool hideUnchecked READ hideUnchecked WRITE setHideUnchecked NOTIFY hideUncheckedChanged)
+    Q_PROPERTY(QString searchText READ searchText WRITE setSearchText NOTIFY searchTextChanged)
+    Q_PROPERTY(QVariantList visibleGroups READ visibleGroups NOTIFY visibleGroupsChanged)
+    Q_PROPERTY(QStringList visibleGroupIds READ visibleGroupIds NOTIFY visibleGroupsChanged)
 
 public:
     enum Roles
@@ -52,6 +55,10 @@ public:
     void setAutoPersist(bool value);
     bool hideUnchecked() const;
     void setHideUnchecked(bool value);
+    QString searchText() const;
+    void setSearchText(const QString &value);
+    QVariantList visibleGroups() const;
+    QStringList visibleGroupIds() const;
 
     Q_INVOKABLE QVariantMap get(int row) const;
     Q_INVOKABLE void reload();
@@ -71,6 +78,8 @@ signals:
     void dirtyChanged();
     void autoPersistChanged();
     void hideUncheckedChanged();
+    void searchTextChanged();
+    void visibleGroupsChanged();
 
 private:
     struct GroupEntry
@@ -92,6 +101,7 @@ private:
     bool updateSelection(const QStringList &groupIds, bool selected);
     void setLoading(bool value);
     void clearLoadedGroups();
+    void rebuildVisibleGroups();
     void applyDraftStateForCurrentProfile();
     void updateDraftStateForCurrentProfile();
     void clearDraftStateIfPersisted(const QString &profileId);
@@ -107,6 +117,9 @@ private:
     bool m_loading { false };
     bool m_autoPersist { true };
     bool m_hideUnchecked { false };
+    QString m_searchText;
+    QVariantList m_visibleGroups;
+    QStringList m_visibleGroupIds;
     QFutureSynchronizer<void> m_backgroundTasks;
     quint64 m_reloadGeneration { 0 };
 };

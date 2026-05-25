@@ -20,7 +20,6 @@ Item {
     // qmllint enable unqualified
     property bool createMode: root.profiles.rowCount() === 0
     property int draftType: 0
-    property string groupsSearchText: ""
     property bool confirmDeleteVisible: false
     property string pendingDeleteProfileId: ""
     property string pendingDeleteProfileName: ""
@@ -31,45 +30,13 @@ Item {
     property bool refreshQueueInFlight: false
     property bool groupDragActive: false
     property int dirtyRevision: 0
-    readonly property var visibleSettingsGroupIds: {
-        const total = root.groups.totalCount
-        const query = root.groupsSearchText.trim().toLowerCase()
-        const hideUnchecked = root.groups.hideUnchecked
-        const ids = []
-        for (let row = 0; row < total; ++row) {
-            const group = root.groups.get(row)
-            const name = (group.name || "").toLowerCase()
-            const matchesSearch = !query.length || name.indexOf(query) >= 0
-            const passesHideFilter = !hideUnchecked || !!group.selected
-            if (matchesSearch && passesHideFilter) {
-                ids.push(group.id)
-            }
-        }
-        return ids
-    }
-    readonly property var visibleSettingsGroups: {
-        const total = root.groups.totalCount
-        const query = root.groupsSearchText.trim().toLowerCase()
-        const hideUnchecked = root.groups.hideUnchecked
-        const groups = []
-        for (let row = 0; row < total; ++row) {
-            const group = root.groups.get(row)
-            const name = (group.name || "").toLowerCase()
-            const matchesSearch = !query.length || name.indexOf(query) >= 0
-            const passesHideFilter = !hideUnchecked || !!group.selected
-            if (matchesSearch && passesHideFilter) {
-                groups.push(group)
-            }
-        }
-        return groups
-    }
     readonly property int sidebarWidth: root.shell.layoutBand === "compact" ? 292 : 324
     readonly property color sidebarSurface: "#74070d12"
     readonly property color sectionSurface: "#7a0b1117"
     readonly property color rowSurface: "#5a0c141b"
     readonly property color selectedRowSurface: "#6e182127"
     readonly property bool groupReorderEnabled: root.groups.hasGroups
-        && root.groupsSearchText.trim().length === 0
+        && root.groups.searchText.trim().length === 0
     readonly property bool dirty: {
         const revision = root.dirtyRevision
         void revision
@@ -311,7 +278,7 @@ Item {
         createMode = false
         selectedIndex = row
         applyDraftToForm(draft)
-        groupsSearchText = ""
+        root.groups.searchText = ""
         root.groups.profileId = profile.id
         markDirtyStateChanged()
     }
@@ -324,7 +291,7 @@ Item {
         const typeKey = String(normalizedType)
         const pendingDraft = root.pendingCreateDraftsByType[typeKey]
         applyDraftToForm(pendingDraft ? pendingDraft : createDefaultDraftForType(normalizedType))
-        groupsSearchText = ""
+        root.groups.searchText = ""
         root.groups.profileId = ""
         markDirtyStateChanged()
     }
@@ -334,7 +301,7 @@ Item {
     }
 
     function groupMatchesSearch(groupName) {
-        const query = root.groupsSearchText.trim().toLowerCase()
+        const query = root.groups.searchText.trim().toLowerCase()
         if (!query.length) {
             return true
         }
@@ -773,7 +740,11 @@ Item {
 
                 Text {
                     Layout.fillWidth: true
-                    text: root.app.statusText
+                    text: root.refreshQueueInFlight
+                        ? "Refreshing source data..."
+                        : (root.profiles.rowCount() > 0
+                            ? "Select a profile to edit credentials, refresh channels, and manage groups."
+                            : "Create a source profile to start importing channels and groups.")
                     color: Theme.textSecondary
                     font.pixelSize: 12
                     wrapMode: Text.Wrap
@@ -824,6 +795,7 @@ Item {
                         required property var model
                         property string profileName: model.name
                         property string profileTypeLabel: model.typeLabel
+                        property int profileGroupCount: model.groupCount || 0
                         property bool profileIsActive: model.isActive
                         property string profileLastRefreshed: model.lastRefreshed
 
@@ -869,7 +841,7 @@ Item {
                             }
 
                             Text {
-                                text: profileRow.profileTypeLabel
+                                text: profileRow.profileTypeLabel + " • " + profileRow.profileGroupCount + " groups"
                                 color: Theme.textSecondary
                                 font.pixelSize: 12
                             }
@@ -1182,18 +1154,18 @@ Item {
                                 id: groupsSearchField
                                 Layout.preferredWidth: root.shell.layoutBand === "compact" ? 220 : 280
                                 placeholderText: "Search groups"
-                                text: root.groupsSearchText
+                                text: root.groups.searchText
                                 enabled: !root.groups.loading
-                                onTextEdited: root.groupsSearchText = text
+                                onTextEdited: root.groups.searchText = text
                             }
 
                             AppButton {
                                 text: "Select Filtered"
                                 compact: true
                                 Layout.preferredWidth: root.shell.layoutBand === "compact" ? 154 : 170
-                                enabled: !root.groups.loading && root.visibleSettingsGroupIds.length > 0
+                                enabled: !root.groups.loading && root.groups.visibleGroupIds.length > 0
                                 onClicked: {
-                                    root.groups.setGroupsSelected(root.visibleSettingsGroupIds, true)
+                                    root.groups.setGroupsSelected(root.groups.visibleGroupIds, true)
                                 }
                             }
 
@@ -1201,9 +1173,9 @@ Item {
                                 text: "Deselect Filtered"
                                 compact: true
                                 Layout.preferredWidth: root.shell.layoutBand === "compact" ? 168 : 186
-                                enabled: !root.groups.loading && root.visibleSettingsGroupIds.length > 0
+                                enabled: !root.groups.loading && root.groups.visibleGroupIds.length > 0
                                 onClicked: {
-                                    root.groups.setGroupsSelected(root.visibleSettingsGroupIds, false)
+                                    root.groups.setGroupsSelected(root.groups.visibleGroupIds, false)
                                 }
                             }
                         }
@@ -1288,7 +1260,7 @@ Item {
                                 implicitHeight: 72
                                 visible: !root.groups.loading
                                     && root.groups.hasGroups
-                                    && root.visibleSettingsGroupIds.length === 0
+                                    && root.groups.visibleGroupIds.length === 0
 
                                 ColumnLayout {
                                     anchors.fill: parent
@@ -1297,7 +1269,7 @@ Item {
 
                                     Text {
                                         Layout.fillWidth: true
-                                        text: root.groupsSearchText.trim().length > 0
+                                        text: root.groups.searchText.trim().length > 0
                                             ? "No groups match this search."
                                             : "No checked groups to show."
                                         color: Theme.textPrimary
@@ -1308,7 +1280,7 @@ Item {
 
                                     Text {
                                         Layout.fillWidth: true
-                                        text: root.groupsSearchText.trim().length > 0
+                                        text: root.groups.searchText.trim().length > 0
                                             ? "Try a different group name or clear the filter."
                                             : "Turn off Hide Unchecked to show all groups."
                                         color: Theme.textSecondary
@@ -1322,16 +1294,16 @@ Item {
                                 id: groupsList
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: (root.groups.hasGroups
-                                        && root.visibleSettingsGroupIds.length > 0)
+                                        && root.groups.visibleGroupIds.length > 0)
                                     ? Math.min(contentHeight, 340)
                                     : 0
                                 clip: true
                                 spacing: 6
                                 enabled: !root.groups.loading
                                 interactive: !root.groupDragActive && !root.groupReorderEnabled
-                                model: root.visibleSettingsGroups
+                                model: root.groups.visibleGroups
                                 visible: root.groups.hasGroups
-                                    && root.visibleSettingsGroupIds.length > 0
+                                    && root.groups.visibleGroupIds.length > 0
                                 boundsBehavior: Flickable.StopAtBounds
 
                                 WheelHandler {
@@ -1477,7 +1449,7 @@ Item {
                                                         if (mapped.y <= 0) {
                                                             targetIndex = 0
                                                         } else if (mapped.y >= groupsList.contentItem.height - 1) {
-                                                            targetIndex = root.visibleSettingsGroupIds.length - 1
+                                                            targetIndex = root.groups.visibleGroupIds.length - 1
                                                         } else {
                                                             return
                                                         }
@@ -1489,7 +1461,7 @@ Item {
                                                     }
 
                                                     groupRow.dragLastTargetIndex = targetIndex
-                                                    const orderedVisibleIds = root.visibleSettingsGroupIds.slice()
+                                                    const orderedVisibleIds = root.groups.visibleGroupIds.slice()
                                                     orderedVisibleIds.splice(groupRow.rowIndex, 1)
                                                     orderedVisibleIds.splice(targetIndex, 0, groupRow.groupId)
                                                     root.groups.reorderVisibleGroups(orderedVisibleIds)

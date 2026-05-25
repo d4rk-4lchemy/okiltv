@@ -28,6 +28,8 @@ qt_add_executable(OKILTVQtCoreTests
     ../src/core/redaction.h
     ../src/core/settingsmanager.cpp
     ../src/core/settingsmanager.h
+    ../src/core/sourcestore.cpp
+    ../src/core/sourcestore.h
     ../src/core/xtreamservice.cpp
     ../src/core/xtreamservice.h
 )
@@ -109,10 +111,16 @@ qt_add_executable(OKILTVQtAppTests
     ../src/core/redaction.h
     ../src/core/settingsmanager.cpp
     ../src/core/settingsmanager.h
+    ../src/core/sourcestore.cpp
+    ../src/core/sourcestore.h
     ../src/core/xtreamservice.cpp
     ../src/core/xtreamservice.h
+    ../src/player/catchupstreamsession.cpp
+    ../src/player/catchupstreamsession.h
     ../src/player/mpvplayer.cpp
     ../src/player/mpvplayer.h
+    ../src/player/mpvvideoitem.cpp
+    ../src/player/mpvvideoitem.h
 )
 
 target_include_directories(OKILTVQtAppTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)

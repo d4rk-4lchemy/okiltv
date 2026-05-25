@@ -112,9 +112,10 @@ public:
         }
 
         m_playerController = qobject_cast<App::PlayerController *>(m_item->playerController());
-        m_player = m_playerController != nullptr
-            ? m_playerController->player()
-            : qobject_cast<MpvPlayer *>(m_item->playerObject());
+        m_player = qobject_cast<MpvPlayer *>(m_item->playerObject());
+        if (m_player == nullptr && m_playerController != nullptr) {
+            m_player = m_playerController->player();
+        }
         if (m_player != nullptr) {
             m_player->setRenderUpdateTarget(m_item);
         }
@@ -212,8 +213,22 @@ void MpvVideoItem::setPlayerController(QObject *controllerObject)
         disconnect(m_isPlayingChangedConnection);
         m_isPlayingChangedConnection = {};
     }
+    if (m_playbackPlayerObjectChangedConnection) {
+        disconnect(m_playbackPlayerObjectChangedConnection);
+        m_playbackPlayerObjectChangedConnection = {};
+    }
 
     m_playerController = controller;
+    if (m_playerController != nullptr) {
+        m_playbackPlayerObjectChangedConnection =
+            connect(m_playerController, &App::PlayerController::playbackPlayerObjectChanged, this, [this]() {
+                Core::DebugLogger::instance().log(
+                    QStringLiteral("video"),
+                    QStringLiteral("Video item observed playback player object change: item=%1.")
+                        .arg(reinterpret_cast<quintptr>(this), 0, 16));
+                requestUpdateImpl("playback-player-object", true);
+            });
+    }
 #if defined(Q_OS_WIN)
     if (m_playerController != nullptr) {
         m_isPlayingChangedConnection =
@@ -464,10 +479,13 @@ bool MpvVideoItem::heartbeatNeedsRecovery() const
 
 MpvPlayer *MpvVideoItem::resolvedPlayer() const
 {
+    if (m_playerObject != nullptr) {
+        return m_playerObject.data();
+    }
     if (m_playerController != nullptr) {
         return m_playerController->player();
     }
-    return m_playerObject.data();
+    return nullptr;
 }
 
 } // namespace OKILTV::Player

@@ -27,15 +27,16 @@ Item {
     property real pixelsPerMinute: root.shell.layoutBand === "compact" ? 3.0 : 3.6
     property real timelineVisibleWidth: root.epgGrid.windowSpanMinutes * root.pixelsPerMinute
     property real timelineOverflowWidth: root.shell.layoutBand === "compact" ? 120 : 144
-    property real timelineContentWidth: Math.max(timelineViewport.width, root.timelineVisibleWidth + root.timelineOverflowWidth)
-    property real maxTimelineContentX: Math.max(0, root.timelineContentWidth - timelineFlick.width)
+    property real timelineBodyVisibleWidth: Math.max(0, timelineViewport.width)
+    property real timelineContentWidth: Math.max(root.timelineBodyVisibleWidth, root.timelineVisibleWidth + root.timelineOverflowWidth)
+    property real maxTimelineContentX: Math.max(0, root.timelineContentWidth - root.timelineBodyVisibleWidth)
     property real maxTimelineHeaderX: Math.max(0, root.timelineVisibleWidth - timelineViewport.width)
     property real firstVisibleHourOffsetMinutes: {
         const slots = root.epgGrid.visibleTimeSlots
         return slots.length > 0 ? Number(slots[0].offsetMinutes || 0) : 0
     }
     property int collapsedRowHeight: root.shell.layoutBand === "compact" ? 72 : 76
-    property int detailBandHeight: root.shell.layoutBand === "compact" ? 188 : 204
+    property int detailBandHeight: root.shell.layoutBand === "compact" ? 146 : 158
     property int channelIconSize: root.shell.layoutBand === "compact" ? 46 : 50
     property int channelNamePixelSize: root.shell.layoutBand === "compact" ? 16 : 17
     property int rowSpacing: 0
@@ -61,6 +62,7 @@ Item {
     property int pendingGuidePositionMode: ListView.Contain
     property var pendingGuideProgram: ({})
     property bool pendingGuideSyncRows: true
+    property bool pendingGuideSyncHorizontal: true
     property var hoveredProgram: ({})
     property var hoveredProgramChannel: ({})
     property var selectedCatchupState: ({ "visible": false, "enabled": false, "reason": "" })
@@ -75,6 +77,34 @@ Item {
             return 0
         }
         return root.selectedDetailRowIndex * root.collapsedRowHeight + root.collapsedRowHeight - contentY
+    }
+
+    function scrollTimelineRowsByWheel(event) {
+        const maxContentY = Math.max(0, timelineRows.contentHeight - timelineRows.height)
+        if (maxContentY <= 0) {
+            event.accepted = false
+            return
+        }
+
+        let delta = 0
+        if (Math.abs(event.pixelDelta.y) > 0) {
+            delta = event.pixelDelta.y
+        } else if (Math.abs(event.angleDelta.y) > 0) {
+            delta = event.angleDelta.y * 0.5
+        }
+
+        if (Math.abs(delta) <= 0.001) {
+            event.accepted = false
+            return
+        }
+
+        const previousY = timelineRows.contentY
+        const nextY = Math.max(0, Math.min(previousY - delta, maxContentY))
+        const moved = Math.abs(nextY - previousY) > 0.01
+        if (moved) {
+            timelineRows.contentY = nextY
+        }
+        event.accepted = moved
     }
 
     function currentTimeLineGapBottom(contentY) {
@@ -135,6 +165,14 @@ Item {
         return root.guideState.selectedProgram
     }
 
+    function selectedCatchupProgramData() {
+        const selectedProgram = root.guideState.selectedProgram
+        if ((selectedProgram.start || "").length > 0) {
+            return selectedProgram
+        }
+        return root.selectedProgramData()
+    }
+
     function selectChannel(channelId) {
         if (channelId < 0) {
             return
@@ -150,7 +188,7 @@ Item {
         }
     }
 
-    function scheduleGuideViewportSync(channelId, program, positionMode, syncRows) {
+    function scheduleGuideViewportSync(channelId, program, positionMode, syncRows, syncHorizontal) {
         const rowIndex = root.epgGrid.rowIndexForChannelId(channelId)
         if (rowIndex < 0) {
             return false
@@ -160,6 +198,7 @@ Item {
         pendingGuidePositionMode = positionMode !== undefined ? positionMode : ListView.Contain
         pendingGuideProgram = program ? program : ({})
         pendingGuideSyncRows = syncRows !== undefined ? !!syncRows : true
+        pendingGuideSyncHorizontal = syncHorizontal !== undefined ? !!syncHorizontal : true
         guideViewportSyncTimer.restart()
         return true
     }
@@ -173,26 +212,21 @@ Item {
         const positionMode = pendingGuidePositionMode
         const program = pendingGuideProgram
         const syncRows = pendingGuideSyncRows
+        const syncHorizontal = pendingGuideSyncHorizontal
         pendingGuideRowIndex = -1
         pendingGuideProgram = ({})
         pendingGuideSyncRows = true
+        pendingGuideSyncHorizontal = true
 
         if (syncRows) {
-            if (channelColumn.forceLayout) {
-                channelColumn.forceLayout()
-            }
             if (timelineRows.forceLayout) {
                 timelineRows.forceLayout()
             }
 
-            channelColumn.positionViewAtIndex(rowIndex, positionMode)
             timelineRows.positionViewAtIndex(rowIndex, positionMode)
-
-            const maxY = Math.max(0, channelColumn.contentHeight - channelColumn.height)
-            channelColumn.contentY = Math.max(0, Math.min(maxY, timelineRows.contentY))
         }
 
-        if (!program || (program.start || "").length === 0) {
+        if (!syncHorizontal || !program || (program.start || "").length === 0) {
             return
         }
 
@@ -211,7 +245,7 @@ Item {
     }
 
     function ensureProgramVisible(channelId, program) {
-        return root.scheduleGuideViewportSync(channelId, program, ListView.Contain, true)
+        return root.scheduleGuideViewportSync(channelId, program, ListView.Contain, true, true)
     }
 
     function focusProgram(channelId, program) {
@@ -225,7 +259,7 @@ Item {
         }
         root.guideState.selectProgram(program)
         root.epgGrid.selectedProgramStart = program.start || ""
-        root.scheduleGuideViewportSync(channelId, program, ListView.Contain, !sameChannel)
+        root.scheduleGuideViewportSync(channelId, program, ListView.Contain, !sameChannel, true)
         return true
     }
 
@@ -250,6 +284,37 @@ Item {
         return true
     }
 
+    function previousHourAnchorContentX() {
+        const currentOffset = Number(root.epgGrid.currentTimeOffsetMinutes || 0)
+        const previousHourOffset = Math.floor(currentOffset / 60) * 60 - 60
+        const anchorX = previousHourOffset * root.pixelsPerMinute
+        return Math.max(0, Math.min(root.maxTimelineContentX, anchorX))
+    }
+
+    function applyGuideOpenAnchor() {
+        const anchorX = root.previousHourAnchorContentX()
+        timelineFlick.contentX = anchorX
+        timeHeaderFlick.contentX = Math.min(anchorX, root.maxTimelineHeaderX)
+    }
+
+    function programCenterX(program) {
+        if (!program || (program.start || "").length === 0) {
+            return -1
+        }
+        const left = Number(program.offsetMinutes || 0) * root.pixelsPerMinute
+        return left + root.programVisualWidth(program) / 2
+    }
+
+    function isProgramCenterVisible(program) {
+        const centerX = root.programCenterX(program)
+        if (centerX < 0) {
+            return false
+        }
+        const visibleLeft = timelineFlick.contentX
+        const visibleRight = visibleLeft + timelineViewport.width
+        return centerX >= visibleLeft && centerX <= visibleRight
+    }
+
     function focusChannel(channelId, expandDetails) {
         if (channelId < 0) {
             root.guideState.detailsExpanded = false
@@ -261,15 +326,18 @@ Item {
             root.guideState.detailsExpanded = true
         }
 
-        const nowProgram = root.epgGrid.programForChannelAtTimestamp(channelId, root.currentUtcIso())
-        if ((nowProgram.start || "").length > 0) {
-            root.guideState.selectProgram(nowProgram)
-            root.epgGrid.selectedProgramStart = nowProgram.start || ""
-            root.scheduleGuideViewportSync(channelId, nowProgram, ListView.Center)
+        const selectedProgram = root.epgGrid.programForChannelAtTimestamp(channelId, root.currentUtcIso())
+        if ((selectedProgram.start || "").length > 0) {
+            if (!root.isProgramCenterVisible(selectedProgram)) {
+                root.applyGuideOpenAnchor()
+            }
+            root.guideState.selectProgram(selectedProgram)
+            root.epgGrid.selectedProgramStart = selectedProgram.start || ""
+            root.scheduleGuideViewportSync(channelId, selectedProgram, ListView.Center, true, false)
             return
         }
 
-        root.scheduleGuideViewportSync(channelId, root.selectedProgramData(), ListView.Center, true)
+        root.scheduleGuideViewportSync(channelId, root.selectedProgramData(), ListView.Center, true, false)
     }
 
     function currentUtcIso() {
@@ -298,7 +366,7 @@ Item {
         }
 
         const verticalPadding = 2
-        const probeX = Math.max(1, timelineFlick.contentX + 1)
+        const probeX = 1
         const topProbeY = Math.max(1, timelineRows.contentY + 1)
         const bottomProbeY = Math.max(topProbeY, timelineRows.contentY + timelineRows.height - 2)
         let firstRow = timelineRows.indexAt(probeX, topProbeY)
@@ -358,11 +426,6 @@ Item {
             return false
         }
 
-        const nextProgram = root.epgGrid.programForChannelAtTimestamp(nextChannelId, root.currentUtcIso())
-        if ((nextProgram.start || "").length > 0) {
-            return root.focusProgram(nextChannelId, nextProgram)
-        }
-
         root.focusChannel(nextChannelId, root.guideState.detailsExpanded)
         return true
     }
@@ -387,7 +450,11 @@ Item {
     function prepareForOpen() {
         root.guideState.selectedGroupId = root.channelList.selectedCategoryId
         root.scheduleGuideRenderViewportSync()
-        Qt.callLater(root.focusInitialChannel)
+        Qt.callLater(function() {
+            root.applyGuideOpenAnchor()
+            root.focusInitialChannel()
+            root.scheduleGuideRenderViewportSync()
+        })
     }
 
     function handleKeyboardEvent(event) {
@@ -450,7 +517,7 @@ Item {
     function refreshSelectedCatchupState() {
         root.selectedCatchupState = root.app.catchupActionState(
             root.guideState.selectedChannel || ({}),
-            root.selectedProgramData() || ({}))
+            root.selectedCatchupProgramData() || ({}))
     }
 
     function clearHoveredProgram(channelId, startIso) {
@@ -514,6 +581,14 @@ Item {
         }
 
         function onSelectedChannelChanged() {
+            root.refreshSelectedCatchupState()
+        }
+    }
+
+    Connections {
+        target: root.epgGrid
+
+        function onSelectedProgramChanged() {
             root.refreshSelectedCatchupState()
         }
     }
@@ -647,250 +722,158 @@ Item {
 
         Item {
             id: contentArea
+            objectName: "ui.region.guide_grid"
             anchors.top: gridHeader.bottom
             anchors.topMargin: root.rowSpacing
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: parent.bottom
 
-            Row {
+            Item {
                 anchors.fill: parent
-                spacing: root.rowSpacing
-                visible: channelColumn.count > 0
+                visible: timelineRows.count > 0
 
-                ListView {
-                    id: channelColumn
+                Item {
+                    id: guideChannelViewportRegion
+                    objectName: "ui.region.guide_channel_pane"
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
                     width: root.channelColumnWidth
-                    height: parent.height
-                    clip: true
-                    interactive: false
-                    spacing: root.rowSpacing
-                    model: root.epgGrid
-
-                    delegate: Rectangle {
-                        id: guideChannelRow
-                        required property int index
-                        required property int channelId
-                        required property string channelName
-                        required property string channelIconPath
-                        property color rowFill: "#111821"
-
-                        width: ListView.view.width
-                        height: root.rowHeightForChannel(guideChannelRow.channelId)
-                        radius: 0
-                        color: rowFill
-
-                        Rectangle {
-                            visible: guideChannelRow.channelId === root.guideState.selectedChannelId
-                            anchors.left: parent.left
-                            anchors.top: parent.top
-                            anchors.bottom: parent.bottom
-                            width: 3
-                            color: root.rowSelectionAccent
-                        }
-
-                        Rectangle {
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            anchors.bottom: parent.bottom
-                            height: 1
-                            color: Theme.border
-                            opacity: 0.9
-                        }
-
-                        Column {
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            anchors.top: parent.top
-                            anchors.leftMargin: 12
-                            anchors.rightMargin: 12
-                            anchors.topMargin: 12
-                            spacing: 8
-
-                            RowLayout {
-                                width: parent.width
-                                spacing: 10
-
-                                ChannelBadge {
-                                    badgeSize: root.channelIconSize
-                                    showFrame: false
-                                    sourcePath: guideChannelRow.channelIconPath
-                                    label: guideChannelRow.channelName
-                                }
-
-                                ColumnLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 2
-
-                                    Text {
-                                        Layout.fillWidth: true
-                                        text: guideChannelRow.channelName
-                                        color: Theme.textPrimary
-                                        font.pixelSize: root.channelNamePixelSize
-                                        font.bold: true
-                                        elide: Text.ElideRight
-                                    }
-
-                                    Text {
-                                        Layout.fillWidth: true
-                                        text: guideChannelRow.channelId === root.guideState.selectedChannelId
-                                            ? (root.guideState.selectedProgram.timeRange || "")
-                                            : ""
-                                        visible: text.length > 0
-                                        color: Theme.textSecondary
-                                        font.pixelSize: 11
-                                        elide: Text.ElideRight
-                                    }
-                                }
-                            }
-
-                            Text {
-                                width: parent.width
-                                visible: root.rowExpanded(guideChannelRow.channelId)
-                                text: root.guideState.selectedProgram.title || "Programme details"
-                                color: Theme.textPrimary
-                                font.pixelSize: 13
-                                font.bold: true
-                                wrapMode: Text.Wrap
-                                maximumLineCount: 2
-                                elide: Text.ElideRight
-                            }
-
-                            Text {
-                                width: parent.width
-                                visible: root.rowExpanded(guideChannelRow.channelId)
-                                    && root.episodeTitle(root.guideState.selectedProgram).length > 0
-                                text: root.episodeTitle(root.guideState.selectedProgram)
-                                color: Theme.textSecondary
-                                font.pixelSize: 12
-                                font.italic: true
-                                wrapMode: Text.Wrap
-                                maximumLineCount: 2
-                                elide: Text.ElideRight
-                            }
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: root.focusChannel(guideChannelRow.channelId, true)
-                            onDoubleClicked: root.playChannelRequested(guideChannelRow.channelId)
-                        }
-                    }
-
-                    WheelHandler {
-                        target: null
-                        onWheel: function(event) {
-                            const maxY = Math.max(0, timelineRows.contentHeight - timelineRows.height)
-                            const nextY = Math.max(0, Math.min(maxY, timelineRows.contentY - event.angleDelta.y))
-                            timelineRows.contentY = nextY
-                            event.accepted = true
-                        }
-                    }
                 }
 
                 Item {
-                    width: parent.width - root.channelColumnWidth - root.rowSpacing
-                    height: parent.height
+                    id: guideTimelineViewportRegion
+                    objectName: "ui.region.guide_timeline_viewport"
+                    anchors.left: parent.left
+                    anchors.leftMargin: root.channelColumnWidth + root.rowSpacing
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                }
 
-                    Flickable {
-                        id: timelineFlick
-                        anchors.fill: parent
-                        clip: true
-                        contentWidth: root.timelineContentWidth
-                        boundsBehavior: Flickable.StopAtBounds
-                        flickableDirection: Flickable.HorizontalFlick
-                        onContentXChanged: {
-                            if (contentX > root.maxTimelineContentX) {
-                                contentX = root.maxTimelineContentX
-                            }
-                            if (contentX < 0) {
-                                contentX = 0
-                            }
-                            timeHeaderFlick.contentX = Math.min(contentX, root.maxTimelineHeaderX)
-                            root.scheduleGuideRenderViewportSync()
+                Flickable {
+                    id: timelineFlick
+                    anchors.fill: parent
+                    clip: true
+                    contentWidth: root.channelColumnWidth + root.rowSpacing + root.timelineContentWidth
+                    boundsBehavior: Flickable.StopAtBounds
+                    flickableDirection: Flickable.HorizontalFlick
+                    onContentXChanged: {
+                        if (contentX > root.maxTimelineContentX) {
+                            contentX = root.maxTimelineContentX
                         }
-                        onWidthChanged: root.scheduleGuideRenderViewportSync()
-                        Component.onCompleted: root.scheduleGuideRenderViewportSync()
+                        if (contentX < 0) {
+                            contentX = 0
+                        }
+                        timeHeaderFlick.contentX = Math.min(contentX, root.maxTimelineHeaderX)
+                        root.scheduleGuideRenderViewportSync()
+                    }
+                    onWidthChanged: root.scheduleGuideRenderViewportSync()
+                    Component.onCompleted: root.scheduleGuideRenderViewportSync()
 
-                        ScrollBar.horizontal: ScrollBar { }
+                    ScrollBar.horizontal: ScrollBar { }
 
-                        ListView {
-                            id: timelineRows
-                            objectName: "ui.region.guide_grid"
-                            width: timelineFlick.contentWidth
-                            height: timelineFlick.height
-                            spacing: root.rowSpacing
+                    ListView {
+                        id: timelineRows
+                        width: timelineFlick.contentWidth
+                        height: timelineFlick.height
+                        spacing: root.rowSpacing
+                        interactive: true
+                        flickableDirection: Flickable.VerticalFlick
+                        boundsBehavior: Flickable.StopAtBounds
+                        clip: true
+                        model: root.epgGrid
+                        reuseItems: false
+                        cacheBuffer: 1600
+                        onContentYChanged: root.scheduleGuideRenderViewportSync()
+                        onHeightChanged: root.scheduleGuideRenderViewportSync()
+                        onCountChanged: root.scheduleGuideRenderViewportSync()
+                        ScrollBar.vertical: ScrollBar {
+                            id: guideGridScrollBar
+                            policy: timelineRows.contentHeight > timelineRows.height
+                                ? ScrollBar.AlwaysOn
+                                : ScrollBar.AlwaysOff
                             interactive: true
-                            flickableDirection: Flickable.VerticalFlick
-                            boundsBehavior: Flickable.StopAtBounds
-                            clip: true
-                            model: root.epgGrid
-                            reuseItems: true
-                            cacheBuffer: 1600
-                            onContentYChanged: {
-                                const maxY = Math.max(0, channelColumn.contentHeight - channelColumn.height)
-                                channelColumn.contentY = Math.max(0, Math.min(maxY, contentY))
-                                root.scheduleGuideRenderViewportSync()
+                            parent: timelineFlick
+                            width: 6
+                            z: 3
+                            anchors.right: parent.right
+                            anchors.rightMargin: 0
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            padding: 0
+                            background: Rectangle {
+                                implicitWidth: 6
+                                radius: width / 2
+                                color: "#2a20364d"
                             }
-                            onHeightChanged: root.scheduleGuideRenderViewportSync()
-                            onCountChanged: root.scheduleGuideRenderViewportSync()
-                            ScrollBar.vertical: ScrollBar {
-                                id: guideGridScrollBar
-                                policy: timelineRows.contentHeight > timelineRows.height
-                                    ? ScrollBar.AlwaysOn
-                                    : ScrollBar.AlwaysOff
-                                interactive: true
-                                width: 6
-                                z: 3
+                            contentItem: Rectangle {
+                                implicitWidth: 6
+                                radius: width / 2
+                                color: guideGridScrollBar.pressed
+                                    ? Theme.borderStrong
+                                    : "#8c4e88b8"
+                            }
+                        }
+
+                        delegate: Item {
+                            id: timelineRow
+                            required property int index
+                            required property int channelId
+                            required property string channelName
+                            required property string channelIconPath
+                            required property string channelProfileId
+                            required property string channelStreamUrl
+                            required property string channelTvgId
+                            required property var programs
+                            property color rowFill: "#111821"
+
+                            width: timelineFlick.contentWidth
+                            height: root.rowHeightForChannel(timelineRow.channelId)
+                            clip: false
+
+                            Rectangle {
+                                anchors.left: parent.left
                                 anchors.right: parent.right
-                                anchors.rightMargin: 0
                                 anchors.top: parent.top
-                                anchors.bottom: parent.bottom
-                                padding: 0
-                                background: Rectangle {
-                                    implicitWidth: 6
-                                    radius: width / 2
-                                    color: "#2a20364d"
-                                }
-                                contentItem: Rectangle {
-                                    implicitWidth: 6
-                                    radius: width / 2
-                                    color: guideGridScrollBar.pressed
-                                        ? Theme.borderStrong
-                                        : "#8c4e88b8"
-                                }
+                                height: root.collapsedRowHeight
+                                radius: 0
+                                color: timelineRow.rowFill
                             }
 
-                            delegate: Item {
-                                id: timelineRow
-                                required property int index
-                                required property int channelId
-                                required property string channelName
-                                required property string channelProfileId
-                                required property string channelStreamUrl
-                                required property string channelTvgId
-                                required property var programs
-                                property color rowFill: "#111821"
+                            Rectangle {
+                                visible: timelineRow.channelId === root.guideState.selectedChannelId
+                                anchors.left: parent.left
+                                anchors.top: parent.top
+                                width: parent.width
+                                height: 2
+                                color: root.rowSelectionAccent
+                            }
 
-                                width: timelineFlick.contentWidth
-                                height: root.rowHeightForChannel(timelineRow.channelId)
-                                clip: false
+                            Rectangle {
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                height: 1
+                                color: Theme.border
+                                opacity: 0.9
+                            }
 
-                                Rectangle {
-                                    anchors.left: parent.left
-                                    anchors.right: parent.right
-                                    anchors.top: parent.top
-                                    height: root.collapsedRowHeight
-                                    radius: 0
-                                    color: timelineRow.rowFill
-                                }
+                            Rectangle {
+                                x: timelineFlick.contentX
+                                y: 0
+                                width: root.channelColumnWidth
+                                height: parent.height
+                                z: 2
+                                color: timelineRow.rowFill
 
                                 Rectangle {
                                     visible: timelineRow.channelId === root.guideState.selectedChannelId
                                     anchors.left: parent.left
                                     anchors.top: parent.top
-                                    width: parent.width
-                                    height: 2
+                                    anchors.bottom: parent.bottom
+                                    width: 3
                                     color: root.rowSelectionAccent
                                 }
 
@@ -902,6 +885,100 @@ Item {
                                     color: Theme.border
                                     opacity: 0.9
                                 }
+
+                                Column {
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    anchors.leftMargin: 12
+                                    anchors.rightMargin: 12
+                                    anchors.topMargin: 12
+                                    spacing: 8
+
+                                    RowLayout {
+                                        width: parent.width
+                                        spacing: 10
+
+                                        ChannelBadge {
+                                            badgeSize: root.channelIconSize
+                                            showFrame: false
+                                            sourcePath: timelineRow.channelIconPath
+                                            label: timelineRow.channelName
+                                        }
+
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 2
+
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: timelineRow.channelName
+                                                color: Theme.textPrimary
+                                                font.pixelSize: root.channelNamePixelSize
+                                                font.bold: true
+                                                elide: Text.ElideRight
+                                            }
+
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: timelineRow.channelId === root.guideState.selectedChannelId
+                                                    ? (root.guideState.selectedProgram.timeRange || "")
+                                                    : ""
+                                                visible: text.length > 0
+                                                color: Theme.textSecondary
+                                                font.pixelSize: 11
+                                                elide: Text.ElideRight
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        width: parent.width
+                                        visible: root.rowExpanded(timelineRow.channelId)
+                                        text: root.guideState.selectedProgram.title || "Programme details"
+                                        color: Theme.textPrimary
+                                        font.pixelSize: 13
+                                        font.bold: true
+                                        wrapMode: Text.Wrap
+                                        maximumLineCount: 2
+                                        elide: Text.ElideRight
+                                    }
+
+                                    Text {
+                                        width: parent.width
+                                        visible: root.rowExpanded(timelineRow.channelId)
+                                            && root.episodeTitle(root.guideState.selectedProgram).length > 0
+                                        text: root.episodeTitle(root.guideState.selectedProgram)
+                                        color: Theme.textSecondary
+                                        font.pixelSize: 12
+                                        font.italic: true
+                                        wrapMode: Text.Wrap
+                                        maximumLineCount: 2
+                                        elide: Text.ElideRight
+                                    }
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: root.focusChannel(timelineRow.channelId, true)
+                                    onDoubleClicked: root.playChannelRequested(timelineRow.channelId)
+                                }
+
+                                WheelHandler {
+                                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                                    blocking: true
+                                    onWheel: function(event) {
+                                        root.scrollTimelineRowsByWheel(event)
+                                    }
+                                }
+                            }
+
+                            Item {
+                                x: root.channelColumnWidth + root.rowSpacing
+                                y: 0
+                                width: root.timelineContentWidth
+                                height: root.collapsedRowHeight
+                                z: 1
 
                                 Rectangle {
                                     anchors.left: parent.left
@@ -1046,98 +1123,98 @@ Item {
                                         }
                                     }
                                 }
+                            }
+                            Loader {
+                                active: root.rowExpanded(timelineRow.channelId)
+                                x: timelineFlick.contentX + root.channelColumnWidth + root.rowSpacing
+                                y: root.collapsedRowHeight
+                                width: root.timelineBodyVisibleWidth
+                                height: root.detailBandHeight
 
-                                Loader {
-                                    active: root.rowExpanded(timelineRow.channelId)
-                                    x: timelineFlick.contentX
-                                    y: root.collapsedRowHeight
-                                    width: timelineViewport.width
-                                    height: root.detailBandHeight
+                                sourceComponent: Rectangle {
+                                    radius: 0
+                                    color: "#de142331"
 
-                                    sourceComponent: Rectangle {
-                                        radius: 0
-                                        color: "#de142331"
+                                    Column {
+                                        id: detailContentColumn
+                                        anchors.fill: parent
+                                        anchors.margins: 16
+                                        spacing: 8
 
-                                        Column {
-                                            id: detailContentColumn
-                                            anchors.fill: parent
-                                            anchors.margins: 16
-                                            spacing: 8
-
-                                            RowLayout {
-                                                width: parent.width
-                                                spacing: 10
-
-                                                Text {
-                                                    text: root.guideState.selectedProgram.title || "Programme Details"
-                                                    color: Theme.textPrimary
-                                                    font.pixelSize: 17
-                                                    font.bold: true
-                                                    elide: Text.ElideRight
-                                                    Layout.fillWidth: true
-                                                }
-
-                                                Text {
-                                                    text: root.durationLabel(root.guideState.selectedProgram)
-                                                    color: Theme.textSecondary
-                                                    font.pixelSize: 12
-                                                }
-                                            }
+                                        RowLayout {
+                                            width: parent.width
+                                            spacing: 10
 
                                             Text {
-                                                width: parent.width
-                                                visible: root.episodeTitle(root.guideState.selectedProgram).length > 0
-                                                text: root.episodeTitle(root.guideState.selectedProgram)
-                                                color: Theme.textSecondary
-                                                font.pixelSize: 13
-                                                font.italic: true
-                                                elide: Text.ElideRight
-                                            }
-
-                                            Text {
-                                                width: parent.width
-                                                text: (root.guideState.selectedChannel.name || "")
-                                                    + ((root.guideState.selectedProgram.timeRange || "").length > 0
-                                                        ? "  |  " + root.guideState.selectedProgram.timeRange
-                                                        : "")
-                                                color: Theme.textSecondary
-                                                font.pixelSize: 12
-                                                elide: Text.ElideRight
-                                            }
-
-                                            Text {
-                                                id: descriptionText
-                                                width: parent.width
-                                                text: root.normalizeDescription(root.guideState.selectedProgram.description)
+                                                text: root.guideState.selectedProgram.title || "Programme Details"
                                                 color: Theme.textPrimary
-                                                font.pixelSize: 13
-                                                wrapMode: Text.Wrap
-                                                maximumLineCount: 4
+                                                font.pixelSize: 17
+                                                font.bold: true
                                                 elide: Text.ElideRight
+                                                Layout.fillWidth: true
                                             }
 
-                                            RowLayout {
-                                                visible: root.selectedCatchupState.visible
-                                                width: parent.width
-                                                spacing: 10
+                                            Item {
+                                                Layout.preferredWidth: 30
+                                                Layout.preferredHeight: 30
 
-                                                AppButton {
-                                                    text: "Play Catch-up"
+                                                IconActionButton {
+                                                    anchors.fill: parent
+                                                    compact: true
+                                                    borderless: true
+                                                    barMode: true
+                                                    implicitWidth: 30
+                                                    implicitHeight: 30
+                                                    iconInset: 0
+                                                    iconSource: "qrc:/resources/icons/start-from-beginning.svg"
+                                                    visible: root.selectedCatchupState.visible
                                                     enabled: root.selectedCatchupState.enabled
+                                                    caption: root.selectedCatchupState.enabled
+                                                        ? "Play Catch-up"
+                                                        : "Catch-up not available"
                                                     onClicked: root.playCatchupRequested(
                                                         root.guideState.selectedChannel,
-                                                        root.selectedProgramData())
-                                                }
-
-                                                Text {
-                                                    Layout.fillWidth: true
-                                                    visible: !root.selectedCatchupState.enabled
-                                                    text: root.selectedCatchupState.reason || ""
-                                                    color: Theme.textSecondary
-                                                    font.pixelSize: 12
-                                                    wrapMode: Text.Wrap
+                                                        root.selectedCatchupProgramData())
                                                 }
                                             }
+
+                                            Text {
+                                                text: root.durationLabel(root.guideState.selectedProgram)
+                                                color: Theme.textSecondary
+                                                font.pixelSize: 12
+                                            }
+                                        }
+
+                                        Text {
+                                            width: parent.width
+                                            visible: root.episodeTitle(root.guideState.selectedProgram).length > 0
+                                            text: root.episodeTitle(root.guideState.selectedProgram)
+                                            color: Theme.textSecondary
+                                            font.pixelSize: 13
+                                            font.italic: true
+                                            elide: Text.ElideRight
+                                        }
+
+                                        Text {
+                                            width: parent.width
+                                            text: (root.guideState.selectedChannel.name || "")
+                                                + ((root.guideState.selectedProgram.timeRange || "").length > 0
+                                                    ? "  |  " + root.guideState.selectedProgram.timeRange
+                                                    : "")
+                                            color: Theme.textSecondary
+                                            font.pixelSize: 12
+                                            elide: Text.ElideRight
+                                        }
+
+                                        Text {
+                                            id: descriptionText
+                                            width: parent.width
+                                            text: root.normalizeDescription(root.guideState.selectedProgram.description)
+                                            color: Theme.textPrimary
+                                            font.pixelSize: 13
+                                            wrapMode: Text.Wrap
+                                            maximumLineCount: 4
+                                            elide: Text.ElideRight
                                         }
                                     }
                                 }
@@ -1148,10 +1225,12 @@ Item {
                             id: currentTimeLineLayer
                             visible: root.epgGrid.currentTimeOffsetMinutes >= 0
                                 && root.epgGrid.currentTimeOffsetMinutes <= root.epgGrid.windowSpanMinutes
-                            x: root.epgGrid.currentTimeOffsetMinutes * root.pixelsPerMinute
+                            x: root.channelColumnWidth + root.rowSpacing
+                                + root.epgGrid.currentTimeOffsetMinutes * root.pixelsPerMinute
                             y: 0
                             width: 2
                             height: timelineFlick.height
+                            z: 1
                             clip: true
                             readonly property real gapTop: root.currentTimeLineGapTop(timelineRows.contentY)
                             readonly property real gapBottom: root.currentTimeLineGapBottom(timelineRows.contentY)
@@ -1191,7 +1270,7 @@ Item {
 
             Text {
                 anchors.centerIn: parent
-                visible: channelColumn.count === 0
+                visible: timelineRows.count === 0
                 text: "No EPG rows available for this selection."
                 color: Theme.textSecondary
                 font.pixelSize: 14

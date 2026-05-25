@@ -245,12 +245,29 @@ Item {
     property bool timeshiftTimelineHoverVisible: false
     property real timeshiftTimelineHoverFraction: 0
     property bool timeshiftBadgeForceBehindLive: false
-    readonly property bool transportTimelineActive: root.player.timeshiftActive || root.player.catchupTimelineActive
-    readonly property bool transportTimelineUsingCatchup: root.player.catchupTimelineActive
-    readonly property real transportBehindLiveSeconds: root.transportTimelineUsingCatchup
+    property string liveTimelineNoticeText: ""
+    readonly property bool liveProgramSeekActive: root.player.playbackMode !== "catchup"
+        && !root.player.timeshiftActive
+        && root.liveCatchupState.visible
+        && root.player.liveBufferActive
+    readonly property bool liveProgramTimelineActive: root.liveProgramSeekActive
+        && root.liveCatchupChannelCapable
+    readonly property string transportTimelineMode: root.player.catchupTimelineActive
+        ? "catchup"
+        : (root.player.timeshiftActive ? "timeshift" : (root.liveProgramTimelineActive ? "liveProgram" : "none"))
+    readonly property bool transportTimelineActive: root.transportTimelineMode !== "none"
+    readonly property bool transportSeekActive: root.player.catchupTimelineActive
+        || root.player.timeshiftActive
+        || root.liveProgramSeekActive
+    readonly property bool transportTimelineUsingCatchup: root.transportTimelineMode === "catchup"
+    readonly property bool transportTimelineUsingTimeshift: root.transportTimelineMode === "timeshift"
+    readonly property bool transportTimelineUsingLiveProgram: root.transportTimelineMode === "liveProgram"
+    readonly property real transportBehindLiveSeconds: root.player.catchupTimelineActive
         ? Math.max(0, Number(root.player.catchupTimelineAvailableSeconds || 0) - Number(root.player.catchupTimelinePositionSeconds || 0))
-        : root.timeshiftUiBehindLiveSeconds
-    readonly property real timeshiftUiLiveThresholdSeconds: 10.0
+        : (root.player.timeshiftActive
+            ? root.timeshiftUiBehindLiveSeconds
+            : (root.liveProgramSeekActive ? Math.max(0, Number(root.player.liveBufferBehindLiveSeconds || 0)) : 0))
+    readonly property real transportLiveThresholdSeconds: 10.0
     readonly property real timeshiftUiBehindLiveSeconds: {
         const lag = Number(root.player.timeshiftBehindLiveSeconds || 0)
         if (!Number.isFinite(lag) || lag <= 0) {
@@ -258,9 +275,9 @@ Item {
         }
         return lag
     }
-    readonly property bool timeshiftUiAtLiveEdge: !root.transportTimelineActive
-        || root.transportBehindLiveSeconds <= root.timeshiftUiLiveThresholdSeconds
-    readonly property bool timeshiftBadgeShowBehindLive: root.transportTimelineActive
+    readonly property bool timeshiftUiAtLiveEdge: !root.transportSeekActive
+        || root.transportBehindLiveSeconds <= root.transportLiveThresholdSeconds
+    readonly property bool timeshiftBadgeShowBehindLive: root.transportSeekActive
         && (!root.timeshiftUiAtLiveEdge || root.timeshiftBadgeForceBehindLive)
     property bool debugBubbleEnabled: false
     property real debugBubbleX: Theme.spacingL
@@ -327,8 +344,8 @@ Item {
         const channel = root.player.currentChannel || ({})
         return Boolean(channel.catchupSupported) && Number(channel.catchupWindowHours || 0) > 0
     }
-    readonly property bool liveCatchupButtonVisible: root.liveCatchupEligible
-        || (root.player.playbackMode === "catchup" && root.liveCatchupChannelCapable)
+    readonly property bool liveCatchupButtonVisible: root.liveCatchupChannelCapable
+        && (root.liveCatchupState.visible || root.player.playbackMode === "catchup")
     readonly property bool liveCatchupButtonEnabled: root.liveCatchupEligible
         && root.player.playbackMode !== "catchup"
     readonly property bool sideHasCurrentProgram: (root.sideNowNextModel.currentProgram.title || "").length > 0
@@ -677,14 +694,14 @@ Item {
     }
 
     function markTimeshiftBadgeBehindLive() {
-        if (!root.transportTimelineActive) {
+        if (!root.transportSeekActive) {
             return
         }
         root.timeshiftBadgeForceBehindLive = true
     }
 
     function seekTimeshiftRelativeWithBadge(seconds) {
-        if (!root.transportTimelineActive) {
+        if (!root.transportSeekActive) {
             return false
         }
         const delta = Number(seconds)
@@ -708,6 +725,49 @@ Item {
             return false
         }
         const clamped = Math.max(0, Math.min(1, Number(fraction)))
+        if (root.transportTimelineUsingLiveProgram) {
+            const program = root.playbackNowNext.currentProgram || ({})
+            const startMs = Date.parse(String(program.start || ""))
+            const stopMs = Date.parse(String(program.stop || ""))
+            if (!Number.isFinite(startMs) || !Number.isFinite(stopMs) || stopMs <= startMs) {
+                return false
+            }
+            const nowMs = Math.min(Date.now(), stopMs)
+            const programmeAvailableSeconds = Math.max(0, (nowMs - startMs) / 1000.0)
+            const targetProgrammeSeconds = clamped * programmeAvailableSeconds
+            const minElapsedSeconds = Math.max(0, Number(root.app.catchupMinElapsedSeconds || 0))
+            if (programmeAvailableSeconds > minElapsedSeconds) {
+                const targetSecondsBehindLive = Math.max(0, programmeAvailableSeconds - targetProgrammeSeconds)
+                if (targetSecondsBehindLive < minElapsedSeconds) {
+                    root.showLiveTimelineNotice("Timeline selection is locked within 10 minutes of live.")
+                    return true
+                }
+            }
+            const localAvailableSeconds = Math.max(0, Number(root.player.liveBufferAvailableSeconds || 0))
+            const localStartSeconds = Math.max(0, programmeAvailableSeconds - localAvailableSeconds)
+            if (targetProgrammeSeconds + 0.05 >= localStartSeconds) {
+                const localOffset = Math.max(0, targetProgrammeSeconds - localStartSeconds)
+                const localFraction = localAvailableSeconds > 0
+                    ? Math.max(0, Math.min(1, localOffset / localAvailableSeconds))
+                    : 1
+                if (localFraction >= 0.995) {
+                    return root.jumpToLiveEdgeWithBadge()
+                }
+                root.markTimeshiftBadgeBehindLive()
+                root.player.seekTimeshiftToFraction(localFraction)
+                return true
+            }
+            root.markTimeshiftBadgeBehindLive()
+            if (!root.liveCatchupEligible) {
+                root.showLiveTimelineNotice(String(root.liveCatchupState.reason || "Catch-up is unavailable."))
+                return true
+            }
+            root.app.playCatchupAtOffset(
+                root.player.currentChannel || ({}),
+                root.playbackNowNext.currentProgram || ({}),
+                targetProgrammeSeconds)
+            return true
+        }
         if (clamped >= 0.995) {
             return root.jumpToLiveEdgeWithBadge()
         }
@@ -719,7 +779,7 @@ Item {
     }
 
     function jumpToLiveEdgeWithBadge() {
-        if (!root.transportTimelineActive) {
+        if (!root.transportSeekActive) {
             return false
         }
         root.markTimeshiftBadgeLive()
@@ -728,19 +788,38 @@ Item {
     }
 
     function togglePauseWithBadge() {
-        if (root.transportTimelineActive && root.hasPlaybackChannel && root.player.isPlaying) {
+        if (root.transportSeekActive && root.hasPlaybackChannel && root.player.isPlaying) {
             root.markTimeshiftBadgeBehindLive()
         }
         root.player.togglePause()
     }
 
+    function showLiveTimelineNotice(message) {
+        const text = String(message || "").trim()
+        if (!text.length) {
+            return
+        }
+        root.liveTimelineNoticeText = text
+        liveTimelineNoticeTimer.restart()
+    }
+
     function timeshiftHoverClockText(fraction) {
-        const startMs = root.transportTimelineUsingCatchup
-            ? Number(root.player.catchupTimelineStartEpochMs || 0)
-            : Number(root.player.timeshiftWindowStartEpochMs || 0)
-        const endMs = root.transportTimelineUsingCatchup
-            ? Number(root.player.catchupTimelineAvailableEdgeEpochMs || 0)
-            : Number(root.player.timeshiftLiveEdgeEpochMs || 0)
+        let startMs = 0
+        let endMs = 0
+        if (root.transportTimelineUsingCatchup) {
+            startMs = Number(root.player.catchupTimelineStartEpochMs || 0)
+            endMs = Number(root.player.catchupTimelineAvailableEdgeEpochMs || 0)
+        } else if (root.transportTimelineUsingTimeshift) {
+            startMs = Number(root.player.timeshiftWindowStartEpochMs || 0)
+            endMs = Number(root.player.timeshiftLiveEdgeEpochMs || 0)
+        } else if (root.transportTimelineUsingLiveProgram) {
+            const program = root.playbackNowNext.currentProgram || ({})
+            const start = Date.parse(String(program.start || ""))
+            const stop = Date.parse(String(program.stop || ""))
+            const nowMs = Date.now()
+            startMs = Number.isFinite(start) ? start : 0
+            endMs = Number.isFinite(stop) ? Math.min(nowMs, stop) : nowMs
+        }
         if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
             return "--:--"
         }
@@ -2811,6 +2890,13 @@ Item {
     }
 
     Timer {
+        id: liveTimelineNoticeTimer
+        interval: 5000
+        repeat: false
+        onTriggered: root.liveTimelineNoticeText = ""
+    }
+
+    Timer {
         interval: 1000
         running: root.visible
         repeat: true
@@ -3019,11 +3105,17 @@ Item {
 
         function onPlaybackModeChanged() {
             root.refreshLiveCatchupState()
+            root.liveTimelineNoticeText = ""
+            liveTimelineNoticeTimer.stop()
         }
 
         function onTimeshiftStateChanged() {
             if (!root.transportTimelineActive || root.timeshiftUiAtLiveEdge) {
                 root.markTimeshiftBadgeLive()
+            }
+            if (root.player.timeshiftActive) {
+                root.liveTimelineNoticeText = ""
+                liveTimelineNoticeTimer.stop()
             }
         }
 
@@ -3033,6 +3125,8 @@ Item {
                 return
             }
             root.showChannelChangeBubble()
+            root.liveTimelineNoticeText = ""
+            liveTimelineNoticeTimer.stop()
         }
     }
 
@@ -3187,7 +3281,9 @@ Item {
                     objectName: "multiviewTileVideo_" + String(index)
                     anchors.fill: parent
                     visible: !Boolean(parent.tileData.isEmpty) && parent.visible
-                    playerObject: parent.tileData.playerObject
+                    playerObject: Number(index) === 0
+                        ? root.player.playbackPlayerObject
+                        : parent.tileData.playerObject
                 }
 
                 Rectangle {
@@ -3321,6 +3417,18 @@ Item {
             visible: root.showChannelSwitchBlackout
             z: 10
         }
+    }
+
+    MpvVideoItem {
+        objectName: "seamlessStandbyPrewarmVideo"
+        x: -2
+        y: -2
+        width: 1
+        height: 1
+        visible: root.player.seamlessStandbyPrewarmActive
+        opacity: 0
+        enabled: false
+        playerObject: root.player.seamlessStandbyPlayerObject
     }
 
     Item {
@@ -4689,8 +4797,6 @@ Item {
                         interactive: true
                         width: 6
                         z: 3
-                        anchors.left: parent.left
-                        anchors.leftMargin: 0
                         anchors.top: parent.top
                         anchors.bottom: parent.bottom
                         padding: 0
@@ -5532,7 +5638,9 @@ Item {
         readonly property int controlsVerticalGap: root.transportTimelineActive ? 3 : 0
         readonly property bool timeshiftNoticeVisible: (root.transportTimelineUsingCatchup
                 ? root.player.catchupTimelineNoticeText
-                : root.player.timeshiftNoticeText).length > 0
+                : (root.transportTimelineUsingLiveProgram
+                    ? root.liveTimelineNoticeText
+                    : root.player.timeshiftNoticeText)).length > 0
         readonly property int timeshiftTimelineBlockHeight: 38
 
         GlassPanel {
@@ -5568,11 +5676,15 @@ Item {
                     border.width: 1
                     border.color: "#7fd4f3"
 
-                    Text {
-                        anchors.centerIn: parent
-                        width: parent.width - 16
-                        text: root.transportTimelineUsingCatchup ? root.player.catchupTimelineNoticeText : root.player.timeshiftNoticeText
-                        color: "#ffffff"
+                        Text {
+                            anchors.centerIn: parent
+                            width: parent.width - 16
+                            text: root.transportTimelineUsingCatchup
+                                ? root.player.catchupTimelineNoticeText
+                                : (root.transportTimelineUsingLiveProgram
+                                    ? root.liveTimelineNoticeText
+                                    : root.player.timeshiftNoticeText)
+                            color: "#ffffff"
                         font.pixelSize: 11
                         horizontalAlignment: Text.AlignHCenter
                         elide: Text.ElideRight
@@ -5596,7 +5708,7 @@ Item {
 
                         Rectangle {
                             Layout.alignment: Qt.AlignVCenter
-                            visible: !root.transportTimelineUsingCatchup
+                            visible: root.transportTimelineUsingTimeshift
                             Layout.preferredWidth: visible ? implicitWidth : 0
                             radius: 11
                             color: root.timeshiftBadgeShowBehindLive ? "#4f5a64" : "#c62828"
@@ -5627,7 +5739,9 @@ Item {
                             Layout.alignment: Qt.AlignVCenter
                             text: root.formatTimeshiftClock(root.transportTimelineUsingCatchup
                                 ? root.player.catchupTimelineStartEpochMs
-                                : root.player.timeshiftWindowStartEpochMs)
+                                : (root.transportTimelineUsingTimeshift
+                                    ? root.player.timeshiftWindowStartEpochMs
+                                    : Date.parse(String((root.playbackNowNext.currentProgram || {}).start || ""))))
                             color: Theme.textSecondary
                             font.pixelSize: 11
                             renderType: Text.NativeRendering
@@ -5636,8 +5750,10 @@ Item {
                         Text {
                             Layout.alignment: Qt.AlignVCenter
                             Layout.fillWidth: true
-                            visible: root.transportTimelineUsingCatchup
-                            text: root.player.catchupProgramLabel || ""
+                            visible: root.transportTimelineUsingCatchup || root.transportTimelineUsingLiveProgram
+                            text: root.transportTimelineUsingCatchup
+                                ? (root.player.catchupProgramLabel || "")
+                                : String((root.playbackNowNext.currentProgram || {}).title || "")
                             color: Theme.textPrimary
                             font.pixelSize: 11
                             elide: Text.ElideRight
@@ -5646,15 +5762,17 @@ Item {
                         }
 
                         Item {
-                            Layout.fillWidth: !root.transportTimelineUsingCatchup
-                            Layout.preferredWidth: root.transportTimelineUsingCatchup ? 0 : undefined
+                            Layout.fillWidth: root.transportTimelineUsingTimeshift
+                            Layout.preferredWidth: root.transportTimelineUsingTimeshift ? undefined : 0
                         }
 
                         Text {
                             Layout.alignment: Qt.AlignVCenter
                             text: root.formatTimeshiftClock(root.transportTimelineUsingCatchup
                                 ? root.player.catchupTimelineAvailableEdgeEpochMs
-                                : root.player.timeshiftLiveEdgeEpochMs)
+                                : (root.transportTimelineUsingTimeshift
+                                    ? root.player.timeshiftLiveEdgeEpochMs
+                                    : Math.min(Date.now(), Date.parse(String((root.playbackNowNext.currentProgram || {}).stop || "")))))
                             color: Theme.textSecondary
                             font.pixelSize: 11
                             renderType: Text.NativeRendering
@@ -5662,17 +5780,21 @@ Item {
 
                         Rectangle {
                             Layout.alignment: Qt.AlignVCenter
-                            visible: root.transportTimelineUsingCatchup
+                            visible: root.transportTimelineUsingCatchup || root.transportTimelineUsingLiveProgram
                             radius: 11
                             implicitWidth: 86
                             implicitHeight: 22
-                            color: "#5e656d"
-                            border.width: 1
-                            border.color: "#7a828b"
+                            color: root.transportTimelineUsingCatchup
+                                ? "#5e656d"
+                                : (root.timeshiftBadgeShowBehindLive ? "#4f5a64" : "#c62828")
+                            border.width: root.transportTimelineUsingCatchup ? 1 : 0
+                            border.color: root.transportTimelineUsingCatchup ? "#7a828b" : "transparent"
 
                             Text {
                                 anchors.centerIn: parent
-                                text: "GO LIVE"
+                                text: root.transportTimelineUsingCatchup
+                                    ? "GO LIVE"
+                                    : (root.timeshiftBadgeShowBehindLive ? "GO LIVE" : "LIVE")
                                 color: "#ffffff"
                                 font.pixelSize: 12
                                 font.bold: true
@@ -5681,8 +5803,15 @@ Item {
 
                             MouseArea {
                                 anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.player.returnToLiveFromCatchup()
+                                enabled: root.transportTimelineUsingCatchup || root.timeshiftBadgeShowBehindLive
+                                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                onClicked: {
+                                    if (root.transportTimelineUsingCatchup) {
+                                        root.player.returnToLiveFromCatchup()
+                                    } else {
+                                        root.jumpToLiveEdgeWithBadge()
+                                    }
+                                }
                             }
                         }
                     }
@@ -5724,12 +5853,22 @@ Item {
                                     if (!root.timeshiftBadgeShowBehindLive) {
                                         return available
                                     }
+                                    const program = root.playbackNowNext.currentProgram || ({})
+                                    const startMs = Date.parse(String(program.start || ""))
+                                    const stopMs = Date.parse(String(program.stop || ""))
+                                    const liveProgramTotal = (Number.isFinite(startMs) && Number.isFinite(stopMs) && stopMs > startMs)
+                                        ? Math.max(0, (Math.min(Date.now(), stopMs) - startMs) / 1000.0)
+                                        : 0
                                     const total = root.transportTimelineUsingCatchup
                                         ? Number(root.player.catchupTimelineAvailableSeconds || 0)
-                                        : Number(root.player.timeshiftAvailableSeconds || 0)
+                                        : (root.transportTimelineUsingTimeshift
+                                            ? Number(root.player.timeshiftAvailableSeconds || 0)
+                                            : liveProgramTotal)
                                     const current = root.transportTimelineUsingCatchup
                                         ? Number(root.player.catchupTimelinePositionSeconds || 0)
-                                        : Number(root.player.timeshiftPositionSeconds || 0)
+                                        : (root.transportTimelineUsingTimeshift
+                                            ? Number(root.player.timeshiftPositionSeconds || 0)
+                                            : Math.max(0, liveProgramTotal - Number(root.player.liveBufferBehindLiveSeconds || 0)))
                                     const fraction = total > 0 ? Math.max(0, Math.min(1, current / total)) : 1
                                     return available * fraction
                                 }
@@ -6513,6 +6652,7 @@ Item {
         MpvVideoItem {
             anchors.fill: parent
             playerController: root.player
+            playerObject: root.player.playbackPlayerObject
         }
     }
 

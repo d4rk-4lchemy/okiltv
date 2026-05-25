@@ -5,6 +5,7 @@
 #include "../core/appdatapaths.h"
 #include "../core/debuglogger.h"
 #include "../core/processutils.h"
+#include "../core/redaction.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -33,6 +34,64 @@ bool playerTraceEnabled()
 {
     static const bool enabled = qEnvironmentVariableIsSet("OKILTV_TRACE_PLAYER");
     return enabled;
+}
+
+bool envFlagEnabled(const char *name)
+{
+    const auto value = qEnvironmentVariable(name).trimmed().toLower();
+    return value == QStringLiteral("1")
+        || value == QStringLiteral("true")
+        || value == QStringLiteral("yes")
+        || value == QStringLiteral("on");
+}
+
+Player::CatchupStreamSession::HeaderList catchupRequestHeadersFromSettings(
+    const QString &playerUserAgent,
+    const QMap<QString, QString> &mpvOptions)
+{
+    Player::CatchupStreamSession::HeaderList headers;
+    auto appendHeader = [&headers](QByteArray name, QByteArray value) {
+        name = name.trimmed();
+        value = value.trimmed();
+        if (name.isEmpty() || value.isEmpty()) {
+            return;
+        }
+        for (auto &header : headers) {
+            if (header.first.compare(name, Qt::CaseInsensitive) == 0) {
+                header.second = value;
+                return;
+            }
+        }
+        headers.append(qMakePair(std::move(name), std::move(value)));
+    };
+
+    const auto trimmedUserAgent = playerUserAgent.trimmed();
+    if (!trimmedUserAgent.isEmpty()) {
+        appendHeader(QByteArrayLiteral("User-Agent"), trimmedUserAgent.toUtf8());
+    }
+
+    const auto rawHeaderFields = mpvOptions.value(QStringLiteral("http-header-fields")).trimmed();
+    if (!rawHeaderFields.isEmpty()) {
+        const QRegularExpression splitPattern(
+            QStringLiteral(",(?=\\s*[!#$%&'*+.^_`|~0-9A-Za-z-]+\\s*:)"));
+        const auto headerEntries = rawHeaderFields.split(splitPattern, Qt::SkipEmptyParts);
+        for (const auto &entry : headerEntries) {
+            const auto separatorIndex = entry.indexOf(u':');
+            if (separatorIndex <= 0) {
+                continue;
+            }
+            appendHeader(
+                entry.left(separatorIndex).trimmed().toUtf8(),
+                entry.mid(separatorIndex + 1).trimmed().toUtf8());
+        }
+    }
+
+    const auto referrer = mpvOptions.value(QStringLiteral("referrer")).trimmed();
+    if (!referrer.isEmpty()) {
+        appendHeader(QByteArrayLiteral("Referer"), referrer.toUtf8());
+    }
+
+    return headers;
 }
 
 static QString sanitizeForFilename(const QString &s)
@@ -89,6 +148,7 @@ constexpr int kLoadingIndicatorDelayMs = 1500;
 constexpr int kReconnectAttemptIntervalMs = 1000;
 constexpr int kReconnectPostDepletionGraceMs = 10000;
 constexpr int kReconnectMaxAttempts = 5;
+constexpr int kReconnectTransportSettleMs = 450;
 constexpr int kReconnectStabilizationStableTickThreshold = 12;
 constexpr int kReconnectStabilizationUnstableTickThreshold = 3;
 constexpr int kReconnectStabilizationMinRefillTicks = 2;
@@ -103,6 +163,11 @@ constexpr double kNoRefillCacheSpeedThresholdBytesPerSecond = 1024.0;
 constexpr double kNoRefillCacheIncreaseEpsilonSeconds = 0.05;
 constexpr int kSoftReconnectWatchdogCooldownMs = 15000;
 constexpr int kCatchupSeekSettleMs = 3000;
+constexpr int kCatchupRecoveryNearZeroSustainTicks = 1;
+constexpr double kCatchupRecoveryNearZeroSeconds = 1.0;
+constexpr double kCatchupRecoveryLowCacheSpeedBytesPerSecond = 1024.0;
+constexpr double kCatchupRecoveryProgramEndGuardSeconds = 90.0;
+constexpr int kCatchupRecoveryCooldownMs = 5000;
 constexpr double kMinimumBufferSeconds = 0.1;
 constexpr double kMaximumBufferSeconds = 60.0;
 constexpr qint64 kDebugBitrateWindowMs = 5000;
@@ -113,10 +178,42 @@ constexpr int kAdaptiveSteadyStateRetuneIntervalMs = 2000;
 constexpr qint64 kAdaptiveSteadyStateMinBytes = 8LL * 1024 * 1024;
 constexpr auto kPlaybackSignalsConnectedProperty = "_okiltvPlaybackSignalsConnected";
 constexpr double kCatchupCacheSeekSafetyMarginSeconds = 1.0;
-constexpr double kCatchupCacheTargetSeconds = 120.0;
-constexpr double kCatchupCacheRefillMarginSeconds = 5.0;
+constexpr double kCatchupActiveCacheHeadSeconds = 90.0;
+constexpr double kCatchupActiveCacheRefillMarginSeconds = 5.0;
+constexpr qint64 kCatchupActiveDemuxerMaxBytes = 96LL * 1024LL * 1024LL;
+constexpr qint64 kCatchupActiveDemuxerMaxBackBytes = 32LL * 1024LL * 1024LL;
+constexpr double kCatchupStandbyCacheHeadSeconds = 30.0;
+constexpr double kCatchupStandbyCacheRefillMarginSeconds = 5.0;
+constexpr qint64 kCatchupStandbyDemuxerMaxBytes = 32LL * 1024LL * 1024LL;
+constexpr qint64 kCatchupStandbyDemuxerMaxBackBytes = 8LL * 1024LL * 1024LL;
+constexpr qsizetype kCatchupOwnedQueueActiveHighWaterBytes = 16 * 1024 * 1024;
+constexpr qsizetype kCatchupOwnedQueueActiveLowWaterBytes = 8 * 1024 * 1024;
+constexpr qint64 kCatchupOwnedQueueActiveReplyReadBufferBytes = 16 * 1024 * 1024;
+constexpr qsizetype kCatchupOwnedQueueStandbyHighWaterBytes = 8 * 1024 * 1024;
+constexpr qsizetype kCatchupOwnedQueueStandbyLowWaterBytes = 4 * 1024 * 1024;
+constexpr qint64 kCatchupOwnedQueueStandbyReplyReadBufferBytes = 8 * 1024 * 1024;
 constexpr double kCatchupBackwardSeekWindowSeconds = 60.0;
-constexpr double kCatchupDebugEffectiveCacheMaxSeconds = kCatchupCacheTargetSeconds;
+constexpr double kCatchupDebugEffectiveCacheMaxSeconds = kCatchupActiveCacheHeadSeconds;
+constexpr double kCatchupUnexpectedRollbackThresholdSeconds = 15.0;
+constexpr qint64 kCatchupRollbackGuardWarmupMs = 90000;
+constexpr qint64 kCatchupRollbackDeferredCorrectionTimeoutMs = 3500;
+constexpr int kCatchupTimelineReloadAckTimeoutMs = 500;
+constexpr int kCatchupTimelineNoticeAutoClearMs = 5000;
+constexpr double kCatchupRollingOverlapBiasSeconds = 2.0;
+constexpr double kCatchupMinElapsedSeconds = 10.0 * 60.0;
+constexpr double kCatchupRollingPredictiveTriggerSeconds = 45.0;
+constexpr int kCatchupRollingRetryWindowMs = 10000;
+constexpr int kCatchupRollingMaxRetries = 3;
+constexpr int kCatchupRollingMinAttemptSpacingMs = 900;
+constexpr int kCatchupSeamlessFallbackTimeoutMs = 2500;
+constexpr int kCatchupSeamlessStandbyRetryBackoffMs = 5000;
+constexpr int kCatchupSeamlessStandbyStopAckTimeoutMs = 500;
+constexpr int kCatchupSeamlessStandbyVideoReadyTimeoutMs = 400;
+constexpr int kCatchupSeamlessStandbyFastRetryDelayMs = 250;
+constexpr int kCatchupSeamlessStandbyFastRetryWindowMs = 1200;
+constexpr int kCatchupSeamlessStandbyFastRetryMaxAttempts = 2;
+constexpr int kCatchupSeamlessPostCloseDelayMs = 750;
+constexpr double kCatchupSeamlessCutoverRemainingSeconds = 0.35;
 
 double normalizedBufferTargetSeconds(const double value)
 {
@@ -225,6 +322,31 @@ std::optional<double> instantaneousBitrateBitsPerSecond(const Player::MpvPlayer 
     return hasInstantaneousBitrate ? std::optional<double>(instantaneousBitsPerSecond) : std::nullopt;
 }
 
+Player::CatchupStreamSession::BufferingPolicy catchupOwnedStreamPolicy(const bool standby)
+{
+    if (standby) {
+        return {
+            .queueHighWaterBytes = kCatchupOwnedQueueStandbyHighWaterBytes,
+            .queueLowWaterBytes = kCatchupOwnedQueueStandbyLowWaterBytes,
+            .replyReadBufferBytes = kCatchupOwnedQueueStandbyReplyReadBufferBytes,
+            .roleLabel = QStringLiteral("standby"),
+        };
+    }
+
+    return {
+        .queueHighWaterBytes = kCatchupOwnedQueueActiveHighWaterBytes,
+        .queueLowWaterBytes = kCatchupOwnedQueueActiveLowWaterBytes,
+        .replyReadBufferBytes = kCatchupOwnedQueueActiveReplyReadBufferBytes,
+        .roleLabel = QStringLiteral("active"),
+    };
+}
+
+QString formatOwnedQueueBytes(const qsizetype bytes)
+{
+    return QStringLiteral("%1 MiB")
+        .arg(static_cast<double>(std::max<qsizetype>(0, bytes)) / (1024.0 * 1024.0), 0, 'f', 1);
+}
+
 }
 
 PlayerController::PlayerController(QObject *parent)
@@ -276,10 +398,192 @@ PlayerController::PlayerController(QObject *parent)
     connect(&m_startupBufferProbeTimer, &QTimer::timeout, this, &PlayerController::evaluateStartupBufferAndResumeIfReady);
     m_reconnectAttemptTimer.setInterval(reconnectAttemptIntervalMs());
     connect(&m_reconnectAttemptTimer, &QTimer::timeout, this, &PlayerController::handleReconnectAttemptTick);
+    m_catchupTimelineReloadAckTimer.setSingleShot(true);
+    m_catchupTimelineReloadAckTimer.setInterval(kCatchupTimelineReloadAckTimeoutMs);
+    connect(&m_catchupTimelineReloadAckTimer, &QTimer::timeout, this, [this]() {
+        if (!m_catchupTimelineReloadInFlight) {
+            return;
+        }
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral("Catch-up timeline reload teardown ack timed out after %1ms; proceeding with reload.")
+                .arg(kCatchupTimelineReloadAckTimeoutMs));
+        runCatchupTimelineReload();
+        finishCatchupTimelineReload(QStringLiteral("timeout"));
+    });
+    m_catchupTimelineNoticeClearTimer.setSingleShot(true);
+    connect(&m_catchupTimelineNoticeClearTimer, &QTimer::timeout, this, [this]() {
+        if (m_catchupTimelineNoticeText.isEmpty()
+            || m_catchupTimelineNoticeText != m_catchupTimelineNoticeAutoClearText) {
+            return;
+        }
+        m_catchupTimelineNoticeText.clear();
+        m_catchupTimelineNoticeAutoClearText.clear();
+        emit catchupTimelineChanged();
+    });
+    m_catchupSeamlessFallbackTimer.setSingleShot(true);
+    m_catchupSeamlessFallbackTimer.setInterval(kCatchupSeamlessFallbackTimeoutMs);
+    connect(&m_catchupSeamlessFallbackTimer, &QTimer::timeout, this, [this]() {
+        if (!m_catchupSeamlessPending || !m_catchupSeamlessFallbackDeferred || !inCatchupMode()) {
+            return;
+        }
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral(
+                "Catch-up seamless extension standby timeout after %1ms; falling back to standard recovery.")
+                .arg(kCatchupSeamlessFallbackTimeoutMs));
+        m_catchupSeamlessFallbackDeferred = false;
+        if (handleCatchupPlaybackEndedRecovery()) {
+            return;
+        }
+        startReconnectLoop(QStringLiteral("catchup-seamless-fallback-timeout"));
+        refreshBufferingState();
+    });
+    m_catchupSeamlessStandbyStopAckTimer.setSingleShot(true);
+    m_catchupSeamlessStandbyStopAckTimer.setInterval(kCatchupSeamlessStandbyStopAckTimeoutMs);
+    connect(&m_catchupSeamlessStandbyStopAckTimer, &QTimer::timeout, this, [this]() {
+        if (!m_catchupSeamlessPending || !m_catchupSeamlessStandbyStopPending || m_catchupSeamlessStandbyLoadIssued) {
+            return;
+        }
+        auto *standbyPlayer = m_catchupSeamlessStandbyPlayer.data();
+        if (standbyPlayer == nullptr || standbyPlayer == playbackPlayer()) {
+            m_catchupSeamlessStandbyStopPending = false;
+            return;
+        }
+        m_catchupSeamlessStandbyStopPending = false;
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral(
+                "Catch-up seamless standby stop ack timed out after %1ms; proceeding with standby load.")
+                .arg(kCatchupSeamlessStandbyStopAckTimeoutMs));
+        launchSeamlessCatchupStandbyLoad(standbyPlayer);
+    });
+    m_catchupSeamlessStandbyVideoReadyTimeoutTimer.setSingleShot(true);
+    m_catchupSeamlessStandbyVideoReadyTimeoutTimer.setInterval(kCatchupSeamlessStandbyVideoReadyTimeoutMs);
+    connect(&m_catchupSeamlessStandbyVideoReadyTimeoutTimer, &QTimer::timeout, this, [this]() {
+        if (!m_catchupSeamlessPending || !m_catchupSeamlessStandbyLoadIssued || m_catchupSeamlessStandbyVideoReady) {
+            return;
+        }
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral(
+                "Catch-up seamless standby video prewarm timed out after %1ms; falling back to hard restore.")
+                .arg(kCatchupSeamlessStandbyVideoReadyTimeoutMs));
+        abortSeamlessCatchupRolling(QStringLiteral("standby-video-prewarm-timeout"), true);
+        hardRestoreCatchupAtCurrentTimelinePoint(QStringLiteral("standby-video-prewarm-timeout"));
+    });
+    m_catchupSeamlessFastRetryTimer.setSingleShot(true);
+    m_catchupSeamlessFastRetryTimer.setInterval(kCatchupSeamlessStandbyFastRetryDelayMs);
+    connect(&m_catchupSeamlessFastRetryTimer, &QTimer::timeout, this, [this]() {
+        if (!m_catchupSeamlessPending || m_catchupSeamlessStandbyLoadIssued || !canUseSeamlessCatchupRolling()) {
+            return;
+        }
+        if (!m_catchupSeamlessFastRetryPending || m_catchupSeamlessFastRetryBudgetRemaining <= 0) {
+            return;
+        }
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral("Catch-up seamless standby fast retry timer fired; attempting immediate retry."));
+        startSeamlessCatchupStandbyLoad();
+    });
+    m_catchupSeamlessPostCloseDelayTimer.setSingleShot(true);
+    m_catchupSeamlessPostCloseDelayTimer.setInterval(kCatchupSeamlessPostCloseDelayMs);
+    connect(&m_catchupSeamlessPostCloseDelayTimer, &QTimer::timeout, this, [this]() {
+        if (!m_catchupSeamlessPending || !m_catchupSeamlessPostCloseDelayPending || !canUseSeamlessCatchupRolling()) {
+            return;
+        }
+        m_catchupSeamlessPostCloseDelayPending = false;
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral(
+                "Catch-up seamless standby delay elapsed (%1ms); starting standby warmup after EOF/provider-close handshake.")
+                .arg(kCatchupSeamlessPostCloseDelayMs));
+        startSeamlessCatchupStandbyLoad();
+    });
     m_hwdecFallbackTimer.setSingleShot(true);
     m_hwdecFallbackTimer.setInterval(5000);
     connect(&m_hwdecFallbackTimer, &QTimer::timeout, this, &PlayerController::handleHwdecFallbackCheck);
     ensurePlaybackSignalConnections(&m_player);
+    ensurePlaybackSignalConnections(&m_catchupStandbyPlayer);
+    const auto bindSeamlessStandbyLifecycle = [this](Player::MpvPlayer *observedPlayer) {
+        connect(observedPlayer, &Player::MpvPlayer::fileLoaded, this, [this, observedPlayer]() {
+            if (!m_catchupSeamlessPending || !m_catchupSeamlessStandbyLoadIssued) {
+                return;
+            }
+            if (m_catchupSeamlessStandbyPlayer.data() != observedPlayer) {
+                return;
+            }
+            observedPlayer->setStartupBufferingStrictMode(false);
+            Core::DebugLogger::instance().log(
+                QStringLiteral("player"),
+                QStringLiteral("Catch-up seamless standby file-loaded."));
+        });
+        connect(observedPlayer, &Player::MpvPlayer::playbackRestarted, this, [this, observedPlayer]() {
+            if (!m_catchupSeamlessPending || !m_catchupSeamlessStandbyLoadIssued) {
+                return;
+            }
+            if (m_catchupSeamlessStandbyPlayer.data() != observedPlayer) {
+                return;
+            }
+            if (!standbyCatchupSessionHealthyForCutover()) {
+                markSeamlessStandbyAttemptFailed(QStringLiteral("standby owned stream became unavailable before readiness"));
+                return;
+            }
+            m_catchupSeamlessStandbyReady = true;
+            Core::DebugLogger::instance().log(
+                QStringLiteral("player"),
+                QStringLiteral("Catch-up seamless standby playback restarted; standby ready."));
+            if (!m_catchupSeamlessStandbyVideoReady && !m_catchupSeamlessStandbyVideoReadyTimeoutTimer.isActive()) {
+                m_catchupSeamlessStandbyVideoReadyTimeoutTimer.start();
+            }
+            maybeCommitSeamlessCatchupCutover(QStringLiteral("standby-ready"));
+        });
+        connect(observedPlayer, &Player::MpvPlayer::videoReconfigured, this, [this, observedPlayer]() {
+            if (!m_catchupSeamlessPending || !m_catchupSeamlessStandbyLoadIssued) {
+                return;
+            }
+            if (m_catchupSeamlessStandbyPlayer.data() != observedPlayer) {
+                return;
+            }
+            if (!standbyCatchupSessionHealthyForCutover()) {
+                markSeamlessStandbyAttemptFailed(QStringLiteral("standby owned stream became unavailable before video-ready"));
+                return;
+            }
+            m_catchupSeamlessStandbyVideoReady = true;
+            m_catchupSeamlessStandbyVideoReadyTimeoutTimer.stop();
+            Core::DebugLogger::instance().log(
+                QStringLiteral("player"),
+                QStringLiteral("Catch-up seamless standby video reconfigured; standby video ready."));
+            maybeCommitSeamlessCatchupCutover(QStringLiteral("standby-video-ready"));
+        });
+        connect(observedPlayer, &Player::MpvPlayer::playbackStopped, this, [this, observedPlayer]() {
+            if (!m_catchupSeamlessPending || !m_catchupSeamlessStandbyStopPending || m_catchupSeamlessStandbyLoadIssued) {
+                return;
+            }
+            auto *standbyPlayer = m_catchupSeamlessStandbyPlayer.data();
+            if (standbyPlayer == nullptr || standbyPlayer != observedPlayer || standbyPlayer == playbackPlayer()) {
+                m_catchupSeamlessStandbyStopPending = false;
+                return;
+            }
+            m_catchupSeamlessStandbyStopAckTimer.stop();
+            m_catchupSeamlessStandbyStopPending = false;
+            Core::DebugLogger::instance().log(
+                QStringLiteral("player"),
+                QStringLiteral("Catch-up seamless standby stop acknowledged; starting standby load."));
+            launchSeamlessCatchupStandbyLoad(standbyPlayer);
+        });
+        connect(observedPlayer, &Player::MpvPlayer::errorOccurred, this, [this, observedPlayer](const QString &message) {
+            if (!m_catchupSeamlessPending || !m_catchupSeamlessStandbyLoadIssued) {
+                return;
+            }
+            if (m_catchupSeamlessStandbyPlayer.data() != observedPlayer) {
+                return;
+            }
+            markSeamlessStandbyAttemptFailed(message);
+        });
+    };
+    bindSeamlessStandbyLifecycle(&m_player);
+    bindSeamlessStandbyLifecycle(&m_catchupStandbyPlayer);
 
     m_positionTimer.setInterval(1000);
     connect(&m_positionTimer, &QTimer::timeout, this, &PlayerController::updatePosition);
@@ -315,6 +619,17 @@ void PlayerController::ensurePlaybackSignalConnections(Player::MpvPlayer *player
             Core::DebugLogger::instance().log(
                 QStringLiteral("player"),
                 QStringLiteral("Catch-up file-loaded: disabled strict startup cache-pause for responsive seeks."));
+            m_catchupActiveEofObserved = false;
+            if (m_catchupReconnectResumeStreamRelativeSeconds.has_value()) {
+                const auto resumeTarget = std::max(0.0, m_catchupReconnectResumeStreamRelativeSeconds.value());
+                m_catchupReconnectResumeStreamRelativeSeconds = std::nullopt;
+                m_catchupSeekSettleTimer.restart();
+                playbackPlayer()->seekAbsoluteFast(resumeTarget);
+                Core::DebugLogger::instance().log(
+                    QStringLiteral("player"),
+                    QStringLiteral("Catch-up reconnect loaded; restoring stream-relative position to %1s.")
+                        .arg(resumeTarget, 0, 'f', 3));
+            }
             if (m_catchupPendingStreamRelativeSeekSeconds.has_value()) {
                 const auto residualSeekSeconds = std::max(0.0, m_catchupPendingStreamRelativeSeekSeconds.value());
                 m_catchupPendingStreamRelativeSeekSeconds = std::nullopt;
@@ -326,6 +641,20 @@ void PlayerController::ensurePlaybackSignalConnections(Player::MpvPlayer *player
                             .arg(residualSeekSeconds, 0, 'f', 3));
                 }
             }
+            if (m_catchupPendingInitialSeekSeconds.has_value()) {
+                const auto requestedSeekSeconds = std::max(0.0, m_catchupPendingInitialSeekSeconds.value());
+                m_catchupPendingInitialSeekSeconds = std::nullopt;
+                if (requestedSeekSeconds > kPlaybackPositionEpsilon) {
+                    seekCatchupToTimelinePosition(requestedSeekSeconds);
+                }
+            }
+            m_catchupRollingExtensionRetryCount = 0;
+            m_catchupRollingRetryWindowTimer.invalidate();
+            m_catchupProgramBoundaryReached = false;
+            syncCatchupTimelineState();
+            m_catchupTransportEndTimelineSeconds =
+                std::max(m_catchupStreamBaseOffsetSeconds, m_catchupTimelineAvailableSeconds);
+            setCatchupTimelineNoticeText(QString {});
         }
         emit playbackFileLoaded();
         clearPlaybackStallTracking();
@@ -386,6 +715,19 @@ void PlayerController::ensurePlaybackSignalConnections(Player::MpvPlayer *player
         refreshBufferingState();
         evaluateReconnectRecovery();
     });
+    connect(player, &Player::MpvPlayer::playbackStopped, this, [this, player]() {
+        if (playbackPlayer() != player) {
+            return;
+        }
+        if (!m_catchupTimelineReloadInFlight) {
+            return;
+        }
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral("Catch-up timeline reload teardown acknowledged by mpv stop event."));
+        runCatchupTimelineReload();
+        finishCatchupTimelineReload(QStringLiteral("stop-ack"));
+    });
     connect(player, &Player::MpvPlayer::playbackEnded, this, [this, player]() {
         if (playbackPlayer() != player) {
             return;
@@ -413,10 +755,9 @@ void PlayerController::ensurePlaybackSignalConnections(Player::MpvPlayer *player
             clearPlaybackStallTracking();
             setIsPlaying(false);
             if (inCatchupMode()) {
-                m_catchupProgramBoundaryReached = true;
-                syncCatchupTimelineState();
-                refreshBufferingState();
-                return;
+                if (handleCatchupPlaybackEndedRecovery()) {
+                    return;
+                }
             }
             if (m_timeshiftController && m_timeshiftController->handlePlaybackFailure(QStringLiteral("playback-ended"))) {
                 refreshBufferingState();
@@ -612,6 +953,60 @@ QString PlayerController::catchupTimelineNoticeText() const
     return m_catchupTimelineNoticeText;
 }
 
+void PlayerController::setCatchupTimelineNoticeText(const QString &noticeText, const int autoClearMs)
+{
+    const auto normalized = noticeText.trimmed();
+    if (!normalized.isEmpty() && autoClearMs > 0) {
+        m_catchupTimelineNoticeAutoClearText = normalized;
+        m_catchupTimelineNoticeClearTimer.start(std::max(1, autoClearMs));
+    } else {
+        m_catchupTimelineNoticeClearTimer.stop();
+        m_catchupTimelineNoticeAutoClearText.clear();
+    }
+
+    if (m_catchupTimelineNoticeText == normalized) {
+        return;
+    }
+
+    m_catchupTimelineNoticeText = normalized;
+    emit catchupTimelineChanged();
+}
+
+bool PlayerController::liveBufferActive() const
+{
+    return m_liveBufferActive;
+}
+
+qint64 PlayerController::liveBufferWindowStartEpochMs() const
+{
+    return m_liveBufferWindowStartEpochMs;
+}
+
+qint64 PlayerController::liveBufferLiveEdgeEpochMs() const
+{
+    return m_liveBufferLiveEdgeEpochMs;
+}
+
+double PlayerController::liveBufferAvailableSeconds() const
+{
+    return m_liveBufferAvailableSeconds;
+}
+
+double PlayerController::liveBufferPositionSeconds() const
+{
+    return m_liveBufferPositionSeconds;
+}
+
+double PlayerController::liveBufferBehindLiveSeconds() const
+{
+    return m_liveBufferBehindLiveSeconds;
+}
+
+bool PlayerController::liveBufferAtLiveEdge() const
+{
+    return m_liveBufferAtLiveEdge;
+}
+
 bool PlayerController::timeshiftActive() const
 {
     return m_timeshiftController && m_timeshiftController->isActive();
@@ -738,6 +1133,14 @@ QVariantMap PlayerController::debugOverlaySnapshot()
     const auto bitrateText = averageBitrateBitsPerSecond.has_value()
         ? formatDebugBitrate(averageBitrateBitsPerSecond.value())
         : QStringLiteral("N/A");
+    const auto liveForwardTargetSeconds = adaptiveSteadyStateCacheLimitSeconds(activePlayer->bufferTargetSeconds());
+    const auto liveBackTargetSeconds = Player::MpvPlayer::steadyStateBackBufferSeconds();
+    const auto liveMaxBytes = adaptiveSteadyStateMaxBytes(activePlayer->bufferTargetSeconds(), averageBitrateBitsPerSecond);
+    const auto liveMaxBackBytes = adaptiveSteadyStateMaxBackBytes(averageBitrateBitsPerSecond);
+    const auto activeOwnedQueueBytes = m_catchupActiveStreamSession ? m_catchupActiveStreamSession->bufferedBytes() : 0;
+    const auto standbyOwnedQueueBytes = m_catchupStandbyStreamSession ? m_catchupStandbyStreamSession->bufferedBytes() : 0;
+    const auto activeOwnedQueuePeakBytes = m_catchupActiveStreamSession ? m_catchupActiveStreamSession->peakBufferedBytes() : 0;
+    const auto standbyOwnedQueuePeakBytes = m_catchupStandbyStreamSession ? m_catchupStandbyStreamSession->peakBufferedBytes() : 0;
     const auto interlaced = activePlayer->isInterlaced();
     const auto scanningText = interlaced.has_value()
         ? (interlaced.value() ? QStringLiteral("Interlaced") : QStringLiteral("Progressive"))
@@ -786,6 +1189,20 @@ QVariantMap PlayerController::debugOverlaySnapshot()
         { QStringLiteral("bitrateText"), bitrateText },
         { QStringLiteral("bitrateValueKbps"),
             averageBitrateBitsPerSecond.has_value() ? averageBitrateBitsPerSecond.value() / 1000.0 : -1.0 },
+        { QStringLiteral("liveForwardTargetSeconds"), liveForwardTargetSeconds },
+        { QStringLiteral("liveForwardTargetText"), formatDebugBufferDuration(liveForwardTargetSeconds) },
+        { QStringLiteral("liveBackTargetSeconds"), liveBackTargetSeconds },
+        { QStringLiteral("liveBackTargetText"), formatDebugBufferDuration(liveBackTargetSeconds) },
+        { QStringLiteral("liveMaxBytes"), liveMaxBytes },
+        { QStringLiteral("liveMaxBackBytes"), liveMaxBackBytes },
+        { QStringLiteral("catchupOwnedQueueActiveBytes"), activeOwnedQueueBytes },
+        { QStringLiteral("catchupOwnedQueueActiveText"), formatOwnedQueueBytes(activeOwnedQueueBytes) },
+        { QStringLiteral("catchupOwnedQueueActivePeakBytes"), activeOwnedQueuePeakBytes },
+        { QStringLiteral("catchupOwnedQueueActivePeakText"), formatOwnedQueueBytes(activeOwnedQueuePeakBytes) },
+        { QStringLiteral("catchupOwnedQueueStandbyBytes"), standbyOwnedQueueBytes },
+        { QStringLiteral("catchupOwnedQueueStandbyText"), formatOwnedQueueBytes(standbyOwnedQueueBytes) },
+        { QStringLiteral("catchupOwnedQueueStandbyPeakBytes"), standbyOwnedQueuePeakBytes },
+        { QStringLiteral("catchupOwnedQueueStandbyPeakText"), formatOwnedQueueBytes(standbyOwnedQueuePeakBytes) },
         { QStringLiteral("bufferDurationSeconds"), bufferDurationSeconds },
         { QStringLiteral("bufferDurationText"), bufferDurationText },
         { QStringLiteral("bufferDurationSourceText"), bufferDurationSourceText },
@@ -1009,17 +1426,58 @@ qint64 PlayerController::adaptiveSteadyStateMaxBytes(
     const double bufferTargetSeconds,
     const std::optional<double> averageBitsPerSecond)
 {
-    const auto cacheLimitSeconds = adaptiveSteadyStateCacheLimitSeconds(bufferTargetSeconds);
+    const auto totalLiveWindowSeconds =
+        adaptiveSteadyStateCacheLimitSeconds(bufferTargetSeconds) + Player::MpvPlayer::steadyStateBackBufferSeconds();
     if (!averageBitsPerSecond.has_value()
         || !std::isfinite(averageBitsPerSecond.value())
         || averageBitsPerSecond.value() <= 0.0) {
-        return Player::MpvPlayer::demuxerMaxBytesForBufferSeconds(cacheLimitSeconds);
+        return Player::MpvPlayer::demuxerMaxBytesForBufferSeconds(totalLiveWindowSeconds);
     }
 
     const auto dynamicBudgetBytes = static_cast<qint64>(std::llround(
-        (averageBitsPerSecond.value() / 8.0) * cacheLimitSeconds * kAdaptiveSteadyStateMaxBytesSafetyMultiplier));
-    const auto maxBudgetBytes = Player::MpvPlayer::demuxerMaxBytesForBufferSeconds(kMaximumBufferSeconds);
+        (averageBitsPerSecond.value() / 8.0) * totalLiveWindowSeconds * kAdaptiveSteadyStateMaxBytesSafetyMultiplier));
+    const auto maxBudgetBytes = std::numeric_limits<qint64>::max();
     return std::clamp(dynamicBudgetBytes, kAdaptiveSteadyStateMinBytes, maxBudgetBytes);
+}
+
+qint64 PlayerController::adaptiveSteadyStateMaxBackBytes(const std::optional<double> averageBitsPerSecond)
+{
+    const auto backBufferSeconds = Player::MpvPlayer::steadyStateBackBufferSeconds();
+    if (!averageBitsPerSecond.has_value()
+        || !std::isfinite(averageBitsPerSecond.value())
+        || averageBitsPerSecond.value() <= 0.0) {
+        return Player::MpvPlayer::demuxerMaxBytesForBufferSeconds(backBufferSeconds);
+    }
+
+    const auto dynamicBudgetBytes = static_cast<qint64>(std::llround(
+        (averageBitsPerSecond.value() / 8.0) * backBufferSeconds * kAdaptiveSteadyStateMaxBytesSafetyMultiplier));
+    return std::clamp(dynamicBudgetBytes, kAdaptiveSteadyStateMinBytes, std::numeric_limits<qint64>::max());
+}
+
+qint64 PlayerController::adaptiveCatchupMaxBytes(const std::optional<double> averageBitsPerSecond)
+{
+    if (!averageBitsPerSecond.has_value()
+        || !std::isfinite(averageBitsPerSecond.value())
+        || averageBitsPerSecond.value() <= 0.0) {
+        return kCatchupActiveDemuxerMaxBytes;
+    }
+
+    const auto dynamicBudgetBytes = static_cast<qint64>(std::llround(
+        (averageBitsPerSecond.value() / 8.0) * kCatchupActiveCacheHeadSeconds * kAdaptiveSteadyStateMaxBytesSafetyMultiplier));
+    return std::clamp(dynamicBudgetBytes, kAdaptiveSteadyStateMinBytes, std::numeric_limits<qint64>::max());
+}
+
+qint64 PlayerController::adaptiveCatchupMaxBackBytes(const std::optional<double> averageBitsPerSecond)
+{
+    if (!averageBitsPerSecond.has_value()
+        || !std::isfinite(averageBitsPerSecond.value())
+        || averageBitsPerSecond.value() <= 0.0) {
+        return kCatchupActiveDemuxerMaxBackBytes;
+    }
+
+    const auto dynamicBudgetBytes = static_cast<qint64>(std::llround(
+        (averageBitsPerSecond.value() / 8.0) * kCatchupStandbyCacheHeadSeconds * kAdaptiveSteadyStateMaxBytesSafetyMultiplier));
+    return std::clamp(dynamicBudgetBytes, kAdaptiveSteadyStateMinBytes, std::numeric_limits<qint64>::max());
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
@@ -1112,12 +1570,17 @@ void PlayerController::startReconnectLoop(const QString &reason)
     if (m_reconnectActive) {
         return;
     }
+    if (inCatchupMode()) {
+        abortSeamlessCatchupRolling(QStringLiteral("reconnect-start"), true);
+    }
 
     m_reconnectActive = true;
     m_reconnectAttemptCount = 0;
     m_reconnectAttemptInFlight = false;
     m_reconnectStabilizing = false;
     m_reconnectAttemptIssuedTimer.invalidate();
+    m_reconnectTransportStopIssued = false;
+    m_reconnectTransportStopIssuedTimer.invalidate();
     m_reconnectRecoveryHealthyTickCount = 0;
     m_reconnectRecoveryUnhealthyTickCount = 0;
     m_reconnectStabilizationRefillTickCount = 0;
@@ -1173,6 +1636,8 @@ void PlayerController::stopReconnectLoop(const QString &reason)
     m_reconnectAttemptInFlight = false;
     m_reconnectStabilizing = false;
     m_reconnectAttemptIssuedTimer.invalidate();
+    m_reconnectTransportStopIssued = false;
+    m_reconnectTransportStopIssuedTimer.invalidate();
     m_reconnectRecoveryHealthyTickCount = 0;
     m_reconnectRecoveryUnhealthyTickCount = 0;
     m_reconnectStabilizationRefillTickCount = 0;
@@ -1211,6 +1676,8 @@ void PlayerController::clearReconnectAttemptInFlight(const QString &reason)
     m_reconnectRecoveryUnhealthyTickCount = 0;
     m_reconnectStabilizationRefillTickCount = 0;
     m_lastReconnectStabilizationCacheDurationSeconds = std::nullopt;
+    m_reconnectTransportStopIssued = false;
+    m_reconnectTransportStopIssuedTimer.invalidate();
     Core::DebugLogger::instance().log(
         QStringLiteral("player"),
         QStringLiteral("Reconnect attempt resolved: %1.").arg(reason));
@@ -1258,24 +1725,45 @@ void PlayerController::handleReconnectAttemptTick()
         normalizedWaitForDataStreamSeconds(m_waitForDataStreamSeconds) * 1000.0));
     if (m_reconnectAttemptInFlight) {
         if (m_reconnectStabilizing) {
-            return;
+            if (!m_reconnectAttemptIssuedTimer.isValid()) {
+                m_reconnectAttemptIssuedTimer.restart();
+                return;
+            }
+            if (m_reconnectAttemptIssuedTimer.elapsed() >= waitTimeoutMs) {
+                Core::DebugLogger::instance().log(
+                    QStringLiteral("player"),
+                    QStringLiteral(
+                        "Reconnect stabilization timed out after %1 ms; forcing next sequential attempt.")
+                        .arg(waitTimeoutMs));
+                if (activePlayer != nullptr) {
+                    activePlayer->stop();
+                }
+                clearReconnectAttemptInFlight(QStringLiteral("stabilization-timeout"));
+                // Continue below and schedule next reconnect attempt.
+            } else {
+                return;
+            }
         }
-        if (!m_reconnectAttemptIssuedTimer.isValid()) {
-            m_reconnectAttemptIssuedTimer.restart();
-            return;
-        }
-        if (m_reconnectAttemptIssuedTimer.elapsed() < waitTimeoutMs) {
-            return;
-        }
+        if (!m_reconnectAttemptInFlight) {
+            // Previous block may have resolved the attempt.
+        } else {
+            if (!m_reconnectAttemptIssuedTimer.isValid()) {
+                m_reconnectAttemptIssuedTimer.restart();
+                return;
+            }
+            if (m_reconnectAttemptIssuedTimer.elapsed() < waitTimeoutMs) {
+                return;
+            }
 
-        Core::DebugLogger::instance().log(
-            QStringLiteral("player"),
-            QStringLiteral(
-                "Reconnect attempt #%1 timed out after %2 ms; stopping current attempt before retry.")
-                .arg(m_reconnectAttemptCount)
-                .arg(waitTimeoutMs));
-        activePlayer->stop();
-        clearReconnectAttemptInFlight(QStringLiteral("attempt-timeout"));
+            Core::DebugLogger::instance().log(
+                QStringLiteral("player"),
+                QStringLiteral(
+                    "Reconnect attempt #%1 timed out after %2 ms; stopping current attempt before retry.")
+                    .arg(m_reconnectAttemptCount)
+                    .arg(waitTimeoutMs));
+            activePlayer->stop();
+            clearReconnectAttemptInFlight(QStringLiteral("attempt-timeout"));
+        }
     }
 
     if (m_reconnectAttemptCount >= kReconnectMaxAttempts) {
@@ -1290,10 +1778,28 @@ void PlayerController::handleReconnectAttemptTick()
         return;
     }
 
-    if (m_reconnectAttemptCount > 0) {
-        // Hard-stop any lingering transport from the previous failed attempt before opening a new one.
+    if (!m_reconnectTransportStopIssued) {
+        if (inCatchupMode()) {
+            const auto streamPositionBeforeStop = activePlayer->position();
+            m_catchupReconnectResumeStreamRelativeSeconds = (streamPositionBeforeStop >= 0.0)
+                ? std::optional<double>(streamPositionBeforeStop)
+                : m_catchupReconnectResumeStreamRelativeSeconds;
+        }
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral("Reconnect attempt preparing transport: stop previous playback and wait %1 ms.")
+                .arg(kReconnectTransportSettleMs));
         activePlayer->stop();
+        m_reconnectTransportStopIssued = true;
+        m_reconnectTransportStopIssuedTimer.restart();
+        return;
     }
+    if (!m_reconnectTransportStopIssuedTimer.isValid()
+        || m_reconnectTransportStopIssuedTimer.elapsed() < kReconnectTransportSettleMs) {
+        return;
+    }
+    m_reconnectTransportStopIssued = false;
+    m_reconnectTransportStopIssuedTimer.invalidate();
 
     m_reconnectAttemptCount += 1;
     Core::DebugLogger::instance().log(
@@ -1315,12 +1821,38 @@ void PlayerController::handleReconnectAttemptTick()
     m_lastReconnectStabilizationCacheDurationSeconds = std::nullopt;
     m_reconnectAttemptInFlight = true;
     m_reconnectAttemptIssuedTimer.restart();
+    if (inCatchupMode()) {
+        if (!m_catchupReconnectResumeStreamRelativeSeconds.has_value()) {
+            const auto streamPosition = activePlayer->position();
+            m_catchupReconnectResumeStreamRelativeSeconds = (streamPosition >= 0.0)
+                ? std::optional<double>(streamPosition)
+                : std::nullopt;
+        }
+        resetCatchupUrlLoadGuardState(false);
+    } else {
+        m_catchupReconnectResumeStreamRelativeSeconds = std::nullopt;
+    }
     activePlayer->setPaused(false);
-    activePlayer->play(url, loadfileOptions);
+    const auto playbackUrl = inCatchupMode()
+        ? prepareCatchupStreamPlaybackUrl(activePlayer, url, false)
+        : url;
+    activePlayer->play(playbackUrl, loadfileOptions);
 }
 
 void PlayerController::failReconnect(const QString &reason)
 {
+    if (reason == QStringLiteral("attempt-limit") && inCatchupMode()) {
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral("Reconnect attempt-limit reached in catch-up; escalating to hard restore."));
+        if (hardRestoreCatchupAtCurrentTimelinePoint(QStringLiteral("catchup-reconnect-attempt-limit"))) {
+            stopReconnectLoop(QStringLiteral("catchup-hard-restore-escalation"));
+            return;
+        }
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral("Catch-up hard-restore escalation failed; falling back to channel load failure."));
+    }
     Core::DebugLogger::instance().log(
         QStringLiteral("player"),
         QStringLiteral("Reconnect failed: %1. Marking channel as load failure.").arg(reason));
@@ -1379,6 +1911,7 @@ void PlayerController::resetAdaptiveSteadyStateBufferingState()
     m_lastAdaptiveCacheLimitSeconds = -1.0;
     m_lastAdaptiveCacheHysteresisSeconds = -1.0;
     m_lastAdaptiveDemuxerMaxBytes = -1;
+    m_lastAdaptiveDemuxerMaxBackBytes = -1;
 }
 
 std::optional<double> PlayerController::updateBitrateAverageBitsPerSecond(
@@ -1434,6 +1967,7 @@ void PlayerController::maybeRetuneSteadyStateBuffering(
     const auto cacheLimitSeconds = adaptiveSteadyStateCacheLimitSeconds(bufferTargetSeconds);
     const auto hysteresisSeconds = adaptiveSteadyStateCacheHysteresisSeconds(bufferTargetSeconds);
     const auto maxBytes = adaptiveSteadyStateMaxBytes(bufferTargetSeconds, m_averageBitrateBitsPerSecond);
+    const auto maxBackBytes = adaptiveSteadyStateMaxBackBytes(m_averageBitrateBitsPerSecond);
 
     const auto secondsChanged =
         m_lastAdaptiveCacheLimitSeconds < 0.0
@@ -1446,6 +1980,12 @@ void PlayerController::maybeRetuneSteadyStateBuffering(
             >= static_cast<double>(std::max<qint64>(
                 1,
                 std::llround(std::abs(static_cast<double>(m_lastAdaptiveDemuxerMaxBytes))
+                    * kAdaptiveSteadyStateBytesRetuneThresholdRatio)))
+        || m_lastAdaptiveDemuxerMaxBackBytes <= 0
+        || std::abs(static_cast<double>(maxBackBytes - m_lastAdaptiveDemuxerMaxBackBytes))
+            >= static_cast<double>(std::max<qint64>(
+                1,
+                std::llround(std::abs(static_cast<double>(m_lastAdaptiveDemuxerMaxBackBytes))
                     * kAdaptiveSteadyStateBytesRetuneThresholdRatio)));
     if (!secondsChanged && !bytesChanged) {
         return;
@@ -1464,16 +2004,18 @@ void PlayerController::maybeRetuneSteadyStateBuffering(
         .cacheLimitSeconds = cacheLimitSeconds,
         .hysteresisSeconds = hysteresisSeconds,
         .maxBytes = maxBytes,
+        .maxBackBytes = maxBackBytes,
     });
     m_lastAdaptiveCacheLimitSeconds = cacheLimitSeconds;
     m_lastAdaptiveCacheHysteresisSeconds = hysteresisSeconds;
     m_lastAdaptiveDemuxerMaxBytes = maxBytes;
+    m_lastAdaptiveDemuxerMaxBackBytes = maxBackBytes;
     m_steadyStateBufferRetuneTimer.restart();
 
     Core::DebugLogger::instance().log(
         QStringLiteral("player"),
         QStringLiteral(
-            "Adaptive steady-state buffering retune: avg-bitrate=%1 cache=%2 buffer=%3 limit=%4 hysteresis=%5 max-bytes=%6.")
+            "Adaptive steady-state buffering retune: avg-bitrate=%1 cache=%2 buffer=%3 limit=%4 hysteresis=%5 max-bytes=%6 max-back-bytes=%7.")
             .arg(
                 m_averageBitrateBitsPerSecond.has_value()
                     ? QString::number(m_averageBitrateBitsPerSecond.value(), 'f', 0)
@@ -1485,12 +2027,143 @@ void PlayerController::maybeRetuneSteadyStateBuffering(
             .arg(bufferTargetSeconds, 0, 'f', 1)
             .arg(cacheLimitSeconds, 0, 'f', 1)
             .arg(hysteresisSeconds, 0, 'f', 1)
-            .arg(maxBytes));
+            .arg(maxBytes)
+            .arg(maxBackBytes));
+}
+
+void PlayerController::maybeRetuneCatchupBuffering(const std::optional<double> cacheDurationSeconds)
+{
+    auto *activePlayer = playbackPlayer();
+    if (!m_isPlaying
+        || !inCatchupMode()
+        || activePlayer == nullptr
+        || !m_currentChannel.has_value()
+        || m_resumePlaybackAfterLoad
+        || m_reconnectActive
+        || m_channelLoadFailed
+        || m_userPausedManually) {
+        return;
+    }
+
+    const auto cacheLimitSeconds = kCatchupActiveCacheHeadSeconds;
+    const auto hysteresisSeconds = cacheLimitSeconds - kCatchupActiveCacheRefillMarginSeconds;
+    const auto maxBytes = adaptiveCatchupMaxBytes(m_averageBitrateBitsPerSecond);
+    const auto maxBackBytes = adaptiveCatchupMaxBackBytes(m_averageBitrateBitsPerSecond);
+
+    const auto secondsChanged =
+        m_lastAdaptiveCacheLimitSeconds < 0.0
+        || std::abs(cacheLimitSeconds - m_lastAdaptiveCacheLimitSeconds) >= kAdaptiveSteadyStateSecondsRetuneThreshold
+        || m_lastAdaptiveCacheHysteresisSeconds < 0.0
+        || std::abs(hysteresisSeconds - m_lastAdaptiveCacheHysteresisSeconds) >= kAdaptiveSteadyStateSecondsRetuneThreshold;
+    const auto bytesChanged =
+        m_lastAdaptiveDemuxerMaxBytes <= 0
+        || std::abs(static_cast<double>(maxBytes - m_lastAdaptiveDemuxerMaxBytes))
+            >= static_cast<double>(std::max<qint64>(
+                1,
+                std::llround(std::abs(static_cast<double>(m_lastAdaptiveDemuxerMaxBytes))
+                    * kAdaptiveSteadyStateBytesRetuneThresholdRatio)))
+        || m_lastAdaptiveDemuxerMaxBackBytes <= 0
+        || std::abs(static_cast<double>(maxBackBytes - m_lastAdaptiveDemuxerMaxBackBytes))
+            >= static_cast<double>(std::max<qint64>(
+                1,
+                std::llround(std::abs(static_cast<double>(m_lastAdaptiveDemuxerMaxBackBytes))
+                    * kAdaptiveSteadyStateBytesRetuneThresholdRatio)));
+    if (!secondsChanged && !bytesChanged) {
+        return;
+    }
+
+    const auto cacheBelowBand = cacheDurationSeconds.has_value()
+        && std::isfinite(cacheDurationSeconds.value())
+        && std::max(0.0, cacheDurationSeconds.value()) + kNoRefillCacheIncreaseEpsilonSeconds < hysteresisSeconds;
+    if (m_steadyStateBufferRetuneTimer.isValid()
+        && m_steadyStateBufferRetuneTimer.elapsed() < kAdaptiveSteadyStateRetuneIntervalMs
+        && !cacheBelowBand) {
+        return;
+    }
+
+    activePlayer->setSteadyStateBufferingPolicy({
+        .cacheLimitSeconds = cacheLimitSeconds,
+        .hysteresisSeconds = hysteresisSeconds,
+        .maxBytes = maxBytes,
+        .maxBackBytes = maxBackBytes,
+    });
+    m_lastAdaptiveCacheLimitSeconds = cacheLimitSeconds;
+    m_lastAdaptiveCacheHysteresisSeconds = hysteresisSeconds;
+    m_lastAdaptiveDemuxerMaxBytes = maxBytes;
+    m_lastAdaptiveDemuxerMaxBackBytes = maxBackBytes;
+    m_steadyStateBufferRetuneTimer.restart();
+
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player"),
+        QStringLiteral(
+            "Adaptive catch-up buffering retune: avg-bitrate=%1 cache=%2 limit=%3 hysteresis=%4 max-bytes=%5 max-back-bytes=%6.")
+            .arg(
+                m_averageBitrateBitsPerSecond.has_value()
+                    ? QString::number(m_averageBitrateBitsPerSecond.value(), 'f', 0)
+                    : QStringLiteral("N/A"))
+            .arg(
+                cacheDurationSeconds.has_value() && std::isfinite(cacheDurationSeconds.value())
+                    ? QString::number(std::max(0.0, cacheDurationSeconds.value()), 'f', 2)
+                    : QStringLiteral("N/A"))
+            .arg(cacheLimitSeconds, 0, 'f', 1)
+            .arg(hysteresisSeconds, 0, 'f', 1)
+            .arg(maxBytes)
+            .arg(maxBackBytes));
+}
+
+void PlayerController::applyActiveCatchupBufferingPolicy(Player::MpvPlayer *player)
+{
+    if (player == nullptr) {
+        return;
+    }
+
+    const auto cacheLimitSeconds = kCatchupActiveCacheHeadSeconds;
+    const auto hysteresisSeconds = cacheLimitSeconds - kCatchupActiveCacheRefillMarginSeconds;
+    const auto maxBytes = adaptiveCatchupMaxBytes(m_averageBitrateBitsPerSecond);
+    const auto maxBackBytes = adaptiveCatchupMaxBackBytes(m_averageBitrateBitsPerSecond);
+    player->setSteadyStateBufferingPolicy({
+        .cacheLimitSeconds = cacheLimitSeconds,
+        .hysteresisSeconds = hysteresisSeconds,
+        .maxBytes = maxBytes,
+        .maxBackBytes = maxBackBytes,
+    });
+    m_lastAdaptiveCacheLimitSeconds = cacheLimitSeconds;
+    m_lastAdaptiveCacheHysteresisSeconds = hysteresisSeconds;
+    m_lastAdaptiveDemuxerMaxBytes = maxBytes;
+    m_lastAdaptiveDemuxerMaxBackBytes = maxBackBytes;
+    m_steadyStateBufferRetuneTimer.restart();
+
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player"),
+        QStringLiteral(
+            "Applied active catch-up buffering policy immediately: player=%1 limit=%2 hysteresis=%3 max-bytes=%4 max-back-bytes=%5.")
+            .arg(reinterpret_cast<quintptr>(player), 0, 16)
+            .arg(cacheLimitSeconds, 0, 'f', 1)
+            .arg(hysteresisSeconds, 0, 'f', 1)
+            .arg(maxBytes)
+            .arg(maxBackBytes));
 }
 
 Player::MpvPlayer *PlayerController::player()
 {
     return playbackPlayer();
+}
+
+QObject *PlayerController::playbackPlayerObject() const
+{
+    return const_cast<Player::MpvPlayer *>(playbackPlayer());
+}
+
+QObject *PlayerController::seamlessStandbyPlayerObject() const
+{
+    return m_catchupSeamlessPrewarmActive
+        ? static_cast<QObject *>(m_catchupSeamlessPrewarmPlayer.data())
+        : nullptr;
+}
+
+bool PlayerController::seamlessStandbyPrewarmActive() const
+{
+    return m_catchupSeamlessPrewarmActive && m_catchupSeamlessPrewarmPlayer.data() != nullptr;
 }
 
 void PlayerController::setTimeshiftController(TimeshiftController *controller)
@@ -1528,6 +2201,26 @@ const Player::MpvPlayer *PlayerController::playbackPlayer() const
     return m_sharedPlaybackPlayer ? m_sharedPlaybackPlayer.data() : &m_player;
 }
 
+void PlayerController::setSharedPlaybackPlayer(Player::MpvPlayer *player, const bool protectedSession)
+{
+    auto *previousPlayer = playbackPlayer();
+    m_sharedPlaybackPlayer = (player != nullptr && player != &m_player) ? player : nullptr;
+    m_sharedPlaybackProtected = m_sharedPlaybackPlayer ? protectedSession : false;
+    auto *nextPlayer = playbackPlayer();
+    if (previousPlayer == nextPlayer) {
+        return;
+    }
+
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player"),
+        QStringLiteral("Visible playback player changed: previous=%1 next=%2 protected=%3 mode=%4.")
+            .arg(reinterpret_cast<quintptr>(previousPlayer), 0, 16)
+            .arg(reinterpret_cast<quintptr>(nextPlayer), 0, 16)
+            .arg(m_sharedPlaybackProtected ? QStringLiteral("yes") : QStringLiteral("no"))
+            .arg(m_playbackMode));
+    emit playbackPlayerObjectChanged();
+}
+
 void PlayerController::attachSharedPlayback(
     Player::MpvPlayer *sharedPlayer,
     const Channel &channel,
@@ -1548,8 +2241,7 @@ void PlayerController::attachSharedPlayback(
     const auto previousName = m_nowPlayingName;
     stopReconnectLoop(QStringLiteral("attach-shared-playback"));
     ensurePlaybackSignalConnections(sharedPlayer);
-    m_sharedPlaybackPlayer = sharedPlayer;
-    m_sharedPlaybackProtected = protectedSession;
+    setSharedPlaybackPlayer(sharedPlayer, protectedSession);
     clearCatchupState();
     m_sharedPlaybackPlayer->setAudioEnabled(true);
     const auto effectiveVolume = (m_muted || m_volume <= 0.0)
@@ -1623,8 +2315,7 @@ void PlayerController::detachSharedPlayback(const bool clearChannel)
 
     const auto sharedPlayer = m_sharedPlaybackPlayer;
     const auto protectedSession = m_sharedPlaybackProtected;
-    m_sharedPlaybackPlayer = nullptr;
-    m_sharedPlaybackProtected = false;
+    setSharedPlaybackPlayer(nullptr, false);
     if (sharedPlayer && protectedSession) {
         sharedPlayer->setAudioEnabled(false);
         sharedPlayer->setVolume(0);
@@ -1703,6 +2394,11 @@ void PlayerController::applySettings(
     m_player.configureOptions(mpvOptions);
     m_player.configurePlaybackTuning(m_waitForDataStreamSeconds, deinterlaceEnabled, bufferSizeSeconds);
     m_player.configureUserAgent(playerUserAgent);
+    m_catchupRequestHeaders = catchupRequestHeadersFromSettings(playerUserAgent, mpvOptions);
+    m_catchupStandbyPlayer.configureLibraryPath(mpvDllPath);
+    m_catchupStandbyPlayer.configureOptions(mpvOptions);
+    m_catchupStandbyPlayer.configurePlaybackTuning(m_waitForDataStreamSeconds, deinterlaceEnabled, bufferSizeSeconds);
+    m_catchupStandbyPlayer.configureUserAgent(playerUserAgent);
     Core::DebugLogger::instance().log(
         QStringLiteral("player"),
         QStringLiteral("Applied player settings: dll=%1 options=%2 wait=%3s deinterlace=%4 buffer=%5s user-agent=%6.")
@@ -1737,6 +2433,9 @@ void PlayerController::startPlaybackRequest(
             ? QStringLiteral("Play requested: %1").arg(url)
             : QStringLiteral("Play requested: %1 (%2)").arg(url, loadfileOptions));
     m_currentLoadfileOptions = loadfileOptions.trimmed();
+    if (!inCatchupMode()) {
+        resetCatchupDegradationRecoveryState();
+    }
     m_tuneAttemptTimer.restart();
     stopStartupBufferProbe();
     stopStartupBufferFallbackWatchdog(true);
@@ -1766,18 +2465,20 @@ void PlayerController::startPlaybackRequest(
     activePlayer->play(url, loadfileOptions);
 }
 
-QString PlayerController::catchupLoadfileOptions(const double streamBaseOffsetSeconds) const
+QString PlayerController::catchupLoadfileOptions(const double streamBaseOffsetSeconds, const bool standby) const
 {
-    constexpr qint64 kCatchupDemuxerMaxBytes = 500LL * 1024LL * 1024LL;
-    constexpr qint64 kCatchupDemuxerMaxBackBytes = 250LL * 1024LL * 1024LL;
-    constexpr double kCatchupCacheRefillFloorSeconds = kCatchupCacheTargetSeconds - kCatchupCacheRefillMarginSeconds;
+    const auto cacheTargetSeconds = standby ? kCatchupStandbyCacheHeadSeconds : kCatchupActiveCacheHeadSeconds;
+    const auto cacheRefillFloorSeconds = cacheTargetSeconds
+        - (standby ? kCatchupStandbyCacheRefillMarginSeconds : kCatchupActiveCacheRefillMarginSeconds);
+    const auto demuxerMaxBytes = standby ? kCatchupStandbyDemuxerMaxBytes : kCatchupActiveDemuxerMaxBytes;
+    const auto demuxerMaxBackBytes = standby ? kCatchupStandbyDemuxerMaxBackBytes : kCatchupActiveDemuxerMaxBackBytes;
     const auto sharedOptions = QStringLiteral(
         "force-seekable=yes,hr-seek=no,cache=yes,cache-pause=no,cache-pause-wait=0,cache-secs=%1,demuxer-readahead-secs=%2,demuxer-hysteresis-secs=%3,demuxer-seekable-cache=yes,demuxer-max-bytes=%4,demuxer-max-back-bytes=%5")
-                                   .arg(kCatchupCacheTargetSeconds, 0, 'f', 0)
-                                   .arg(kCatchupCacheTargetSeconds, 0, 'f', 0)
-                                   .arg(kCatchupCacheRefillFloorSeconds, 0, 'f', 0)
-                                   .arg(kCatchupDemuxerMaxBytes)
-                                   .arg(kCatchupDemuxerMaxBackBytes);
+                                   .arg(cacheTargetSeconds, 0, 'f', 0)
+                                   .arg(cacheTargetSeconds, 0, 'f', 0)
+                                   .arg(cacheRefillFloorSeconds, 0, 'f', 0)
+                                   .arg(demuxerMaxBytes)
+                                   .arg(demuxerMaxBackBytes);
     if (!m_catchupProgramStartUtc.isValid() || !m_catchupProgramStopUtc.isValid() || m_catchupProgramStopUtc <= m_catchupProgramStartUtc) {
         return sharedOptions;
     }
@@ -1822,14 +2523,48 @@ void PlayerController::clearCatchupState()
     m_catchupProgramStartUtc = {};
     m_catchupProgramStopUtc = {};
     m_catchupProgramBoundaryReached = false;
+    m_catchupActiveEofObserved = false;
     m_catchupStreamBaseOffsetSeconds = 0.0;
+    m_catchupDesiredDelaySeconds = 0.0;
+    m_catchupTransportEndTimelineSeconds = 0.0;
     m_catchupPendingStreamRelativeSeekSeconds = std::nullopt;
+    m_catchupReconnectResumeStreamRelativeSeconds = std::nullopt;
+    m_catchupPendingInitialSeekSeconds = std::nullopt;
+    m_catchupTimelineReloadAckTimer.stop();
+    m_catchupTimelineReloadInFlight = false;
+    m_catchupTimelineReloadUrl.clear();
+    m_catchupTimelineReloadStreamBaseOffsetSeconds = 0.0;
+    m_pendingCatchupTimelineReloadTargetSeconds = std::nullopt;
+    abortSeamlessCatchupRolling(QStringLiteral("clear-catchup-state"), false);
+    if (m_catchupActiveStreamSession) {
+        m_catchupActiveStreamSession->closeProviderConnection(QStringLiteral("clear-catchup-state"));
+        m_catchupActiveStreamSession.reset();
+    }
+    if (m_catchupStandbyStreamSession) {
+        m_catchupStandbyStreamSession->closeProviderConnection(QStringLiteral("clear-catchup-state"));
+        m_catchupStandbyStreamSession.reset();
+    }
+    if (m_sharedPlaybackPlayer && m_sharedPlaybackPlayer.data() == &m_catchupStandbyPlayer) {
+        setSharedPlaybackPlayer(nullptr, false);
+    }
+    m_catchupStandbyPlayer.setAudioEnabled(false);
+    m_catchupStandbyPlayer.setVolume(0);
+    m_catchupStandbyPlayer.stop();
+    resetCatchupDegradationRecoveryState();
+    m_catchupUrlLoadGuardTimer.invalidate();
+    m_catchupLastObservedStreamSeconds = -1.0;
+    m_catchupRollbackGuardConsumed = false;
+    m_catchupRollbackInitialLoadContext = false;
+    m_catchupRollbackDeferredPending = false;
+    m_catchupRollbackDeferredTargetSeconds = -1.0;
+    m_catchupRollbackDeferredTimer.invalidate();
+    m_catchupSeamlessLastStandbyAttemptTimer.invalidate();
     m_catchupTimelineStartEpochMs = 0;
     m_catchupTimelineAvailableEdgeEpochMs = 0;
     m_catchupTimelineAvailableSeconds = 0.0;
     m_catchupTimelinePositionSeconds = 0.0;
     m_catchupTimelineAtLiveEdge = true;
-    m_catchupTimelineNoticeText.clear();
+    setCatchupTimelineNoticeText(QString {});
 
     if (m_playbackMode != previousMode) {
         emit playbackModeChanged();
@@ -1839,6 +2574,15 @@ void PlayerController::clearCatchupState()
     }
     emit catchupTimelineChanged();
     emit timeshiftStateChanged();
+}
+
+void PlayerController::resetCatchupDegradationRecoveryState()
+{
+    m_catchupNearZeroTickCount = 0;
+    m_catchupRecoveryCooldownTimer.invalidate();
+    m_catchupRollingRetryWindowTimer.invalidate();
+    m_catchupLastRollingExtensionAttemptTimer.invalidate();
+    m_catchupRollingExtensionRetryCount = 0;
 }
 
 void PlayerController::syncCatchupTimelineState()
@@ -1861,6 +2605,121 @@ void PlayerController::syncCatchupTimelineState()
     emit timeshiftStateChanged();
 }
 
+void PlayerController::resetCatchupUrlLoadGuardState(const bool initialLoadContext)
+{
+    m_catchupUrlLoadGuardTimer.restart();
+    m_catchupLastObservedStreamSeconds = -1.0;
+    m_catchupRollbackGuardConsumed = false;
+    m_catchupRollbackInitialLoadContext = initialLoadContext;
+    m_catchupRollbackDeferredPending = false;
+    m_catchupRollbackDeferredTargetSeconds = -1.0;
+    m_catchupRollbackDeferredTimer.invalidate();
+}
+
+void PlayerController::maybeCorrectUnexpectedCatchupRollback(const double currentStreamSeconds)
+{
+    if (!inCatchupMode() || currentStreamSeconds < 0.0) {
+        return;
+    }
+    auto *activePlayer = playbackPlayer();
+    if (m_catchupRollbackDeferredPending) {
+        if (activePlayer == nullptr) {
+            m_catchupRollbackDeferredPending = false;
+            m_catchupRollbackDeferredTargetSeconds = -1.0;
+            m_catchupRollbackDeferredTimer.invalidate();
+            return;
+        }
+        if (!m_catchupRollbackDeferredTimer.isValid()
+            || m_catchupRollbackDeferredTimer.elapsed() > kCatchupRollbackDeferredCorrectionTimeoutMs) {
+            m_catchupRollbackDeferredPending = false;
+            m_catchupRollbackDeferredTargetSeconds = -1.0;
+            m_catchupRollbackDeferredTimer.invalidate();
+            m_catchupLastObservedStreamSeconds = currentStreamSeconds;
+            Core::DebugLogger::instance().log(
+                QStringLiteral("player"),
+                QStringLiteral(
+                    "Catch-up rollback guard deferred correction expired after %1ms; continuing playback.")
+                    .arg(kCatchupRollbackDeferredCorrectionTimeoutMs));
+            return;
+        }
+        const auto seekableRange = activePlayer->demuxerSeekableRangeSeconds();
+        if (seekableRange.has_value()) {
+            const auto target = std::max(0.0, m_catchupRollbackDeferredTargetSeconds);
+            const auto rangeStart = std::max(0.0, seekableRange->first);
+            const auto rangeEnd = std::max(rangeStart, seekableRange->second);
+            if (target + kPlaybackPositionEpsilon >= rangeStart
+                && target <= rangeEnd - kCatchupCacheSeekSafetyMarginSeconds) {
+                m_catchupSeekSettleTimer.restart();
+                activePlayer->seekAbsoluteFast(target);
+                m_catchupRollbackDeferredPending = false;
+                m_catchupRollbackDeferredTargetSeconds = -1.0;
+                m_catchupRollbackDeferredTimer.invalidate();
+                Core::DebugLogger::instance().log(
+                    QStringLiteral("player"),
+                    QStringLiteral(
+                        "Catch-up rollback guard deferred correction applied: target=%1s range=%2..%3s.")
+                        .arg(target, 0, 'f', 3)
+                        .arg(rangeStart, 0, 'f', 3)
+                        .arg(rangeEnd, 0, 'f', 3));
+                return;
+            }
+        }
+    }
+    if (m_catchupRollbackGuardConsumed || !m_catchupUrlLoadGuardTimer.isValid()
+        || m_catchupUrlLoadGuardTimer.elapsed() > kCatchupRollbackGuardWarmupMs) {
+        m_catchupLastObservedStreamSeconds = currentStreamSeconds;
+        return;
+    }
+    if (m_catchupLastObservedStreamSeconds < 0.0) {
+        m_catchupLastObservedStreamSeconds = currentStreamSeconds;
+        return;
+    }
+    if (m_catchupSeekSettleTimer.isValid() && m_catchupSeekSettleTimer.elapsed() < kCatchupSeekSettleMs) {
+        m_catchupLastObservedStreamSeconds = currentStreamSeconds;
+        return;
+    }
+    const auto rollbackSeconds = m_catchupLastObservedStreamSeconds - currentStreamSeconds;
+    if (rollbackSeconds < kCatchupUnexpectedRollbackThresholdSeconds) {
+        m_catchupLastObservedStreamSeconds = std::max(m_catchupLastObservedStreamSeconds, currentStreamSeconds);
+        return;
+    }
+    if (activePlayer == nullptr) {
+        m_catchupLastObservedStreamSeconds = currentStreamSeconds;
+        return;
+    }
+    if (m_catchupRollbackInitialLoadContext) {
+        const auto seekableRange = activePlayer->demuxerSeekableRangeSeconds();
+        const auto target = std::max(0.0, m_catchupLastObservedStreamSeconds);
+        const auto seekableReady = seekableRange.has_value()
+            && (target + kPlaybackPositionEpsilon >= std::max(0.0, seekableRange->first))
+            && (target <= std::max(std::max(0.0, seekableRange->first), seekableRange->second) - kCatchupCacheSeekSafetyMarginSeconds);
+        if (!seekableReady) {
+            m_catchupRollbackDeferredPending = true;
+            m_catchupRollbackDeferredTargetSeconds = target;
+            m_catchupRollbackDeferredTimer.restart();
+            m_catchupRollbackGuardConsumed = true;
+            Core::DebugLogger::instance().log(
+                QStringLiteral("player"),
+                QStringLiteral(
+                    "Catch-up rollback guard deferred correction armed: current=%1s target=%2s rollback=%3s seekable=%4.")
+                    .arg(currentStreamSeconds, 0, 'f', 3)
+                    .arg(target, 0, 'f', 3)
+                    .arg(rollbackSeconds, 0, 'f', 3)
+                    .arg(seekableRange.has_value() ? QStringLiteral("yes") : QStringLiteral("no")));
+            return;
+        }
+    }
+    m_catchupSeekSettleTimer.restart();
+    activePlayer->seekAbsoluteFast(m_catchupLastObservedStreamSeconds);
+    m_catchupRollbackGuardConsumed = true;
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player"),
+        QStringLiteral("Catch-up rollback guard corrected backward jump: current=%1s previous=%2s rollback=%3s.")
+            .arg(currentStreamSeconds, 0, 'f', 3)
+            .arg(m_catchupLastObservedStreamSeconds, 0, 'f', 3)
+            .arg(rollbackSeconds, 0, 'f', 3));
+}
+
 bool PlayerController::seekCatchupToTimelinePosition(const double targetSeconds)
 {
     if (!inCatchupMode()) {
@@ -1868,6 +2727,7 @@ bool PlayerController::seekCatchupToTimelinePosition(const double targetSeconds)
     }
     const auto bounded = std::max(0.0, std::min(m_catchupTimelineAvailableSeconds, targetSeconds));
     m_catchupTimelinePositionSeconds = bounded;
+    m_catchupDesiredDelaySeconds = std::max(0.0, m_catchupTimelineAvailableSeconds - bounded);
     m_catchupTimelineAtLiveEdge = (m_catchupTimelineAvailableSeconds - bounded) <= 0.75;
     emit catchupTimelineChanged();
     if (playbackPlayer() == nullptr) {
@@ -1925,6 +2785,781 @@ bool PlayerController::shouldReloadCatchupForSeek(const double targetSeconds) co
         || targetSeconds > cachedTimelineEnd;
 }
 
+bool PlayerController::shouldExtendCatchupRollingWindowPredictively(const double currentStreamSeconds) const
+{
+    if (!inCatchupMode()
+        || !m_currentChannel.has_value()
+        || m_catchupProgramBoundaryReached
+        || m_channelLoadFailed
+        || m_resumePlaybackAfterLoad
+        || m_catchupTimelineReloadInFlight
+        || m_reconnectActive) {
+        return false;
+    }
+    if (!m_catchupProgramStartUtc.isValid()
+        || !m_catchupProgramStopUtc.isValid()
+        || m_catchupProgramStopUtc <= m_catchupProgramStartUtc) {
+        return false;
+    }
+    if (QDateTime::currentDateTimeUtc() >= m_catchupProgramStopUtc.addSecs(-1)) {
+        return false;
+    }
+    if (currentStreamSeconds < 0.0
+        || m_catchupCanonicalPlaybackUrl.trimmed().isEmpty()
+        || !matchXtreamTimeshiftUrl(m_catchupCanonicalPlaybackUrl).has_value()) {
+        return false;
+    }
+    if (m_catchupLastRollingExtensionAttemptTimer.isValid()
+        && m_catchupLastRollingExtensionAttemptTimer.elapsed() < kCatchupRollingMinAttemptSpacingMs) {
+        return false;
+    }
+
+    const auto remainingSeconds = m_catchupTransportEndTimelineSeconds - m_catchupTimelinePositionSeconds;
+    return std::isfinite(remainingSeconds)
+        && remainingSeconds > kPlaybackPositionEpsilon
+        && remainingSeconds <= kCatchupRollingPredictiveTriggerSeconds;
+}
+
+bool PlayerController::seamlessCatchupRollingEnabled() const
+{
+    return !envFlagEnabled("OKILTV_DISABLE_CATCHUP_SEAMLESS_ROLLING");
+}
+
+bool PlayerController::canUseSeamlessCatchupRolling() const
+{
+    if (!seamlessCatchupRollingEnabled()) {
+        return false;
+    }
+    if (!inCatchupMode()
+        || !m_currentChannel.has_value()
+        || m_catchupProgramBoundaryReached
+        || m_channelLoadFailed
+        || m_resumePlaybackAfterLoad
+        || m_catchupTimelineReloadInFlight
+        || m_reconnectActive) {
+        return false;
+    }
+    if (!m_catchupProgramStartUtc.isValid()
+        || !m_catchupProgramStopUtc.isValid()
+        || m_catchupProgramStopUtc <= m_catchupProgramStartUtc) {
+        return false;
+    }
+    if (QDateTime::currentDateTimeUtc() >= m_catchupProgramStopUtc.addSecs(-1)) {
+        return false;
+    }
+    if (m_catchupCanonicalPlaybackUrl.trimmed().isEmpty()
+        || !matchXtreamTimeshiftUrl(m_catchupCanonicalPlaybackUrl).has_value()) {
+        return false;
+    }
+    if (m_sharedPlaybackPlayer && m_sharedPlaybackPlayer.data() != &m_catchupStandbyPlayer) {
+        return false;
+    }
+    return true;
+}
+
+Player::MpvPlayer *PlayerController::seamlessCatchupStandbyPlayer()
+{
+    auto *activePlayer = playbackPlayer();
+    if (activePlayer == &m_player) {
+        return &m_catchupStandbyPlayer;
+    }
+    return &m_player;
+}
+
+bool PlayerController::armSeamlessCatchupRollingExtension(
+    const QString &reason,
+    const double targetSeconds,
+    const QString &regeneratedUrl,
+    const double streamBaseOffsetSeconds)
+{
+    if (!canUseSeamlessCatchupRolling()) {
+        return false;
+    }
+    if (regeneratedUrl.trimmed().isEmpty()) {
+        return false;
+    }
+
+    m_catchupSeamlessPending = true;
+    m_catchupSeamlessStandbyLoadIssued = false;
+    m_catchupSeamlessStandbyReady = false;
+    m_catchupSeamlessStandbyVideoReady = false;
+    m_catchupSeamlessStandbyPlayer = seamlessCatchupStandbyPlayer();
+    m_catchupSeamlessStandbyUrl = regeneratedUrl;
+    m_catchupSeamlessStandbyStreamBaseOffsetSeconds = streamBaseOffsetSeconds;
+    m_catchupSeamlessFallbackDeferred = false;
+    m_catchupSeamlessStandbyStopPending = false;
+    m_catchupSeamlessPostCloseDelayPending = false;
+    m_catchupSeamlessFallbackTimer.stop();
+    m_catchupSeamlessStandbyStopAckTimer.stop();
+    m_catchupSeamlessStandbyVideoReadyTimeoutTimer.stop();
+    m_catchupSeamlessFastRetryTimer.stop();
+    m_catchupSeamlessPostCloseDelayTimer.stop();
+    m_catchupSeamlessFastRetryPending = false;
+    m_catchupSeamlessFastRetryBudgetRemaining = kCatchupSeamlessStandbyFastRetryMaxAttempts;
+    m_catchupSeamlessFastRetryWindowTimer.invalidate();
+    m_catchupSeamlessLastStandbyFailureTimer.invalidate();
+    setSeamlessStandbyPrewarmState(false);
+
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player"),
+        QStringLiteral("Catch-up seamless extension armed (reason=%1 target=%2s streamBase=%3s player=%4).")
+            .arg(reason)
+            .arg(targetSeconds, 0, 'f', 3)
+            .arg(streamBaseOffsetSeconds, 0, 'f', 3)
+            .arg(m_catchupSeamlessStandbyPlayer.data() == &m_player ? QStringLiteral("base") : QStringLiteral("standby")));
+    return true;
+}
+
+bool PlayerController::startSeamlessCatchupStandbyLoad()
+{
+    if (!m_catchupSeamlessPending || m_catchupSeamlessStandbyLoadIssued || m_catchupSeamlessStandbyReady) {
+        return false;
+    }
+    if (!canUseSeamlessCatchupRolling()) {
+        return false;
+    }
+
+    auto *standbyPlayer = m_catchupSeamlessStandbyPlayer.data();
+    if (standbyPlayer == nullptr || standbyPlayer == playbackPlayer()) {
+        return false;
+    }
+    if (!standbyCatchupSessionHealthyForCutover()) {
+        markSeamlessStandbyAttemptFailed(QStringLiteral("standby owned stream unavailable before warmup start"));
+        return false;
+    }
+    if (m_catchupSeamlessStandbyStopPending) {
+        return true;
+    }
+    if (m_catchupSeamlessLastStandbyAttemptTimer.isValid()
+        && m_catchupSeamlessLastStandbyAttemptTimer.elapsed() < kCatchupSeamlessStandbyRetryBackoffMs) {
+        const auto fastRetryWindowOpen = m_catchupSeamlessFastRetryWindowTimer.isValid()
+            && m_catchupSeamlessFastRetryWindowTimer.elapsed() < kCatchupSeamlessStandbyFastRetryWindowMs;
+        const auto fastRetryDelaySatisfied = m_catchupSeamlessLastStandbyFailureTimer.isValid()
+            && m_catchupSeamlessLastStandbyFailureTimer.elapsed() >= kCatchupSeamlessStandbyFastRetryDelayMs;
+        const auto allowFastRetry = m_catchupSeamlessFastRetryPending
+            && m_catchupSeamlessFastRetryBudgetRemaining > 0
+            && fastRetryWindowOpen
+            && fastRetryDelaySatisfied;
+        if (!allowFastRetry) {
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral(
+                "Catch-up seamless standby retry backoff active (%1/%2ms); waiting before next attempt.")
+                .arg(m_catchupSeamlessLastStandbyAttemptTimer.elapsed())
+                .arg(kCatchupSeamlessStandbyRetryBackoffMs));
+        return false;
+        }
+        --m_catchupSeamlessFastRetryBudgetRemaining;
+        m_catchupSeamlessFastRetryPending = false;
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral("Catch-up seamless standby fast retry bypassing backoff (remaining=%1).")
+                .arg(m_catchupSeamlessFastRetryBudgetRemaining));
+    }
+
+    m_catchupSeamlessStandbyStopPending = true;
+    m_catchupSeamlessPostCloseDelayPending = false;
+    standbyPlayer->stop();
+    m_catchupSeamlessStandbyStopAckTimer.start();
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player"),
+        QStringLiteral("Catch-up seamless standby stop-first requested before next standby load."));
+    return true;
+}
+
+bool PlayerController::launchSeamlessCatchupStandbyLoad(Player::MpvPlayer *standbyPlayer)
+{
+    if (!m_catchupSeamlessPending || m_catchupSeamlessStandbyLoadIssued || m_catchupSeamlessStandbyReady) {
+        return false;
+    }
+    if (!canUseSeamlessCatchupRolling()) {
+        return false;
+    }
+    if (standbyPlayer == nullptr || standbyPlayer == playbackPlayer()) {
+        return false;
+    }
+    if (!standbyCatchupSessionHealthyForCutover()) {
+        markSeamlessStandbyAttemptFailed(QStringLiteral("standby owned stream unavailable before loadfile"));
+        return false;
+    }
+    if (!refreshSeamlessCatchupStandbyRetryUrl()) {
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral("Catch-up seamless standby load skipped: failed to refresh retry URL."));
+        return false;
+    }
+
+    standbyPlayer->setAudioEnabled(true);
+    standbyPlayer->setVolume(0);
+    standbyPlayer->setStartupBufferingStrictMode(false);
+    standbyPlayer->setPaused(false);
+    const auto standbyPlaybackUrl =
+        prepareCatchupStreamPlaybackUrl(standbyPlayer, m_catchupSeamlessStandbyUrl, true);
+    standbyPlayer->play(
+        standbyPlaybackUrl,
+        catchupLoadfileOptions(m_catchupSeamlessStandbyStreamBaseOffsetSeconds, true));
+    m_catchupSeamlessStandbyLoadIssued = true;
+    m_catchupSeamlessStandbyReady = false;
+    m_catchupSeamlessStandbyVideoReady = false;
+    m_catchupSeamlessStandbyStopPending = false;
+    m_catchupSeamlessPostCloseDelayPending = false;
+    m_catchupSeamlessStandbyStopAckTimer.stop();
+    m_catchupSeamlessStandbyVideoReadyTimeoutTimer.stop();
+    m_catchupSeamlessFastRetryTimer.stop();
+    m_catchupSeamlessFastRetryPending = false;
+    m_catchupSeamlessLastStandbyAttemptTimer.restart();
+    setSeamlessStandbyPrewarmState(true, standbyPlayer);
+
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player"),
+        QStringLiteral("Catch-up seamless standby load started (host=%1).")
+            .arg(QUrl(m_catchupSeamlessStandbyUrl).host(QUrl::FullyDecoded)));
+    return true;
+}
+
+bool PlayerController::refreshSeamlessCatchupStandbyRetryUrl()
+{
+    if (!m_catchupSeamlessPending || m_catchupSeamlessStandbyUrl.trimmed().isEmpty()) {
+        return false;
+    }
+    if (!matchXtreamTimeshiftUrl(m_catchupCanonicalPlaybackUrl).has_value()) {
+        return true;
+    }
+
+    syncCatchupTimelineState();
+    if (!m_catchupProgramStartUtc.isValid()
+        || !m_catchupProgramStopUtc.isValid()
+        || m_catchupProgramStopUtc <= m_catchupProgramStartUtc) {
+        return false;
+    }
+
+    const auto availableSeconds = std::max(0.0, m_catchupTimelineAvailableSeconds);
+    const auto desiredDelaySeconds = std::clamp(m_catchupDesiredDelaySeconds, 0.0, availableSeconds);
+    auto targetTimelineSeconds = std::max(0.0, availableSeconds - desiredDelaySeconds);
+    const auto totalDurationSeconds =
+        std::max<qint64>(1, m_catchupProgramStartUtc.secsTo(m_catchupProgramStopUtc));
+    targetTimelineSeconds =
+        std::min(targetTimelineSeconds, std::max(0.0, static_cast<double>(totalDurationSeconds) - 1.0));
+
+    double streamBaseOffsetSeconds = 0.0;
+    const auto refreshedUrl = regeneratedXtreamCatchupUrl(targetTimelineSeconds, &streamBaseOffsetSeconds);
+    if (refreshedUrl.trimmed().isEmpty()) {
+        return false;
+    }
+
+    const auto previousUrl = m_catchupSeamlessStandbyUrl;
+    const auto previousStreamBase = m_catchupSeamlessStandbyStreamBaseOffsetSeconds;
+    m_catchupSeamlessStandbyUrl = refreshedUrl;
+    m_catchupSeamlessStandbyStreamBaseOffsetSeconds = streamBaseOffsetSeconds;
+
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player"),
+        QStringLiteral(
+            "Catch-up seamless standby retry URL refreshed: changed=%1 target=%2s streamBase=%3s previousBase=%4s previous=%5 refreshed=%6.")
+            .arg(previousUrl != refreshedUrl ? QStringLiteral("yes") : QStringLiteral("no"))
+            .arg(targetTimelineSeconds, 0, 'f', 3)
+            .arg(streamBaseOffsetSeconds, 0, 'f', 3)
+            .arg(previousStreamBase, 0, 'f', 3)
+            .arg(Core::redactSensitiveUrl(previousUrl))
+            .arg(Core::redactSensitiveUrl(refreshedUrl)));
+    return true;
+}
+
+QString PlayerController::prepareCatchupStreamPlaybackUrl(
+    Player::MpvPlayer *targetPlayer,
+    const QString &sourceUrl,
+    const bool standby)
+{
+    const auto trimmedSource = sourceUrl.trimmed();
+    if (trimmedSource.isEmpty()
+        || targetPlayer == nullptr
+        || envFlagEnabled("OKILTV_HEADLESS_TEST")
+        || envFlagEnabled("OKILTV_DISABLE_CATCHUP_OWNED_STREAM")) {
+        return trimmedSource;
+    }
+    if (!targetPlayer->ensureInitialized() || !targetPlayer->catchupStreamProtocolAvailable()) {
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral("Catch-up owned stream unavailable; using direct mpv URL for %1.")
+                .arg(standby ? QStringLiteral("standby") : QStringLiteral("active")));
+        return trimmedSource;
+    }
+
+    auto session = Player::CatchupStreamSession::create(
+        trimmedSource,
+        m_catchupRequestHeaders,
+        catchupOwnedStreamPolicy(standby));
+    if (!session->start()) {
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral("Catch-up owned stream failed to start; using direct mpv URL."));
+        return trimmedSource;
+    }
+    const auto virtualUrl = session->virtualUrl();
+    if (standby) {
+        if (m_catchupStandbyStreamSession) {
+            Core::DebugLogger::instance().log(
+                QStringLiteral("player"),
+                QStringLiteral("Replacing catch-up standby stream session: previous=%1 next-source=%2.")
+                    .arg(m_catchupStandbyStreamSession->virtualUrl(), Core::redactSensitiveUrl(trimmedSource)));
+            m_catchupStandbyStreamSession->closeProviderConnection(QStringLiteral("replace-standby-session"));
+        }
+        m_catchupStandbyStreamSession = std::move(session);
+    } else {
+        if (m_catchupActiveStreamSession) {
+            Core::DebugLogger::instance().log(
+                QStringLiteral("player"),
+                QStringLiteral("Replacing catch-up active stream session: previous=%1 next-source=%2.")
+                    .arg(m_catchupActiveStreamSession->virtualUrl(), Core::redactSensitiveUrl(trimmedSource)));
+            m_catchupActiveStreamSession->closeProviderConnection(QStringLiteral("replace-active-session"));
+        }
+        m_catchupActiveStreamSession = std::move(session);
+    }
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player"),
+        QStringLiteral("Catch-up owned stream prepared: %1 source=%2 virtual=%3.")
+            .arg(standby ? QStringLiteral("standby") : QStringLiteral("active"))
+            .arg(Core::redactSensitiveUrl(trimmedSource), virtualUrl));
+    return virtualUrl;
+}
+
+bool PlayerController::activeCatchupProviderConnectionClosed() const
+{
+    if (!m_catchupActiveStreamSession) {
+        return false;
+    }
+    return m_catchupActiveStreamSession->providerConnectionClosed();
+}
+
+bool PlayerController::standbyCatchupSessionHealthyForCutover() const
+{
+    if (!m_catchupStandbyStreamSession) {
+        return true;
+    }
+    if (m_catchupStandbyStreamSession->hasNetworkError()) {
+        return false;
+    }
+    if (m_catchupStandbyStreamSession->providerConnectionClosed()
+        && !m_catchupStandbyStreamSession->closeRequestedByApp()) {
+        return false;
+    }
+    return true;
+}
+
+void PlayerController::markSeamlessStandbyAttemptFailed(const QString &reason)
+{
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player"),
+        QStringLiteral("Catch-up seamless standby load failed: %1").arg(reason));
+    m_catchupSeamlessStandbyLoadIssued = false;
+    m_catchupSeamlessStandbyReady = false;
+    m_catchupSeamlessStandbyVideoReady = false;
+    m_catchupSeamlessStandbyStopPending = false;
+    m_catchupSeamlessPostCloseDelayPending = false;
+    m_catchupSeamlessStandbyVideoReadyTimeoutTimer.stop();
+    m_catchupSeamlessStandbyStopAckTimer.stop();
+    m_catchupSeamlessPostCloseDelayTimer.stop();
+    if (!m_catchupSeamlessFastRetryWindowTimer.isValid()) {
+        m_catchupSeamlessFastRetryWindowTimer.start();
+    }
+    m_catchupSeamlessLastStandbyFailureTimer.restart();
+    if (m_catchupSeamlessFastRetryBudgetRemaining > 0) {
+        m_catchupSeamlessFastRetryPending = true;
+        m_catchupSeamlessFastRetryTimer.start();
+    }
+}
+
+void PlayerController::abortSeamlessCatchupRolling(const QString &reason, const bool stopStandbyPlayer)
+{
+    auto *standbyPlayer = m_catchupSeamlessStandbyPlayer.data();
+    const auto hadState = m_catchupSeamlessPending
+        || m_catchupSeamlessStandbyLoadIssued
+        || m_catchupSeamlessStandbyReady
+        || m_catchupSeamlessFallbackDeferred
+        || !m_catchupSeamlessStandbyUrl.isEmpty()
+        || m_catchupSeamlessStandbyPlayer;
+    m_catchupSeamlessFallbackTimer.stop();
+    m_catchupSeamlessPending = false;
+    m_catchupSeamlessStandbyLoadIssued = false;
+    m_catchupSeamlessStandbyReady = false;
+    m_catchupSeamlessStandbyVideoReady = false;
+    m_catchupSeamlessStandbyStopPending = false;
+    m_catchupSeamlessPostCloseDelayPending = false;
+    m_catchupSeamlessStandbyPlayer = nullptr;
+    m_catchupSeamlessStandbyUrl.clear();
+    m_catchupSeamlessStandbyStreamBaseOffsetSeconds = 0.0;
+    m_catchupSeamlessFallbackDeferred = false;
+    m_catchupSeamlessStandbyStopAckTimer.stop();
+    m_catchupSeamlessStandbyVideoReadyTimeoutTimer.stop();
+    m_catchupSeamlessFastRetryTimer.stop();
+    m_catchupSeamlessPostCloseDelayTimer.stop();
+    m_catchupSeamlessFastRetryPending = false;
+    m_catchupSeamlessFastRetryBudgetRemaining = 0;
+    m_catchupSeamlessFastRetryWindowTimer.invalidate();
+    m_catchupSeamlessLastStandbyFailureTimer.invalidate();
+    setSeamlessStandbyPrewarmState(false);
+    if (m_catchupStandbyStreamSession) {
+        m_catchupStandbyStreamSession->closeProviderConnection(reason);
+        m_catchupStandbyStreamSession.reset();
+    }
+    if (stopStandbyPlayer && standbyPlayer != nullptr && standbyPlayer != playbackPlayer()) {
+        standbyPlayer->stop();
+        standbyPlayer->setAudioEnabled(false);
+        standbyPlayer->setVolume(0);
+    }
+    if (hadState && !reason.trimmed().isEmpty()) {
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral("Catch-up seamless extension cleared: %1.").arg(reason));
+    }
+}
+
+bool PlayerController::maybeCommitSeamlessCatchupCutover(const QString &reason, const bool forceWithoutNearEdge)
+{
+    if (!m_catchupSeamlessPending || !m_catchupSeamlessStandbyReady) {
+        return false;
+    }
+    if (!standbySeamlessVideoReady()) {
+        return false;
+    }
+    auto *standbyPlayer = m_catchupSeamlessStandbyPlayer.data();
+    auto *activePlayer = playbackPlayer();
+    if (standbyPlayer == nullptr || activePlayer == nullptr || standbyPlayer == activePlayer) {
+        return false;
+    }
+    if (!standbyCatchupSessionHealthyForCutover()) {
+        markSeamlessStandbyAttemptFailed(QStringLiteral("standby owned stream unavailable at cutover"));
+        return false;
+    }
+    if (QDateTime::currentDateTimeUtc() >= m_catchupProgramStopUtc.addSecs(-1)) {
+        return false;
+    }
+
+    const auto remainingSeconds = m_catchupTransportEndTimelineSeconds - m_catchupTimelinePositionSeconds;
+    const auto nearTransportEnd = !std::isfinite(remainingSeconds)
+        || remainingSeconds <= kCatchupSeamlessCutoverRemainingSeconds;
+    if (!forceWithoutNearEdge && !nearTransportEnd && !m_catchupSeamlessFallbackDeferred) {
+        return false;
+    }
+
+    const auto previousPlaybackUrl = m_currentPlaybackUrl;
+    const auto effectiveVolume = (m_muted || m_volume <= 0.0)
+        ? 0
+        : static_cast<int>(std::round(std::clamp(m_volume, 0.0, 100.0)));
+    standbyPlayer->setAudioEnabled(true);
+    standbyPlayer->setVolume(effectiveVolume);
+
+    const auto activeCacheDuration = activePlayer->demuxerCacheDurationSeconds();
+    const auto standbyCacheDuration = standbyPlayer->demuxerCacheDurationSeconds();
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player"),
+        QStringLiteral(
+            "Catch-up seamless cutover committing (%1): active=%2 standby=%3 remaining=%4s active-cache=%5 "
+            "standby-cache=%6 active-provider-closed=%7 standby-url=%8 forced=%9.")
+            .arg(reason)
+            .arg(reinterpret_cast<quintptr>(activePlayer), 0, 16)
+            .arg(reinterpret_cast<quintptr>(standbyPlayer), 0, 16)
+            .arg(remainingSeconds, 0, 'f', 3)
+            .arg(
+                activeCacheDuration.has_value()
+                    ? QString::number(activeCacheDuration.value(), 'f', 2)
+                    : QStringLiteral("N/A"))
+            .arg(
+                standbyCacheDuration.has_value()
+                    ? QString::number(standbyCacheDuration.value(), 'f', 2)
+                    : QStringLiteral("N/A"))
+            .arg(activeCatchupProviderConnectionClosed() ? QStringLiteral("yes") : QStringLiteral("no"))
+            .arg(Core::redactSensitiveUrl(m_catchupSeamlessStandbyUrl))
+            .arg(forceWithoutNearEdge ? QStringLiteral("yes") : QStringLiteral("no")));
+
+    m_backendBuffering = false;
+    clearPlaybackStallTracking();
+    setIsBuffering(false);
+    setIsLoading(false);
+    setChannelSwitchInProgress(false);
+    applyActiveCatchupBufferingPolicy(standbyPlayer);
+    setSharedPlaybackPlayer(standbyPlayer, false);
+
+    const QPointer<Player::MpvPlayer> oldActivePlayer = activePlayer;
+    if (activePlayer != standbyPlayer) {
+        activePlayer->setAudioEnabled(false);
+        activePlayer->setVolume(0);
+        QMetaObject::invokeMethod(this, [this, oldActivePlayer]() {
+            auto *oldPlayer = oldActivePlayer.data();
+            if (oldPlayer == nullptr || oldPlayer == playbackPlayer()) {
+                return;
+            }
+            Core::DebugLogger::instance().log(
+                QStringLiteral("player"),
+                QStringLiteral("Stopping old playback player after seamless surface handoff: player=%1.")
+                    .arg(reinterpret_cast<quintptr>(oldPlayer), 0, 16));
+            oldPlayer->stop();
+        }, Qt::QueuedConnection);
+    }
+
+    m_currentPlaybackUrl = m_catchupSeamlessStandbyUrl;
+    m_catchupActiveEofObserved = false;
+    m_catchupStreamBaseOffsetSeconds = m_catchupSeamlessStandbyStreamBaseOffsetSeconds;
+    if (m_catchupActiveStreamSession) {
+        m_catchupActiveStreamSession->closeProviderConnection(QStringLiteral("seamless-cutover"));
+    }
+    m_catchupActiveStreamSession = std::move(m_catchupStandbyStreamSession);
+    syncCatchupTimelineState();
+    m_catchupTransportEndTimelineSeconds =
+        std::max(m_catchupStreamBaseOffsetSeconds, m_catchupTimelineAvailableSeconds);
+    setCatchupTimelineNoticeText(QString {});
+    abortSeamlessCatchupRolling(QStringLiteral("cutover"), false);
+    if (previousPlaybackUrl != m_currentPlaybackUrl) {
+        emit currentPlaybackUrlChanged();
+    }
+
+    refreshBufferingState();
+    syncIsPlayingFromBackend();
+    if (!isPlaying()) {
+        setIsPlaying(true);
+    }
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player"),
+        QStringLiteral("Catch-up seamless extension cutover committed (%1).").arg(reason));
+    return true;
+}
+
+void PlayerController::setSeamlessStandbyPrewarmState(const bool active, Player::MpvPlayer *standbyPlayer)
+{
+    auto *nextPlayer = active ? standbyPlayer : nullptr;
+    if (m_catchupSeamlessPrewarmPlayer == nextPlayer && m_catchupSeamlessPrewarmActive == active) {
+        return;
+    }
+    m_catchupSeamlessPrewarmPlayer = nextPlayer;
+    m_catchupSeamlessPrewarmActive = active;
+    emit seamlessStandbyPlayerObjectChanged();
+    emit seamlessStandbyPrewarmActiveChanged();
+}
+
+bool PlayerController::standbySeamlessVideoReady() const
+{
+    return m_catchupSeamlessStandbyVideoReady;
+}
+
+bool PlayerController::maybeStopCatchupAtProgrammeBoundary(
+    const std::optional<double> currentStreamSeconds,
+    const std::optional<double> remainingBufferedSeconds,
+    const QString &reason)
+{
+    if (!inCatchupMode()
+        || !m_catchupProgramStartUtc.isValid()
+        || !m_catchupProgramStopUtc.isValid()
+        || m_catchupProgramStopUtc <= m_catchupProgramStartUtc) {
+        return false;
+    }
+
+    syncCatchupTimelineState();
+    const auto programmeDurationSeconds =
+        static_cast<double>(std::max<qint64>(0, m_catchupProgramStartUtc.secsTo(m_catchupProgramStopUtc)));
+    const auto availableEdgeAtProgrammeStop =
+        m_catchupTimelineAvailableEdgeEpochMs >= m_catchupProgramStopUtc.toMSecsSinceEpoch();
+    const auto observedTimelinePositionSeconds = std::clamp(
+        currentStreamSeconds.has_value() && std::isfinite(currentStreamSeconds.value())
+            ? m_catchupStreamBaseOffsetSeconds + currentStreamSeconds.value()
+            : m_catchupTimelinePositionSeconds,
+        0.0,
+        programmeDurationSeconds);
+    const auto atProgrammeEnd =
+        availableEdgeAtProgrammeStop && (programmeDurationSeconds - observedTimelinePositionSeconds) <= 1.0;
+    if (!atProgrammeEnd) {
+        return false;
+    }
+    if (remainingBufferedSeconds.has_value()
+        && std::isfinite(remainingBufferedSeconds.value())
+        && std::max(0.0, remainingBufferedSeconds.value()) >= 1.0) {
+        return false;
+    }
+    if (m_catchupProgramBoundaryReached) {
+        return true;
+    }
+
+    m_catchupProgramBoundaryReached = true;
+    abortSeamlessCatchupRolling(QStringLiteral("programme-boundary"), true);
+    refreshBufferingState();
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player"),
+        QStringLiteral("Catch-up playback reached programme boundary (%1); stopping playback.")
+            .arg(reason.trimmed().isEmpty() ? QStringLiteral("unspecified") : reason.trimmed()));
+    QMetaObject::invokeMethod(this, &PlayerController::stop, Qt::QueuedConnection);
+    return true;
+}
+
+bool PlayerController::handleCatchupPlaybackEndedRecovery()
+{
+    if (!inCatchupMode()) {
+        return false;
+    }
+
+    if (maybeStopCatchupAtProgrammeBoundary(
+            std::nullopt,
+            std::nullopt,
+            QStringLiteral("playback-ended-boundary"))) {
+        return true;
+    }
+
+    if (m_catchupSeamlessPending) {
+        if (m_catchupSeamlessStandbyReady && maybeCommitSeamlessCatchupCutover(QStringLiteral("playback-ended"))) {
+            refreshBufferingState();
+            return true;
+        }
+        if (m_catchupSeamlessStandbyLoadIssued && !m_catchupSeamlessStandbyReady) {
+            m_catchupSeamlessFallbackDeferred = true;
+            if (!m_catchupSeamlessFallbackTimer.isActive()) {
+                m_catchupSeamlessFallbackTimer.start();
+            }
+            Core::DebugLogger::instance().log(
+                QStringLiteral("player"),
+                QStringLiteral(
+                    "Catch-up seamless extension waiting for standby readiness (fallback timeout=%1ms).")
+                    .arg(kCatchupSeamlessFallbackTimeoutMs));
+            refreshBufferingState();
+            return true;
+        }
+    }
+
+    if (extendCatchupRollingWindow(QStringLiteral("playback-ended"), false)) {
+        refreshBufferingState();
+        return true;
+    }
+    if (hardRestoreCatchupAtCurrentTimelinePoint(QStringLiteral("catchup-eof-fallback"))) {
+        refreshBufferingState();
+        return true;
+    }
+    return false;
+}
+
+bool PlayerController::extendCatchupRollingWindow(const QString &reason, const bool fromPredictiveTrigger)
+{
+    if (!inCatchupMode()
+        || !m_currentChannel.has_value()
+        || m_catchupProgramBoundaryReached
+        || m_channelLoadFailed
+        || m_resumePlaybackAfterLoad
+        || m_catchupTimelineReloadInFlight
+        || m_reconnectActive) {
+        return false;
+    }
+    if (!m_catchupProgramStartUtc.isValid()
+        || !m_catchupProgramStopUtc.isValid()
+        || m_catchupProgramStopUtc <= m_catchupProgramStartUtc) {
+        return false;
+    }
+    if (QDateTime::currentDateTimeUtc() >= m_catchupProgramStopUtc.addSecs(-1)) {
+        return false;
+    }
+    if (m_catchupCanonicalPlaybackUrl.trimmed().isEmpty()
+        || !matchXtreamTimeshiftUrl(m_catchupCanonicalPlaybackUrl).has_value()) {
+        return false;
+    }
+    if (m_sharedPlaybackPlayer && m_sharedPlaybackPlayer.data() != &m_catchupStandbyPlayer) {
+        return false;
+    }
+    if (fromPredictiveTrigger && m_catchupSeamlessPending) {
+        return false;
+    }
+    if (m_catchupLastRollingExtensionAttemptTimer.isValid()
+        && m_catchupLastRollingExtensionAttemptTimer.elapsed() < kCatchupRollingMinAttemptSpacingMs) {
+        return false;
+    }
+
+    if (!m_catchupRollingRetryWindowTimer.isValid()
+        || m_catchupRollingRetryWindowTimer.elapsed() > kCatchupRollingRetryWindowMs) {
+        m_catchupRollingExtensionRetryCount = 0;
+        m_catchupRollingRetryWindowTimer.restart();
+    }
+
+    if (m_catchupRollingExtensionRetryCount >= kCatchupRollingMaxRetries) {
+        const auto retryNotice =
+            QStringLiteral("Catch-up extension failed. Retry or return to live.");
+        setCatchupTimelineNoticeText(retryNotice);
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral("Catch-up rolling extension aborted after %1 attempts in %2ms (%3).")
+                .arg(m_catchupRollingExtensionRetryCount)
+                .arg(kCatchupRollingRetryWindowMs)
+                .arg(reason));
+        return false;
+    }
+
+    syncCatchupTimelineState();
+    const auto availableSeconds = std::max(0.0, m_catchupTimelineAvailableSeconds);
+    const auto totalDurationSeconds =
+        std::max<qint64>(1, m_catchupProgramStartUtc.secsTo(m_catchupProgramStopUtc));
+    if (availableSeconds <= 0.0 || totalDurationSeconds <= 0) {
+        return false;
+    }
+    if (fromPredictiveTrigger && availableSeconds <= m_catchupTransportEndTimelineSeconds + 1.0) {
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral(
+                "Catch-up rolling extension skipped (predictive): no new provider window yet (available=%1s transportEnd=%2s).")
+                .arg(availableSeconds, 0, 'f', 3)
+                .arg(m_catchupTransportEndTimelineSeconds, 0, 'f', 3));
+        return false;
+    }
+
+    const auto desiredDelaySeconds = std::clamp(m_catchupDesiredDelaySeconds, 0.0, availableSeconds);
+    auto targetTimelineSeconds = std::max(0.0, availableSeconds - desiredDelaySeconds);
+    if (fromPredictiveTrigger) {
+        targetTimelineSeconds = std::max(0.0, targetTimelineSeconds - kCatchupRollingOverlapBiasSeconds);
+    }
+    targetTimelineSeconds = std::min(targetTimelineSeconds, std::max(0.0, static_cast<double>(totalDurationSeconds) - 1.0));
+
+    double streamBaseOffsetSeconds = 0.0;
+    const auto regeneratedUrl = regeneratedXtreamCatchupUrl(targetTimelineSeconds, &streamBaseOffsetSeconds);
+    if (regeneratedUrl.trimmed().isEmpty()) {
+        m_catchupRollingExtensionRetryCount += 1;
+        m_catchupRollingRetryWindowTimer.restart();
+        m_catchupLastRollingExtensionAttemptTimer.restart();
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral(
+                "Catch-up rolling extension URL regeneration failed (attempt %1/%2, reason=%3, target=%4s).")
+                .arg(m_catchupRollingExtensionRetryCount)
+                .arg(kCatchupRollingMaxRetries)
+                .arg(reason)
+                .arg(targetTimelineSeconds, 0, 'f', 3));
+        return false;
+    }
+
+    m_catchupRollingExtensionRetryCount += 1;
+    m_catchupRollingRetryWindowTimer.restart();
+    m_catchupLastRollingExtensionAttemptTimer.restart();
+    bool started = false;
+    if (fromPredictiveTrigger && canUseSeamlessCatchupRolling()) {
+        started = armSeamlessCatchupRollingExtension(
+            reason,
+            targetTimelineSeconds,
+            regeneratedUrl,
+            streamBaseOffsetSeconds);
+    } else {
+        started = beginCatchupTimelineReload(targetTimelineSeconds, regeneratedUrl, streamBaseOffsetSeconds);
+    }
+    if (!started) {
+        return false;
+    }
+
+    if (!fromPredictiveTrigger) {
+        const auto rollingNotice = QStringLiteral("Extending catch-up window...");
+        setCatchupTimelineNoticeText(rollingNotice);
+    }
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player"),
+        QStringLiteral("Catch-up rolling extension started (reason=%1, predictive=%2, target=%3s, delay=%4s, attempt=%5/%6).")
+            .arg(reason)
+            .arg(fromPredictiveTrigger ? QStringLiteral("true") : QStringLiteral("false"))
+            .arg(targetTimelineSeconds, 0, 'f', 3)
+            .arg(desiredDelaySeconds, 0, 'f', 3)
+            .arg(m_catchupRollingExtensionRetryCount)
+            .arg(kCatchupRollingMaxRetries));
+    return true;
+}
+
 bool PlayerController::reloadCatchupForTimelineSeek(const double targetSeconds)
 {
     auto *activePlayer = playbackPlayer();
@@ -1943,20 +3578,6 @@ bool PlayerController::reloadCatchupForTimelineSeek(const double targetSeconds)
     }
 
     const auto residualSeekSeconds = std::max(0.0, targetSeconds - streamBaseOffsetSeconds);
-    const auto previousPlaybackUrl = m_currentPlaybackUrl;
-    m_currentPlaybackUrl = regeneratedUrl;
-    m_catchupStreamBaseOffsetSeconds = streamBaseOffsetSeconds;
-    // Deliberate compromise: long seek starts from regenerated minute anchor without residual second-precision seek.
-    m_catchupPendingStreamRelativeSeekSeconds = std::nullopt;
-    m_catchupSeekSettleTimer.restart();
-    m_resumePlaybackAfterLoad = false;
-    m_pauseAfterLoad = false;
-    stopDeferredLoadingIndicator();
-    setIsLoading(false);
-    m_backendBuffering = true;
-    clearPlaybackStallTracking();
-    refreshBufferingState();
-
     Core::DebugLogger::instance().log(
         QStringLiteral("player"),
         QStringLiteral(
@@ -1970,16 +3591,351 @@ bool PlayerController::reloadCatchupForTimelineSeek(const double targetSeconds)
                 if (!cacheDuration.has_value()) {
                     return QStringLiteral("N/A");
                 }
-                return QString::number(cacheDuration.value(), 'f', 3);
+                    return QString::number(cacheDuration.value(), 'f', 3);
             }())
             .arg(QUrl(m_currentPlaybackUrl).host(QUrl::FullyDecoded)));
+    return beginCatchupTimelineReload(targetSeconds, regeneratedUrl, streamBaseOffsetSeconds);
+}
+
+bool PlayerController::beginCatchupTimelineReload(
+    const double targetSeconds,
+    const QString &regeneratedUrl,
+    const double streamBaseOffsetSeconds)
+{
+    auto *activePlayer = playbackPlayer();
+    if (activePlayer == nullptr) {
+        return false;
+    }
+    if (m_catchupSeamlessPending) {
+        abortSeamlessCatchupRolling(QStringLiteral("timeline-reload"), true);
+    }
+
+    if (m_catchupTimelineReloadInFlight) {
+        m_pendingCatchupTimelineReloadTargetSeconds = targetSeconds;
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral("Catch-up timeline reload already in progress; queued latest target=%1s.")
+                .arg(targetSeconds, 0, 'f', 3));
+        return true;
+    }
+
+    m_catchupTimelineReloadInFlight = true;
+    m_catchupTimelineReloadUrl = regeneratedUrl;
+    m_catchupTimelineReloadStreamBaseOffsetSeconds = streamBaseOffsetSeconds;
+    m_pendingCatchupTimelineReloadTargetSeconds = std::nullopt;
+    m_catchupTimelineReloadAckTimer.start();
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player"),
+        QStringLiteral("Catch-up timeline reload started: stop-first teardown wait <=%1ms.")
+            .arg(kCatchupTimelineReloadAckTimeoutMs));
+    activePlayer->stop();
+    return true;
+}
+
+void PlayerController::runCatchupTimelineReload()
+{
+    auto *activePlayer = playbackPlayer();
+    if (activePlayer == nullptr || m_catchupTimelineReloadUrl.trimmed().isEmpty()) {
+        return;
+    }
+
+    const auto previousPlaybackUrl = m_currentPlaybackUrl;
+    m_currentPlaybackUrl = m_catchupTimelineReloadUrl;
+    m_catchupActiveEofObserved = false;
+    m_catchupStreamBaseOffsetSeconds = m_catchupTimelineReloadStreamBaseOffsetSeconds;
+    // Deliberate compromise: long seek starts from regenerated minute anchor without residual second-precision seek.
+    m_catchupPendingStreamRelativeSeekSeconds = std::nullopt;
+    m_catchupSeekSettleTimer.restart();
+    resetCatchupUrlLoadGuardState(true);
+    m_resumePlaybackAfterLoad = false;
+    m_pauseAfterLoad = false;
+    stopDeferredLoadingIndicator();
+    setIsLoading(false);
+    m_backendBuffering = true;
+    clearPlaybackStallTracking();
+    refreshBufferingState();
 
     activePlayer->setStartupBufferingStrictMode(false);
     activePlayer->setPaused(false);
-    activePlayer->play(regeneratedUrl, catchupLoadfileOptions(streamBaseOffsetSeconds));
+    const auto playbackUrl = prepareCatchupStreamPlaybackUrl(activePlayer, m_catchupTimelineReloadUrl, false);
+    activePlayer->play(
+        playbackUrl,
+        catchupLoadfileOptions(m_catchupTimelineReloadStreamBaseOffsetSeconds));
     if (previousPlaybackUrl != m_currentPlaybackUrl) {
         emit currentPlaybackUrlChanged();
     }
+}
+
+void PlayerController::processPendingCatchupTimelineReload()
+{
+    if (!m_pendingCatchupTimelineReloadTargetSeconds.has_value()) {
+        return;
+    }
+    const auto targetSeconds = m_pendingCatchupTimelineReloadTargetSeconds.value();
+    m_pendingCatchupTimelineReloadTargetSeconds = std::nullopt;
+    const auto boundedTarget = std::max(0.0, std::min(m_catchupTimelineAvailableSeconds, targetSeconds));
+    m_catchupTimelinePositionSeconds = boundedTarget;
+    m_catchupDesiredDelaySeconds = std::max(0.0, m_catchupTimelineAvailableSeconds - boundedTarget);
+    m_catchupTimelineAtLiveEdge = (m_catchupTimelineAvailableSeconds - boundedTarget) <= 0.75;
+    emit catchupTimelineChanged();
+    if (shouldReloadCatchupForSeek(boundedTarget)) {
+        reloadCatchupForTimelineSeek(boundedTarget);
+        return;
+    }
+    const auto streamRelativeTarget = std::max(0.0, boundedTarget - m_catchupStreamBaseOffsetSeconds);
+    m_catchupSeekSettleTimer.restart();
+    playbackPlayer()->seekAbsoluteFast(streamRelativeTarget);
+}
+
+void PlayerController::finishCatchupTimelineReload(const QString &reason)
+{
+    m_catchupTimelineReloadAckTimer.stop();
+    m_catchupTimelineReloadInFlight = false;
+    m_catchupTimelineReloadUrl.clear();
+    m_catchupTimelineReloadStreamBaseOffsetSeconds = 0.0;
+    m_catchupRecoveryCooldownTimer.restart();
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player"),
+        QStringLiteral("Catch-up timeline reload finished: %1.").arg(reason));
+    processPendingCatchupTimelineReload();
+}
+
+bool PlayerController::hardRestoreCatchupAtCurrentTimelinePoint(const QString &reason)
+{
+    if (!inCatchupMode() || playbackPlayer() == nullptr) {
+        return false;
+    }
+    if (m_catchupTimelineReloadInFlight) {
+        return false;
+    }
+    abortSeamlessCatchupRolling(QStringLiteral("hard-restore"), true);
+
+    const auto targetSeconds = std::max(0.0, std::min(m_catchupTimelineAvailableSeconds, m_catchupTimelinePositionSeconds));
+    if (matchXtreamTimeshiftUrl(m_catchupCanonicalPlaybackUrl).has_value()) {
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral("Catch-up hard restore (%1): Xtream regenerate at timeline=%2s.")
+                .arg(reason)
+                .arg(targetSeconds, 0, 'f', 3));
+        return reloadCatchupForTimelineSeek(targetSeconds);
+    }
+
+    auto *activePlayer = playbackPlayer();
+    if (activePlayer == nullptr) {
+        return false;
+    }
+    if (m_reconnectActive) {
+        stopReconnectLoop(QStringLiteral("catchup-hard-restore"));
+    }
+
+    const auto restoreUrl = m_currentPlaybackUrl.trimmed();
+    if (restoreUrl.isEmpty()) {
+        return false;
+    }
+
+    const auto previousPlaybackUrl = m_currentPlaybackUrl;
+    m_currentPlaybackUrl = restoreUrl;
+    m_resumePlaybackAfterLoad = false;
+    m_pauseAfterLoad = false;
+    m_backendBuffering = true;
+    clearPlaybackStallTracking();
+    refreshBufferingState();
+
+    activePlayer->setStartupBufferingStrictMode(false);
+    activePlayer->setPaused(false);
+    const auto playbackUrl = prepareCatchupStreamPlaybackUrl(activePlayer, restoreUrl, false);
+    activePlayer->play(playbackUrl, catchupLoadfileOptions(m_catchupStreamBaseOffsetSeconds));
+    if (previousPlaybackUrl != m_currentPlaybackUrl) {
+        emit currentPlaybackUrlChanged();
+    }
+
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player"),
+        QStringLiteral("Catch-up hard restore (%1): reloaded current catch-up URL.")
+            .arg(reason));
+    m_catchupRecoveryCooldownTimer.restart();
+    return true;
+}
+
+void PlayerController::evaluateCatchupDegradationRecovery(
+    const std::optional<double> cacheDurationSeconds,
+    const std::optional<double> cacheSpeedBytesPerSecond,
+    const bool playbackAdvanced,
+    const std::optional<bool> framePtsAdvanced)
+{
+    if (!inCatchupMode() || !m_currentChannel.has_value() || m_channelLoadFailed || m_resumePlaybackAfterLoad
+        || m_catchupTimelineReloadInFlight || m_reconnectActive) {
+        return;
+    }
+    if (m_catchupTimelineAvailableSeconds <= 0.0) {
+        return;
+    }
+    const auto remainingSeconds = std::max(0.0, m_catchupTimelineAvailableSeconds - m_catchupTimelinePositionSeconds);
+    if (remainingSeconds <= kCatchupRecoveryProgramEndGuardSeconds) {
+        m_catchupNearZeroTickCount = 0;
+        return;
+    }
+
+    const auto inCooldown = m_catchupRecoveryCooldownTimer.isValid()
+        && m_catchupRecoveryCooldownTimer.elapsed() < kCatchupRecoveryCooldownMs;
+
+    const auto hasCacheSample = cacheDurationSeconds.has_value()
+        && std::isfinite(cacheDurationSeconds.value())
+        && cacheDurationSeconds.value() >= 0.0;
+    if (!hasCacheSample) {
+        return;
+    }
+    const auto cacheSeconds = std::max(0.0, cacheDurationSeconds.value());
+    const auto hasCacheSpeed = cacheSpeedBytesPerSecond.has_value()
+        && std::isfinite(cacheSpeedBytesPerSecond.value())
+        && cacheSpeedBytesPerSecond.value() >= 0.0;
+    const auto cacheSpeed = hasCacheSpeed ? std::max(0.0, cacheSpeedBytesPerSecond.value()) : -1.0;
+    const auto lowRefillSignal = hasCacheSpeed
+        ? cacheSpeed <= kCatchupRecoveryLowCacheSpeedBytesPerSecond
+        : (m_backendBuffering || m_playbackStalled);
+    Q_UNUSED(framePtsAdvanced);
+    Q_UNUSED(playbackAdvanced);
+
+    if (cacheSeconds <= kCatchupRecoveryNearZeroSeconds && lowRefillSignal) {
+        m_catchupNearZeroTickCount += 1;
+    } else {
+        m_catchupNearZeroTickCount = 0;
+    }
+
+    if (!inCooldown && m_catchupNearZeroTickCount >= kCatchupRecoveryNearZeroSustainTicks) {
+        const auto fastRetryWindowOpen = m_catchupSeamlessFastRetryWindowTimer.isValid()
+            && m_catchupSeamlessFastRetryWindowTimer.elapsed() < kCatchupSeamlessStandbyFastRetryWindowMs;
+        const auto fastRetryInProgress = m_catchupSeamlessPending
+            && !m_catchupSeamlessStandbyLoadIssued
+            && m_catchupSeamlessFastRetryPending
+            && m_catchupSeamlessFastRetryBudgetRemaining > 0
+            && fastRetryWindowOpen;
+        if (fastRetryInProgress) {
+            const auto remainingMs = std::max<qint64>(
+                0,
+                static_cast<qint64>(kCatchupSeamlessStandbyFastRetryWindowMs)
+                    - m_catchupSeamlessFastRetryWindowTimer.elapsed());
+            Core::DebugLogger::instance().log(
+                QStringLiteral("player"),
+                QStringLiteral(
+                    "Catch-up degradation watchdog (near-zero only): deferring hard restore while fast standby retry window is active (%1ms left, retries=%2).")
+                    .arg(remainingMs)
+                    .arg(m_catchupSeamlessFastRetryBudgetRemaining));
+            return;
+        }
+        m_catchupNearZeroTickCount = 0;
+        if (m_catchupSeamlessPending && m_catchupSeamlessStandbyReady) {
+            Core::DebugLogger::instance().log(
+                QStringLiteral("player"),
+                QStringLiteral(
+                    "Catch-up degradation watchdog (near-zero only): standby is ready, attempting seamless cutover before hard restore (cache=%1s speed=%2B/s remaining=%3s).")
+                    .arg(cacheSeconds, 0, 'f', 3)
+                    .arg(hasCacheSpeed ? QString::number(cacheSpeed, 'f', 0) : QStringLiteral("N/A"))
+                    .arg(remainingSeconds, 0, 'f', 3));
+            if (maybeCommitSeamlessCatchupCutover(QStringLiteral("degradation-near-zero"), true)) {
+                m_catchupRecoveryCooldownTimer.restart();
+                return;
+            }
+            Core::DebugLogger::instance().log(
+                QStringLiteral("player"),
+                QStringLiteral(
+                    "Catch-up degradation watchdog (near-zero only): seamless cutover unavailable, falling back to hard restore."));
+        }
+        Core::DebugLogger::instance().log(
+            QStringLiteral("player"),
+            QStringLiteral(
+                "Catch-up degradation watchdog (near-zero only): triggering hard restore (cache=%1s speed=%2B/s remaining=%3s).")
+                .arg(cacheSeconds, 0, 'f', 3)
+                .arg(hasCacheSpeed ? QString::number(cacheSpeed, 'f', 0) : QStringLiteral("N/A"))
+                .arg(remainingSeconds, 0, 'f', 3));
+        if (hardRestoreCatchupAtCurrentTimelinePoint(QStringLiteral("catchup-near-zero-watchdog"))) {
+            m_catchupRecoveryCooldownTimer.restart();
+        }
+    }
+}
+
+void PlayerController::clearLiveBufferState()
+{
+    const auto changed = m_liveBufferActive
+        || m_liveBufferWindowStartEpochMs != 0
+        || m_liveBufferLiveEdgeEpochMs != 0
+        || std::abs(m_liveBufferAvailableSeconds) > 0.0001
+        || std::abs(m_liveBufferPositionSeconds) > 0.0001
+        || std::abs(m_liveBufferBehindLiveSeconds) > 0.0001
+        || !m_liveBufferAtLiveEdge;
+    m_liveBufferActive = false;
+    m_liveBufferWindowStartEpochMs = 0;
+    m_liveBufferLiveEdgeEpochMs = 0;
+    m_liveBufferAvailableSeconds = 0.0;
+    m_liveBufferPositionSeconds = 0.0;
+    m_liveBufferBehindLiveSeconds = 0.0;
+    m_liveBufferAtLiveEdge = true;
+    if (changed) {
+        emit liveBufferStateChanged();
+    }
+}
+
+void PlayerController::syncLiveBufferState()
+{
+    if (!m_currentChannel.has_value() || inCatchupMode() || timeshiftActive() || playbackPlayer() == nullptr) {
+        clearLiveBufferState();
+        return;
+    }
+
+    const auto currentPosition = playbackPlayer()->position();
+    const auto seekableRange = playbackPlayer()->demuxerSeekableRangeSeconds();
+    if (!seekableRange.has_value() || !std::isfinite(currentPosition) || currentPosition < 0.0) {
+        clearLiveBufferState();
+        return;
+    }
+
+    const auto rangeStart = std::max(0.0, seekableRange->first);
+    const auto rangeEnd = std::max(rangeStart, seekableRange->second);
+    const auto availableSeconds = std::max(0.0, rangeEnd - rangeStart);
+    if (!std::isfinite(availableSeconds) || availableSeconds <= 0.05) {
+        clearLiveBufferState();
+        return;
+    }
+
+    const auto positionSeconds = std::clamp(currentPosition - rangeStart, 0.0, availableSeconds);
+    const auto behindLiveSeconds = std::max(0.0, rangeEnd - currentPosition);
+    const auto liveEdgeEpochMs = QDateTime::currentDateTimeUtc().addMSecs(
+        -static_cast<qint64>(std::llround(behindLiveSeconds * 1000.0))).toMSecsSinceEpoch();
+    const auto windowStartEpochMs = liveEdgeEpochMs - static_cast<qint64>(std::llround(availableSeconds * 1000.0));
+    const auto atLiveEdge = behindLiveSeconds <= 0.75;
+
+    const auto changed = !m_liveBufferActive
+        || m_liveBufferWindowStartEpochMs != windowStartEpochMs
+        || m_liveBufferLiveEdgeEpochMs != liveEdgeEpochMs
+        || std::abs(m_liveBufferAvailableSeconds - availableSeconds) > 0.02
+        || std::abs(m_liveBufferPositionSeconds - positionSeconds) > 0.02
+        || std::abs(m_liveBufferBehindLiveSeconds - behindLiveSeconds) > 0.02
+        || m_liveBufferAtLiveEdge != atLiveEdge;
+
+    m_liveBufferActive = true;
+    m_liveBufferWindowStartEpochMs = windowStartEpochMs;
+    m_liveBufferLiveEdgeEpochMs = liveEdgeEpochMs;
+    m_liveBufferAvailableSeconds = availableSeconds;
+    m_liveBufferPositionSeconds = positionSeconds;
+    m_liveBufferBehindLiveSeconds = behindLiveSeconds;
+    m_liveBufferAtLiveEdge = atLiveEdge;
+    if (changed) {
+        emit liveBufferStateChanged();
+    }
+}
+
+bool PlayerController::seekLiveBufferToPosition(const double targetSeconds)
+{
+    if (!m_liveBufferActive || playbackPlayer() == nullptr) {
+        return false;
+    }
+    const auto bounded = std::clamp(targetSeconds, 0.0, m_liveBufferAvailableSeconds);
+    const auto seekableRange = playbackPlayer()->demuxerSeekableRangeSeconds();
+    if (!seekableRange.has_value()) {
+        return false;
+    }
+    const auto absoluteTarget = std::max(0.0, seekableRange->first + bounded);
+    playbackPlayer()->seekAbsoluteFast(absoluteTarget);
     return true;
 }
 
@@ -2054,19 +4010,25 @@ void PlayerController::playChannel(const Channel &channel)
     stopStartupBufferProbe();
     stopStartupBufferFallbackWatchdog(true);
     stopReconnectLoop(QStringLiteral("channel-switch"));
+    abortSeamlessCatchupRolling(QStringLiteral("channel-switch"), true);
     m_resumePlaybackAfterLoad = false;
     m_pauseAfterLoad = false;
     setChannelLoadFailed(false);
     setIsLoading(false);
     m_backendBuffering = false;
     clearPlaybackStallTracking();
+    clearLiveBufferState();
     refreshBufferingState();
     setIsPlaying(false);
     stopRecording();
     if (m_timeshiftController) {
         m_timeshiftController->handleUserChannelSwitchRequest(channel);
     }
-    activePlayer->stop();
+        activePlayer->stop();
+        if (activePlayer == &m_catchupStandbyPlayer) {
+            setSharedPlaybackPlayer(nullptr, false);
+            activePlayer = &m_player;
+        }
 
     clearCatchupState();
     m_currentChannel = channel;
@@ -2094,7 +4056,10 @@ void PlayerController::playCatchupChannel(
     const QString &programLabel,
     const QDateTime &programStartUtc,
     const QDateTime &programStopUtc,
-    const QString &canonicalCatchupUrl)
+    const QString &canonicalCatchupUrl,
+    std::optional<double> initialProgramSeekSeconds,
+    std::optional<double> initialStreamBaseOffsetSeconds,
+    std::optional<double> initialTimelinePositionSeconds)
 {
     auto *activePlayer = playbackPlayer();
     if (activePlayer == nullptr) {
@@ -2107,12 +4072,14 @@ void PlayerController::playCatchupChannel(
     stopStartupBufferProbe();
     stopStartupBufferFallbackWatchdog(true);
     stopReconnectLoop(QStringLiteral("catchup-switch"));
+    abortSeamlessCatchupRolling(QStringLiteral("catchup-switch"), true);
     m_resumePlaybackAfterLoad = false;
     m_pauseAfterLoad = false;
     setChannelLoadFailed(false);
     setIsLoading(false);
     m_backendBuffering = false;
     clearPlaybackStallTracking();
+    clearLiveBufferState();
     refreshBufferingState();
     setIsPlaying(false);
     stopRecording();
@@ -2120,6 +4087,10 @@ void PlayerController::playCatchupChannel(
         m_timeshiftController->handleUserStopRequest();
     }
     activePlayer->stop();
+    if (activePlayer == &m_catchupStandbyPlayer) {
+        setSharedPlaybackPlayer(nullptr, false);
+        activePlayer = &m_player;
+    }
 
     Core::DebugLogger::instance().log(
         QStringLiteral("catchup.play.start"),
@@ -2127,12 +4098,25 @@ void PlayerController::playCatchupChannel(
     m_catchupProgramStartUtc = programStartUtc.toUTC();
     m_catchupProgramStopUtc = programStopUtc.toUTC();
     m_catchupProgramBoundaryReached = false;
-    m_catchupStreamBaseOffsetSeconds = 0.0;
+    m_catchupActiveEofObserved = false;
+    m_catchupStreamBaseOffsetSeconds = std::max(0.0, initialStreamBaseOffsetSeconds.value_or(0.0));
+    m_catchupTimelinePositionSeconds = std::max(0.0, initialTimelinePositionSeconds.value_or(0.0));
     m_catchupPendingStreamRelativeSeekSeconds = std::nullopt;
+    m_catchupReconnectResumeStreamRelativeSeconds = std::nullopt;
+    m_catchupPendingInitialSeekSeconds = initialProgramSeekSeconds;
     m_catchupCanonicalPlaybackUrl = canonicalCatchupUrl.trimmed().isEmpty()
         ? catchupUrl.trimmed()
         : canonicalCatchupUrl.trimmed();
+    resetCatchupUrlLoadGuardState(true);
     setCatchupState(channel.streamUrl, programLabel);
+    syncCatchupTimelineState();
+    m_catchupDesiredDelaySeconds =
+        std::max(0.0, m_catchupTimelineAvailableSeconds - m_catchupTimelinePositionSeconds);
+    m_catchupTransportEndTimelineSeconds =
+        std::max(m_catchupStreamBaseOffsetSeconds, m_catchupTimelineAvailableSeconds);
+    m_catchupRollingRetryWindowTimer.invalidate();
+    m_catchupLastRollingExtensionAttemptTimer.invalidate();
+    m_catchupRollingExtensionRetryCount = 0;
     m_currentChannel = channel;
     const auto previousPlaybackUrl = m_currentPlaybackUrl;
     const auto previousName = m_nowPlayingName;
@@ -2146,13 +4130,14 @@ void PlayerController::playCatchupChannel(
     if (m_nowPlayingName != previousName) {
         emit nowPlayingNameChanged();
     }
-    startPlaybackRequest(activePlayer, catchupUrl, false, catchupLoadfileOptions());
+    const auto playbackUrl = prepareCatchupStreamPlaybackUrl(activePlayer, catchupUrl, false);
+    startPlaybackRequest(activePlayer, playbackUrl, false, catchupLoadfileOptions());
 }
 
 void PlayerController::playCatchupChannel(const Channel &channel, const QString &catchupUrl, const QString &programLabel)
 {
     const auto fallbackStart = QDateTime::currentDateTimeUtc();
-    playCatchupChannel(channel, catchupUrl, programLabel, fallbackStart, fallbackStart.addSecs(60), catchupUrl);
+    playCatchupChannel(channel, catchupUrl, programLabel, fallbackStart, fallbackStart.addSecs(60), catchupUrl, std::nullopt);
 }
 
 void PlayerController::playCurrentPlaybackUrl(
@@ -2168,6 +4153,12 @@ void PlayerController::playCurrentPlaybackUrl(
     m_currentPlaybackUrl = url;
     if (previousPlaybackUrl != m_currentPlaybackUrl) {
         emit currentPlaybackUrlChanged();
+    }
+    if (!inCatchupMode()) {
+        abortSeamlessCatchupRolling(QStringLiteral("play-current-url"), true);
+        if (m_sharedPlaybackPlayer && m_sharedPlaybackPlayer.data() == &m_catchupStandbyPlayer) {
+            setSharedPlaybackPlayer(nullptr, false);
+        }
     }
     startPlaybackRequest(playbackPlayer(), url, pauseWhenReady, loadfileOptions);
 }
@@ -2220,12 +4211,14 @@ void PlayerController::returnToLiveFromCatchup()
     stopStartupBufferProbe();
     stopStartupBufferFallbackWatchdog(true);
     stopReconnectLoop(QStringLiteral("catchup-return-live"));
+    abortSeamlessCatchupRolling(QStringLiteral("catchup-return-live"), true);
     m_resumePlaybackAfterLoad = false;
     m_pauseAfterLoad = false;
     setChannelLoadFailed(false);
     setIsLoading(false);
     m_backendBuffering = false;
     clearPlaybackStallTracking();
+    clearLiveBufferState();
     refreshBufferingState();
     setIsPlaying(false);
     stopRecording();
@@ -2233,6 +4226,10 @@ void PlayerController::returnToLiveFromCatchup()
         m_timeshiftController->handleUserStopRequest();
     }
     activePlayer->stop();
+    if (activePlayer == &m_catchupStandbyPlayer) {
+        setSharedPlaybackPlayer(nullptr, false);
+        activePlayer = &m_player;
+    }
 
     Core::DebugLogger::instance().log(
         QStringLiteral("catchup.play.return_live"),
@@ -2445,12 +4442,14 @@ void PlayerController::stop()
         detachSharedPlayback();
         return;
     }
+    auto *activePlayer = playbackPlayer();
     m_pauseToggleRequested = false;
     m_userPausedManually = false;
     if (m_timeshiftController) {
         m_timeshiftController->handleUserStopRequest();
     }
     clearCatchupState();
+    clearLiveBufferState();
     stopRecording();
     Core::DebugLogger::instance().log(QStringLiteral("player"), QStringLiteral("Stop requested."));
     stopStartupBufferProbe();
@@ -2467,7 +4466,9 @@ void PlayerController::stop()
     m_pauseAfterLoad = false;
     setChannelSwitchInProgress(false);
     setChannelLoadFailed(false);
-    playbackPlayer()->stop();
+    if (activePlayer != nullptr) {
+        activePlayer->stop();
+    }
     setIsLoading(false);
     m_backendBuffering = false;
     clearPlaybackStallTracking();
@@ -2537,8 +4538,12 @@ void PlayerController::jumpToLiveEdge()
         seekCatchupToTimelinePosition(m_catchupTimelineAvailableSeconds);
         return;
     }
-    if (m_timeshiftController) {
+    if (timeshiftActive() && m_timeshiftController) {
         m_timeshiftController->jumpToLiveEdge();
+        return;
+    }
+    if (m_liveBufferActive) {
+        seekLiveBufferToPosition(m_liveBufferAvailableSeconds);
     }
 }
 
@@ -2548,8 +4553,12 @@ void PlayerController::seekTimeshiftRelative(const double seconds)
         seekCatchupToTimelinePosition(m_catchupTimelinePositionSeconds + seconds);
         return;
     }
-    if (m_timeshiftController) {
+    if (timeshiftActive() && m_timeshiftController) {
         m_timeshiftController->seekRelative(seconds);
+        return;
+    }
+    if (m_liveBufferActive) {
+        seekLiveBufferToPosition(m_liveBufferPositionSeconds + seconds);
     }
 }
 
@@ -2557,11 +4566,34 @@ void PlayerController::seekTimeshiftToFraction(const double fraction)
 {
     if (inCatchupMode()) {
         const auto clamped = std::max(0.0, std::min(1.0, fraction));
+        const auto nowUtc = QDateTime::currentDateTimeUtc();
+        const auto runningProgram = m_catchupProgramStartUtc.isValid()
+            && m_catchupProgramStopUtc.isValid()
+            && m_catchupProgramStartUtc < nowUtc
+            && nowUtc < m_catchupProgramStopUtc;
+        if (runningProgram) {
+            const auto elapsedSeconds = std::max<qint64>(0, m_catchupProgramStartUtc.secsTo(nowUtc));
+            if (elapsedSeconds > static_cast<qint64>(kCatchupMinElapsedSeconds)) {
+                const auto targetSeconds = clamped * m_catchupTimelineAvailableSeconds;
+                const auto secondsBehindLiveEdge = std::max(0.0, m_catchupTimelineAvailableSeconds - targetSeconds);
+                if (secondsBehindLiveEdge < kCatchupMinElapsedSeconds) {
+                    const auto blockedNotice =
+                        QStringLiteral("Timeline selection is locked within 10 minutes of live.");
+                    setCatchupTimelineNoticeText(blockedNotice, kCatchupTimelineNoticeAutoClearMs);
+                    return;
+                }
+            }
+        }
         seekCatchupToTimelinePosition(clamped * m_catchupTimelineAvailableSeconds);
         return;
     }
-    if (m_timeshiftController) {
+    if (timeshiftActive() && m_timeshiftController) {
         m_timeshiftController->seekToFraction(fraction);
+        return;
+    }
+    if (m_liveBufferActive) {
+        const auto clamped = std::max(0.0, std::min(1.0, fraction));
+        seekLiveBufferToPosition(clamped * m_liveBufferAvailableSeconds);
     }
 }
 
@@ -2780,7 +4812,10 @@ void PlayerController::handleHwdecFallbackCheck()
     }
     playbackPlayer()->setHwdec(QStringLiteral("no"));
     playbackPlayer()->setPaused(!catchupRetry);
-    playbackPlayer()->play(retryUrl, retryLoadfileOptions);
+    const auto playbackUrl = catchupRetry
+        ? prepareCatchupStreamPlaybackUrl(playbackPlayer(), retryUrl, false)
+        : retryUrl;
+    playbackPlayer()->play(playbackUrl, retryLoadfileOptions);
 }
 
 void PlayerController::stopDeferredLoadingIndicator()
@@ -2893,6 +4928,14 @@ void PlayerController::setIsLoading(const bool value)
         return;
     }
 
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player.state"),
+        QStringLiteral("isLoading %1 -> %2 mode=%3 player=%4 url=%5.")
+            .arg(m_isLoading ? QStringLiteral("true") : QStringLiteral("false"))
+            .arg(value ? QStringLiteral("true") : QStringLiteral("false"))
+            .arg(m_playbackMode)
+            .arg(reinterpret_cast<quintptr>(playbackPlayer()), 0, 16)
+            .arg(Core::redactSensitiveUrl(m_currentPlaybackUrl)));
     m_isLoading = value;
     emit isLoadingChanged();
 }
@@ -2903,6 +4946,16 @@ void PlayerController::setIsBuffering(const bool value)
         return;
     }
 
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player.state"),
+        QStringLiteral("isBuffering %1 -> %2 mode=%3 backend=%4 stalled=%5 player=%6 url=%7.")
+            .arg(m_isBuffering ? QStringLiteral("true") : QStringLiteral("false"))
+            .arg(value ? QStringLiteral("true") : QStringLiteral("false"))
+            .arg(m_playbackMode)
+            .arg(m_backendBuffering ? QStringLiteral("true") : QStringLiteral("false"))
+            .arg(m_playbackStalled ? QStringLiteral("true") : QStringLiteral("false"))
+            .arg(reinterpret_cast<quintptr>(playbackPlayer()), 0, 16)
+            .arg(Core::redactSensitiveUrl(m_currentPlaybackUrl)));
     m_isBuffering = value;
     emit isBufferingChanged();
 }
@@ -2913,6 +4966,14 @@ void PlayerController::setChannelSwitchInProgress(const bool value)
         return;
     }
 
+    Core::DebugLogger::instance().log(
+        QStringLiteral("player.state"),
+        QStringLiteral("channelSwitchInProgress %1 -> %2 mode=%3 player=%4 url=%5.")
+            .arg(m_channelSwitchInProgress ? QStringLiteral("true") : QStringLiteral("false"))
+            .arg(value ? QStringLiteral("true") : QStringLiteral("false"))
+            .arg(m_playbackMode)
+            .arg(reinterpret_cast<quintptr>(playbackPlayer()), 0, 16)
+            .arg(Core::redactSensitiveUrl(m_currentPlaybackUrl)));
     m_channelSwitchInProgress = value;
     emit channelSwitchInProgressChanged();
 }
@@ -2933,6 +4994,7 @@ void PlayerController::updatePosition()
     if (m_currentChannel.has_value()) {
         updateBitrateAverageBitsPerSecond(instantaneousBitrateBitsPerSecond(activePlayer));
     }
+    syncLiveBufferState();
     struct StreamHealth
     {
         std::optional<double> cacheDurationSeconds;
@@ -3458,6 +5520,9 @@ void PlayerController::updatePosition()
         return;
     }
 
+    if (inCatchupMode()) {
+        maybeCorrectUnexpectedCatchupRollback(seconds);
+    }
     playbackAdvanced = m_lastPlaybackPositionSeconds < 0
         || std::abs(seconds - m_lastPlaybackPositionSeconds) > kPlaybackPositionEpsilon;
     m_lastPlaybackPositionSeconds = seconds;
@@ -3498,6 +5563,19 @@ void PlayerController::updatePosition()
     }
     const auto framePtsAdvanced = sampleDisplayedFramePtsAdvanced();
     const auto health = sampleStreamHealth();
+    evaluateCatchupDegradationRecovery(
+        health.cacheDurationSeconds,
+        health.cacheSpeedBytesPerSecond,
+        playbackAdvanced,
+        framePtsAdvanced);
+    // Catch-up degradation recovery can commit seamless cutover and swap playbackPlayer().
+    // Refresh active-player binding before any logic that inspects EOF/provider state.
+    auto *activePlayerAfterRecovery = playbackPlayer();
+    const auto playerSwitchedDuringTick = activePlayerAfterRecovery != activePlayer;
+    if (activePlayerAfterRecovery != nullptr) {
+        activePlayer = activePlayerAfterRecovery;
+    }
+    maybeRetuneCatchupBuffering(health.cacheDurationSeconds);
     maybeRetuneSteadyStateBuffering(health.cacheDurationSeconds, health.bufferTargetSeconds);
     maybeStartNoRefillReconnect(health, playbackAdvanced, framePtsAdvanced);
     maybeStartVideoFreezeReconnect(health, playbackAdvanced, framePtsAdvanced);
@@ -3510,6 +5588,61 @@ void PlayerController::updatePosition()
             0.0,
             std::min(m_catchupTimelineAvailableSeconds, m_catchupStreamBaseOffsetSeconds + seconds));
         syncCatchupTimelineState();
+        if (shouldExtendCatchupRollingWindowPredictively(seconds)) {
+            extendCatchupRollingWindow(QStringLiteral("predictive-near-edge"), true);
+        }
+        const auto eofReached = !playerSwitchedDuringTick
+            && activePlayer->demuxerCacheReaderEof().value_or(false);
+        if (eofReached
+            && maybeStopCatchupAtProgrammeBoundary(
+                seconds,
+                health.cacheDurationSeconds,
+                QStringLiteral("demuxer-eof-boundary"))) {
+            refreshBufferingState();
+            return;
+        }
+        if (eofReached && !m_catchupActiveEofObserved) {
+            m_catchupActiveEofObserved = true;
+            Core::DebugLogger::instance().log(
+                QStringLiteral("player"),
+                QStringLiteral("Catch-up active transport reached demuxer EOF; awaiting provider close confirmation."));
+        }
+        const auto providerClosed = activeCatchupProviderConnectionClosed();
+        if (m_catchupActiveEofObserved && m_catchupActiveStreamSession && !m_catchupActiveStreamSession->closeRequestedByApp()) {
+            Core::DebugLogger::instance().log(
+                QStringLiteral("player"),
+                QStringLiteral(
+                    "Catch-up demuxer EOF observed; requesting owned provider close before seamless rollover arm."));
+            m_catchupActiveStreamSession->closeProviderConnection(QStringLiteral("active-eof-seamless"));
+        }
+        if (!m_catchupSeamlessPending
+            && canUseSeamlessCatchupRolling()
+            && m_catchupActiveEofObserved
+            && providerClosed) {
+            Core::DebugLogger::instance().log(
+                QStringLiteral("player"),
+                QStringLiteral(
+                    "Catch-up seamless rollover arm conditions met (EOF observed, provider closed)."));
+            extendCatchupRollingWindow(QStringLiteral("eof-close-cache-threshold"), true);
+        }
+        if (m_catchupSeamlessPending
+            && !m_catchupSeamlessStandbyLoadIssued
+            && canUseSeamlessCatchupRolling()
+            && m_catchupActiveEofObserved
+            && providerClosed) {
+            if (!m_catchupSeamlessPostCloseDelayPending && !m_catchupSeamlessPostCloseDelayTimer.isActive()) {
+                m_catchupSeamlessPostCloseDelayPending = true;
+                m_catchupSeamlessPostCloseDelayTimer.start();
+                Core::DebugLogger::instance().log(
+                    QStringLiteral("player"),
+                    QStringLiteral(
+                        "Catch-up seamless standby warmup delayed by %1ms after EOF/provider-close confirmation.")
+                        .arg(kCatchupSeamlessPostCloseDelayMs));
+            }
+        }
+        if (m_catchupSeamlessPending && m_catchupSeamlessStandbyReady) {
+            maybeCommitSeamlessCatchupCutover(QStringLiteral("near-edge"));
+        }
     }
 
     const auto displaySeconds = inCatchupMode() ? m_catchupTimelinePositionSeconds : seconds;

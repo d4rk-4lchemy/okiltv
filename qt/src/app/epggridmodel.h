@@ -90,6 +90,8 @@ private:
     void emitProgramsChangedForRange(int firstRow, int lastRow);
     void emitProgramsChangedForVisibleRows();
     void invalidateProgramTilesCache();
+    void scheduleOffscreenRowWarmup();
+    void warmProgramTilesForRows(int firstRow, int lastRow);
     void applyRows(
         const QList<Core::Channel> &channels,
         QList<Row> rows,
@@ -127,6 +129,7 @@ private:
     QHash<int, int> m_rowIndexByChannelId;
     QFutureSynchronizer<void> m_backgroundTasks;
     quint64 m_rebuildGeneration { 0 };
+    quint64 m_rowWarmupGeneration { 0 };
 };
 
 } // namespace OKILTV::App
