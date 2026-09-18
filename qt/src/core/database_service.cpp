@@ -2,6 +2,9 @@
 
 #include "appdatapaths.h"
 
+#include <QCryptographicHash>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -80,6 +83,16 @@ void execOrThrow(QSqlQuery &query, const QString &context)
 void ensureSchemaOnConnection(QSqlDatabase &database)
 {
     const QStringList statements = {
+        QStringLiteral(R"sql(
+            CREATE TABLE IF NOT EXISTS catchup_progress (
+                resume_key TEXT PRIMARY KEY,
+                profile_id TEXT NOT NULL,
+                program_start_ms INTEGER NOT NULL,
+                program_stop_ms INTEGER NOT NULL,
+                position_ms INTEGER NOT NULL,
+                expires_at_ms INTEGER NOT NULL
+            )
+        )sql"),
         QStringLiteral(R"sql(
             CREATE TABLE IF NOT EXISTS channels (
                 id          INTEGER NOT NULL,
@@ -602,6 +615,75 @@ void DatabaseService::upsertIconCache(const QString &urlHash, const QString &loc
     query.bindValue(QStringLiteral(":local_path"), localPath);
     query.bindValue(QStringLiteral(":fetched_at"), fetchedAtUnix);
     execOrThrow(query, QStringLiteral("Upsert icon cache"));
+}
+
+QString CatchupProgress::keyFor(const Channel &channel, const QDateTime &programStart)
+{
+    const QJsonArray identity {
+        guidToString(channel.profileId), channel.id, static_cast<int>(channel.source),
+        channel.tvgId.trimmed().toCaseFolded(),
+        channel.source == ChannelSource::M3U ? channel.streamUrl : QString {},
+        QString::number(programStart.toMSecsSinceEpoch())
+    };
+    return QString::fromLatin1(QCryptographicHash::hash(
+        QJsonDocument(identity).toJson(QJsonDocument::Compact), QCryptographicHash::Sha256).toHex());
+}
+
+qint64 CatchupProgress::resumeSeconds(const qint64 programEndMs) const
+{
+    const auto durationMs = programEndMs - programStartMs;
+    if (positionMs < 60000 || durationMs <= 0 || positionMs >= durationMs - 60000) {
+        return 0;
+    }
+    return (positionMs / 60000) * 60;
+}
+
+QList<CatchupProgress> DatabaseService::loadCatchupProgress() const
+{
+    ScopedConnection connection(m_databaseFilePath);
+    QSqlQuery query(schemaReadyDatabase(connection));
+    query.prepare(QStringLiteral("SELECT resume_key, profile_id, program_start_ms, program_stop_ms, position_ms, expires_at_ms FROM catchup_progress"));
+    execOrThrow(query, QStringLiteral("Load catch-up progress"));
+    QList<CatchupProgress> result;
+    while (query.next()) {
+        result.append({ query.value(0).toString(), QUuid(query.value(1).toString()),
+            query.value(2).toLongLong(), query.value(3).toLongLong(),
+            query.value(4).toLongLong(), query.value(5).toLongLong() });
+    }
+    return result;
+}
+
+void DatabaseService::saveCatchupProgress(const CatchupProgress &progress) const
+{
+    if (progress.resumeSeconds(progress.programStopMs) == 0) {
+        removeCatchupProgress(progress.key);
+        return;
+    }
+    ScopedConnection connection(m_databaseFilePath);
+    QSqlQuery query(schemaReadyDatabase(connection));
+    query.prepare(QStringLiteral(R"sql(
+        INSERT INTO catchup_progress VALUES (:key, :profile, :start, :stop, :position, :expires)
+        ON CONFLICT(resume_key) DO UPDATE SET
+            program_stop_ms = excluded.program_stop_ms,
+            position_ms = excluded.position_ms,
+            expires_at_ms = excluded.expires_at_ms
+    )sql"));
+    query.bindValue(QStringLiteral(":key"), progress.key);
+    query.bindValue(QStringLiteral(":profile"), guidToString(progress.profileId));
+    query.bindValue(QStringLiteral(":start"), progress.programStartMs);
+    query.bindValue(QStringLiteral(":stop"), progress.programStopMs);
+    query.bindValue(QStringLiteral(":position"), progress.positionMs);
+    query.bindValue(QStringLiteral(":expires"), progress.expiresAtMs);
+    execOrThrow(query, QStringLiteral("Save catch-up progress"));
+}
+
+void DatabaseService::removeCatchupProgress(const QString &key) const
+{
+    ScopedConnection connection(m_databaseFilePath);
+    QSqlQuery query(schemaReadyDatabase(connection));
+    query.prepare(QStringLiteral("DELETE FROM catchup_progress WHERE resume_key = :key"));
+    query.bindValue(QStringLiteral(":key"), key);
+    execOrThrow(query, QStringLiteral("Remove catch-up progress"));
 }
 
 } // namespace OKILTV::Core

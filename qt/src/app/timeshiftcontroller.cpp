@@ -711,6 +711,21 @@ TimeshiftController::TimeshiftController(
     m_reconnectGenerationTimer.setSingleShot(true);
     connect(&m_reconnectGenerationTimer, &QTimer::timeout, this, &TimeshiftController::attemptReconnectGeneration);
 
+    connect(m_multiViewController, &MultiViewController::layoutModeChanged, this, &TimeshiftController::handleMultiviewLayoutChanged);
+
+    setPlayerController(m_playerController);
+    cleanupStaleSessions();
+    applySettings();
+}
+
+void TimeshiftController::setPlayerController(PlayerController *controller)
+{
+    if (m_playerController) {
+        disconnect(m_playerController, nullptr, this, nullptr);
+        m_playerController->setTimeshiftController(nullptr);
+    }
+    m_playerController = controller;
+    m_playerController->setTimeshiftController(this);
     connect(m_playerController, &PlayerController::currentChannelChanged, this, &TimeshiftController::handleCurrentChannelChanged);
     connect(m_playerController, &PlayerController::playbackFileLoaded, this, &TimeshiftController::handlePlaybackFileLoaded);
     connect(m_playerController, &PlayerController::isLoadingChanged, this, [this]() {
@@ -719,15 +734,12 @@ TimeshiftController::TimeshiftController(
     connect(m_playerController, &PlayerController::isPlayingChanged, this, [this]() {
         finalizePendingPlaybackLoadIfReady(QStringLiteral("playing-state"));
     });
-    connect(m_multiViewController, &MultiViewController::layoutModeChanged, this, &TimeshiftController::handleMultiviewLayoutChanged);
-
-    cleanupStaleSessions();
-    applySettings();
 }
 
 TimeshiftController::~TimeshiftController()
 {
     stopSession(false, QStringLiteral("controller-destroyed"));
+    m_playerController->setTimeshiftController(nullptr);
 }
 
 bool TimeshiftController::enabled() const
@@ -742,7 +754,9 @@ bool TimeshiftController::isActive() const
 
 bool TimeshiftController::isPreparing() const
 {
-    return m_session.has_value() && m_session->state == SessionState::Starting;
+    return m_session.has_value()
+        && (m_session->state == SessionState::Starting
+            || (m_session->state == SessionState::Running && !m_session->playbackAttached));
 }
 
 bool TimeshiftController::isAtLiveEdge() const
@@ -3015,7 +3029,7 @@ bool TimeshiftController::startSessionForCurrentChannel(const bool pauseWhenRead
     };
 
     m_session->probeProcess = std::make_unique<QProcess>(this);
-    m_session->probeProcess->setProcessChannelMode(QProcess::MergedChannels);
+    m_session->probeProcess->setProcessChannelMode(QProcess::SeparateChannels);
     auto *probeProcess = m_session->probeProcess.get();
     connect(probeProcess, &QProcess::errorOccurred, this, [this, sessionId, finalizeProbe](const QProcess::ProcessError error) {
         if (!m_session.has_value() || m_session->id != sessionId || m_session->stopRequested || m_session->probeCompletionHandled) {
@@ -3032,7 +3046,14 @@ bool TimeshiftController::startSessionForCurrentChannel(const bool pauseWhenRead
         if (!m_session.has_value() || m_session->id != sessionId || m_session->stopRequested || m_session->probeCompletionHandled) {
             return;
         }
-        const auto payload = QString::fromUtf8(m_session->probeProcess->readAll()).trimmed();
+        const auto payload = QString::fromUtf8(m_session->probeProcess->readAllStandardOutput()).trimmed();
+        const auto diagnostics = QString::fromUtf8(m_session->probeProcess->readAllStandardError()).trimmed();
+        if (!diagnostics.isEmpty()) {
+            Core::DebugLogger::instance().log(
+                QStringLiteral("timeshift.probe"),
+                QStringLiteral("ffprobe exit=%1 status=%2 stderr: %3")
+                    .arg(exitCode).arg(static_cast<int>(exitStatus)).arg(diagnostics.left(2000)));
+        }
         auto streamLayout = probeStreamLayout(payload);
         if (m_session->probeTimedOut) {
             streamLayout.error = QStringLiteral("ffprobe timed out");

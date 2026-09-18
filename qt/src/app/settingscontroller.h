@@ -19,12 +19,15 @@ class SettingsController final : public QObject
     Q_PROPERTY(bool guidePreviewEnabled READ guidePreviewEnabled WRITE setGuidePreviewEnabled NOTIFY settingsChanged)
     Q_PROPERTY(bool overlayAutoHide READ overlayAutoHide WRITE setOverlayAutoHide NOTIFY settingsChanged)
     Q_PROPERTY(int overlayAutoHideSeconds READ overlayAutoHideSeconds WRITE setOverlayAutoHideSeconds NOTIFY settingsChanged)
+    Q_PROPERTY(int overlayInactivitySeconds READ overlayInactivitySeconds WRITE setOverlayInactivitySeconds NOTIFY settingsChanged)
     Q_PROPERTY(int refreshIntervalMinutes READ refreshIntervalMinutes WRITE setRefreshIntervalMinutes NOTIFY settingsChanged)
     Q_PROPERTY(bool autoRefreshEpg READ autoRefreshEpg WRITE setAutoRefreshEpg NOTIFY settingsChanged)
     Q_PROPERTY(int guidePastHours READ guidePastHours WRITE setGuidePastHours NOTIFY settingsChanged)
     Q_PROPERTY(int epgLookAheadHours READ epgLookAheadHours WRITE setEpgLookAheadHours NOTIFY settingsChanged)
     Q_PROPERTY(double waitForDataStreamSeconds READ waitForDataStreamSeconds WRITE setWaitForDataStreamSeconds NOTIFY settingsChanged)
     Q_PROPERTY(bool deinterlaceEnabled READ deinterlaceEnabled WRITE setDeinterlaceEnabled NOTIFY settingsChanged)
+    Q_PROPERTY(QString picturePreset READ picturePreset WRITE setPicturePreset NOTIFY settingsChanged)
+    Q_PROPERTY(bool imageSmoothingEnabled READ imageSmoothingEnabled WRITE setImageSmoothingEnabled NOTIFY settingsChanged)
     Q_PROPERTY(double bufferSizeSeconds READ bufferSizeSeconds WRITE setBufferSizeSeconds NOTIFY settingsChanged)
     Q_PROPERTY(QString playerUserAgent READ playerUserAgent WRITE setPlayerUserAgent NOTIFY settingsChanged)
     Q_PROPERTY(bool timeshiftEnabled READ timeshiftEnabled WRITE setTimeshiftEnabled NOTIFY settingsChanged)
@@ -72,6 +75,9 @@ public:
     bool overlayAutoHide() const;
     void setOverlayAutoHide(bool value);
 
+    int overlayInactivitySeconds() const;
+    void setOverlayInactivitySeconds(int value);
+
     int overlayAutoHideSeconds() const;
     void setOverlayAutoHideSeconds(int value);
 
@@ -92,6 +98,10 @@ public:
 
     bool deinterlaceEnabled() const;
     void setDeinterlaceEnabled(bool value);
+    QString picturePreset() const;
+    void setPicturePreset(const QString &value);
+    bool imageSmoothingEnabled() const;
+    void setImageSmoothingEnabled(bool value);
 
     double bufferSizeSeconds() const;
     void setBufferSizeSeconds(double value);
@@ -193,12 +203,15 @@ private:
     bool m_guidePreviewEnabled { true };
     bool m_overlayAutoHide { true };
     int m_overlayAutoHideSeconds { 3 };
+    int m_overlayInactivitySeconds { 60 };
     int m_refreshIntervalMinutes { 360 };
     bool m_autoRefreshEpg { true };
     int m_guidePastHours { 6 };
     int m_epgLookAheadHours { 24 };
     double m_waitForDataStreamSeconds { 5.0 };
     bool m_deinterlaceEnabled { true };
+    bool m_imageSmoothingEnabled { false };
+    QString m_picturePreset { QStringLiteral("standard") };
     double m_bufferSizeSeconds { 3.0 };
     QString m_playerUserAgent;
     bool m_timeshiftEnabled { false };

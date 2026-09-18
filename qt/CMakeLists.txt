@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(OKILTVQt VERSION 0.4.1 LANGUAGES CXX)
+project(OKILTVQt VERSION 0.5.0 LANGUAGES CXX)
 
 option(OKILTV_BUILD_TESTS "Build Qt test targets" ON)
 
@@ -103,6 +103,7 @@ qt_add_executable(OKILTVQt
     src/core/models.cpp
     src/core/models_json.cpp
     src/core/models_variant.cpp
+    src/core/sourcegrouppreferences.h
     src/core/models.h
     src/core/networkaccess.cpp
     src/core/networkaccess.h
@@ -120,6 +121,12 @@ qt_add_executable(OKILTVQt
     src/core/xtreamservice.h
     src/player/catchupstreamsession.cpp
     src/player/catchupstreamsession.h
+    src/player/catchuptsjoiner.cpp
+    src/player/catchuptsjoiner.h
+    src/player/mpegtstimestampnormalizer.cpp
+    src/player/mpegtstimestampnormalizer.h
+    src/player/livebuffertuner.cpp
+    src/player/livebuffertuner.h
     src/player/mpvplayer.cpp
     src/player/mpvplayer.h
     src/player/mpvvideoitem.cpp
@@ -133,6 +140,8 @@ qt_add_resources(OKILTVQt app_assets
         resources/icons/audio-track.svg
         resources/icons/closed-caption.svg
         resources/icons/appearance.svg
+        resources/icons/catch-up-indicator.svg
+        resources/icons/continue-catch-up.svg
         resources/icons/channel-error.svg
         resources/icons/close.svg
         resources/icons/diagnostics.svg
@@ -226,6 +235,7 @@ set(OKILTV_QML_FILES
     qml/components/FormSpinBox.qml
     qml/components/FormSwitch.qml
     qml/components/FormTextField.qml
+    qml/components/EpgTimeline.qml
     qml/components/EpgHoverBubble.qml
     qml/components/GlassPanel.qml
     qml/components/IconActionButton.qml
@@ -234,6 +244,7 @@ set(OKILTV_QML_FILES
     qml/components/SettingsRailButton.qml
     qml/components/WindowChromeBar.qml
     qml/components/WindowResizeHandles.qml
+    qml/components/SourceGroupsList.qml
     qml/components/SourceManagerPane.qml
     qml/screens/GuidePage.qml
     qml/screens/LiveTvPage.qml

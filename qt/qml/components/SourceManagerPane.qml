@@ -28,7 +28,6 @@ Item {
     property var pendingNewSourceProfileIds: []
     property var refreshProfileQueue: []
     property bool refreshQueueInFlight: false
-    property bool groupDragActive: false
     property int dirtyRevision: 0
     readonly property int sidebarWidth: root.shell.layoutBand === "compact" ? 292 : 324
     readonly property color sidebarSurface: "#74070d12"
@@ -83,6 +82,7 @@ Item {
             "m3UUrl": normalizedText(profile.m3UUrl),
             "m3UFilePath": normalizedText(profile.m3UFilePath),
             "xmltvUrl": normalizedText(profile.xmltvUrl),
+            "catchupSafetyMinutes": Number(profile.catchupSafetyMinutes || 3),
             "autoRefreshIntervalHours": normalizedAutoRefreshIntervalHours(profile.autoRefreshIntervalHours)
         }
     }
@@ -97,6 +97,7 @@ Item {
             "m3UUrl": normalizedText(m3uUrlField.text),
             "m3UFilePath": normalizedText(m3uFileField.text),
             "xmltvUrl": normalizedText(xmltvField.text),
+            "catchupSafetyMinutes": catchupSafetyMinutesField.value,
             "autoRefreshIntervalHours": normalizedAutoRefreshIntervalHours(autoRefreshIntervalHoursField.value)
         }
     }
@@ -111,6 +112,7 @@ Item {
             "m3UUrl": "",
             "m3UFilePath": "",
             "xmltvUrl": "",
+            "catchupSafetyMinutes": 3,
             "autoRefreshIntervalHours": 24
         }
     }
@@ -128,6 +130,7 @@ Item {
             && normalizedText(left.m3UUrl) === normalizedText(right.m3UUrl)
             && normalizedText(left.m3UFilePath) === normalizedText(right.m3UFilePath)
             && normalizedText(left.xmltvUrl) === normalizedText(right.xmltvUrl)
+            && Number(left.catchupSafetyMinutes || 3) === Number(right.catchupSafetyMinutes || 3)
             && normalizedAutoRefreshIntervalHours(left.autoRefreshIntervalHours)
                 === normalizedAutoRefreshIntervalHours(right.autoRefreshIntervalHours)
     }
@@ -154,6 +157,7 @@ Item {
                 || normalizedText(draft.xtreamBaseUrl).length > 0
                 || normalizedText(draft.xtreamUsername).length > 0
                 || normalizedText(draft.xtreamPassword).length > 0
+                || Number(draft.catchupSafetyMinutes || 3) !== 3
                 || normalizedAutoRefreshIntervalHours(draft.autoRefreshIntervalHours) !== 24
         }
         if (normalizedType === 1) {
@@ -215,6 +219,7 @@ Item {
         m3uUrlField.text = draft.m3UUrl || ""
         m3uFileField.text = draft.m3UFilePath || ""
         xmltvField.text = draft.xmltvUrl || ""
+        catchupSafetyMinutesField.value = Number(draft.catchupSafetyMinutes || 3)
         autoRefreshIntervalHoursField.value = normalizedAutoRefreshIntervalHours(draft.autoRefreshIntervalHours)
     }
 
@@ -463,6 +468,7 @@ Item {
                         "m3UUrl": currentDraft.m3UUrl,
                         "m3UFilePath": currentDraft.m3UFilePath,
                         "xmltvUrl": currentDraft.xmltvUrl,
+                        "catchupSafetyMinutes": currentDraft.catchupSafetyMinutes,
                         "autoRefreshIntervalHours": currentDraft.autoRefreshIntervalHours
                     })
                     if (sourceIdentityOrConnectionChanged(currentDraft, persistedDraft)) {
@@ -485,7 +491,8 @@ Item {
                                 currentCreateDraft.xtreamUsername,
                                 currentCreateDraft.xtreamPassword,
                                 currentCreateDraft.xmltvUrl,
-                                currentCreateDraft.autoRefreshIntervalHours)
+                                currentCreateDraft.autoRefreshIntervalHours,
+                                currentCreateDraft.catchupSafetyMinutes)
                 } else if (normalizedDraftType(currentCreateDraft.type) === 1) {
                     createdProfileId = root.profiles.addM3uUrlProfile(
                                 currentCreateDraft.name,
@@ -529,6 +536,7 @@ Item {
                 "m3UUrl": draft.m3UUrl,
                 "m3UFilePath": draft.m3UFilePath,
                 "xmltvUrl": draft.xmltvUrl,
+                "catchupSafetyMinutes": draft.catchupSafetyMinutes,
                 "autoRefreshIntervalHours": draft.autoRefreshIntervalHours
             })
 
@@ -558,7 +566,8 @@ Item {
                             draft.xtreamUsername,
                             draft.xtreamPassword,
                             draft.xmltvUrl,
-                            draft.autoRefreshIntervalHours)
+                            draft.autoRefreshIntervalHours,
+                            draft.catchupSafetyMinutes)
             } else if (normalizedDraftType(draft.type) === 1) {
                 createdProfileId = root.profiles.addM3uUrlProfile(
                             draft.name,
@@ -1101,6 +1110,25 @@ Item {
                             value: 24
                         }
                     }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: root.draftType === 0
+                        spacing: Theme.spacingM
+                        Text {
+                            Layout.fillWidth: true
+                            text: "Archive safety margin (minutes)"
+                            color: Theme.textSecondary
+                            font.pixelSize: 12
+                            wrapMode: Text.Wrap
+                        }
+                        FormSpinBox {
+                            id: catchupSafetyMinutesField
+                            Layout.preferredWidth: root.shell.layoutBand === "compact" ? 174 : 192
+                            from: 3
+                            to: 30
+                            value: 3
+                        }
+                    }
                 }
 
                 OverlaySectionPanel {
@@ -1179,6 +1207,15 @@ Item {
                                 }
                             }
                         }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        visible: root.app.groupAutoEnableNoticeProfileIds.indexOf(root.groups.profileId) >= 0
+                        text: "Too much groups to auto-enable. Enable groups manually"
+                        color: Theme.textSecondary
+                        font.pixelSize: 12
+                        wrapMode: Text.Wrap
                     }
 
                     Item {
@@ -1290,196 +1327,21 @@ Item {
                                 }
                             }
 
-                            ListView {
+                            SourceGroupsList {
                                 id: groupsList
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: (root.groups.hasGroups
-                                        && root.groups.visibleGroupIds.length > 0)
-                                    ? Math.min(contentHeight, 340)
-                                    : 0
-                                clip: true
-                                spacing: 6
+                                Layout.preferredHeight: visible ? implicitHeight : 0
                                 enabled: !root.groups.loading
-                                interactive: !root.groupDragActive && !root.groupReorderEnabled
-                                model: root.groups.visibleGroups
-                                visible: root.groups.hasGroups
-                                    && root.groups.visibleGroupIds.length > 0
-                                boundsBehavior: Flickable.StopAtBounds
-
-                                WheelHandler {
-                                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-                                    blocking: true
-                                    onWheel: function(event) {
-                                        const maxContentY = Math.max(0, groupsList.contentHeight - groupsList.height)
-                                        if (maxContentY <= 0) {
-                                            event.accepted = false
-                                            return
-                                        }
-
-                                        let delta = 0
-                                        if (Math.abs(event.pixelDelta.y) > 0) {
-                                            delta = event.pixelDelta.y
-                                        } else if (Math.abs(event.angleDelta.y) > 0) {
-                                            delta = event.angleDelta.y * 0.5
-                                        }
-
-                                        if (Math.abs(delta) <= 0.001) {
-                                            event.accepted = false
-                                            return
-                                        }
-
-                                        const previousY = groupsList.contentY
-                                        const nextY = Math.max(0, Math.min(previousY - delta, maxContentY))
-                                        const moved = Math.abs(nextY - previousY) > 0.01
-                                        if (moved) {
-                                            groupsList.contentY = nextY
-                                        }
-                                        event.accepted = moved
-                                    }
+                                visible: root.groups.hasGroups && root.groups.visibleGroupIds.length > 0
+                                rows: root.groups.visibleGroups
+                                profileId: root.groups.profileId
+                                reorderEnabled: root.groupReorderEnabled
+                                filterKey: root.groups.searchText + "|" + root.groups.hideUnchecked
+                                onReorderRequested: function(orderedIds) {
+                                    root.groups.reorderVisibleGroups(orderedIds)
                                 }
-
-                                delegate: Rectangle {
-                                    id: groupRow
-                                    required property int index
-                                    required property var modelData
-                                    property string groupId: modelData.id
-                                    property int rowIndex: index
-                                    property bool dragActive: dragHandleArea.pressed && root.groupReorderEnabled
-                                    property int dragLastTargetIndex: index
-
-                                    width: ListView.view.width
-                                    height: 54
-                                    visible: true
-                                    radius: Theme.radiusM
-                                    color: "#5a0c141b"
-                                    border.width: dragActive ? 1 : 0
-                                    border.color: "#7fa3b5"
-                                    opacity: dragActive ? 0.8 : 1.0
-
-                                    RowLayout {
-                                        anchors.fill: parent
-                                        anchors.leftMargin: 14
-                                        anchors.rightMargin: 14
-                                        spacing: Theme.spacingM
-
-                                        Rectangle {
-                                            Layout.preferredWidth: 20
-                                            Layout.preferredHeight: 20
-                                            radius: 4
-                                            color: groupRow.modelData.selected ? Theme.accent : "transparent"
-                                            border.width: 1
-                                            border.color: groupRow.modelData.selected ? Theme.accent : "#7fa3b5"
-
-                                            Text {
-                                                anchors.centerIn: parent
-                                                text: groupRow.modelData.selected ? "\u2713" : ""
-                                                color: Theme.textPrimary
-                                                font.pixelSize: 11
-                                                font.bold: true
-                                            }
-                                        }
-
-                                        ColumnLayout {
-                                            Layout.fillWidth: true
-                                            spacing: 1
-
-                                            Text {
-                                                Layout.fillWidth: true
-                                                text: groupRow.modelData.name
-                                                color: Theme.textPrimary
-                                                font.pixelSize: 14
-                                                font.bold: true
-                                                elide: Text.ElideRight
-                                            }
-
-                                            Text {
-                                                Layout.fillWidth: true
-                                                text: groupRow.modelData.count + " channels"
-                                                color: Theme.textSecondary
-                                                font.pixelSize: 11
-                                                elide: Text.ElideRight
-                                            }
-                                        }
-
-                                        Rectangle {
-                                            Layout.preferredWidth: 22
-                                            Layout.preferredHeight: 22
-                                            radius: 5
-                                            color: root.groupReorderEnabled ? "#2affffff" : "transparent"
-                                            border.width: root.groupReorderEnabled ? 1 : 0
-                                            border.color: "#6ca0b8"
-                                            visible: root.groupReorderEnabled
-
-                                            Text {
-                                                anchors.centerIn: parent
-                                                text: ":::"
-                                                color: Theme.textSecondary
-                                                font.pixelSize: 11
-                                                font.bold: true
-                                            }
-
-                                            MouseArea {
-                                                id: dragHandleArea
-                                                anchors.fill: parent
-                                                enabled: root.groupReorderEnabled
-                                                acceptedButtons: Qt.LeftButton
-                                                preventStealing: true
-                                                cursorShape: Qt.OpenHandCursor
-                                                onPressed: {
-                                                    groupRow.dragLastTargetIndex = groupRow.rowIndex
-                                                    root.groupDragActive = true
-                                                }
-                                                onReleased: {
-                                                    groupRow.dragLastTargetIndex = -1
-                                                    root.groupDragActive = false
-                                                }
-                                                onCanceled: {
-                                                    groupRow.dragLastTargetIndex = -1
-                                                    root.groupDragActive = false
-                                                }
-                                                onPositionChanged: {
-                                                    if (!pressed || !root.groupReorderEnabled) {
-                                                        return
-                                                    }
-
-                                                    const mapped = dragHandleArea.mapToItem(
-                                                                groupsList.contentItem, mouseX, mouseY)
-                                                    let targetIndex = groupsList.indexAt(mapped.x, mapped.y)
-                                                    if (targetIndex < 0) {
-                                                        if (mapped.y <= 0) {
-                                                            targetIndex = 0
-                                                        } else if (mapped.y >= groupsList.contentItem.height - 1) {
-                                                            targetIndex = root.groups.visibleGroupIds.length - 1
-                                                        } else {
-                                                            return
-                                                        }
-                                                    }
-
-                                                    if (targetIndex === groupRow.rowIndex
-                                                        || targetIndex === groupRow.dragLastTargetIndex) {
-                                                        return
-                                                    }
-
-                                                    groupRow.dragLastTargetIndex = targetIndex
-                                                    const orderedVisibleIds = root.groups.visibleGroupIds.slice()
-                                                    orderedVisibleIds.splice(groupRow.rowIndex, 1)
-                                                    orderedVisibleIds.splice(targetIndex, 0, groupRow.groupId)
-                                                    root.groups.reorderVisibleGroups(orderedVisibleIds)
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        anchors.rightMargin: root.groupReorderEnabled ? 34 : 0
-                                        onClicked: {
-                                            if (root.groupDragActive) {
-                                                return
-                                            }
-                                            root.groups.setGroupSelected(groupRow.modelData.id, !groupRow.modelData.selected)
-                                        }
-                                    }
+                                onSelectionRequested: function(groupId, selected) {
+                                    root.groups.setGroupSelected(groupId, selected)
                                 }
                             }
 
@@ -1621,7 +1483,7 @@ Item {
         function onProfileLoadFinished(profileId, ok) {
             root.completeRefreshQueueItem(profileId)
 
-            if (profileId === root.groups.profileId && !root.groups.dirty) {
+            if (profileId === root.groups.profileId) {
                 root.groups.reload()
                 root.syncActiveProfileGroupState()
             }

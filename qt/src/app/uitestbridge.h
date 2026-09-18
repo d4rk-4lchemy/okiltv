@@ -64,6 +64,7 @@ public:
     QString runDirectory() const;
 
     void setWindow(QObject *windowObject);
+    void setPlayerController(PlayerController *controller);
     void attachControllers(
         AppController *appController,
         ShellController *shellController,

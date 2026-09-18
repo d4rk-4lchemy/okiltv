@@ -18,7 +18,7 @@ Item {
     readonly property var shell: shellController
     readonly property var settings: settingsController
     readonly property var app: appController
-    readonly property var player: appPlayerController
+    readonly property var player: multiViewController.primaryController
     readonly property var channelList: channelListModel
     readonly property var guideState: guideStateModel
     readonly property var nowNext: nowNextModel
@@ -199,6 +199,10 @@ Item {
     property int committedChannelId: -1
     property bool hoverPreviewActive: false
     property bool previewPinned: false
+    property int mousePinnedChannelId: -1
+    property string mousePinnedProfileId: ""
+    readonly property bool mouseSelectionPinned: root.mousePinnedChannelId >= 0
+    property int guideInitialChannelId: -1
     property bool suppressSelectionInteraction: false
     property var hoveredProgramData: ({})
     property Item hoverAnchorItem: null
@@ -237,24 +241,40 @@ Item {
     readonly property bool channelListScrollingActive: channelListScrollSettling
         || channelListScrollActiveRaw
     property int rightPaneSelectionFlatIndex: -1
-    property string rightPaneSelectionKind: ""
-    property int rightPaneUpcomingIndex: -1
+    property string rightPaneSelectionChannelKey: ""
     property var rightPaneProgramData: ({})
     property bool keyboardVolumeHudVisible: false
     property string keyboardVolumeHudIconFile: "volume-over-50.svg"
     property bool timeshiftTimelineHoverVisible: false
     property real timeshiftTimelineHoverFraction: 0
     property bool timeshiftBadgeForceBehindLive: false
+    property bool liveBadgeForwardSeekPending: false
     property string liveTimelineNoticeText: ""
     readonly property bool liveProgramSeekActive: root.player.playbackMode !== "catchup"
         && !root.player.timeshiftActive
         && root.liveCatchupState.visible
         && root.player.liveBufferActive
-    readonly property bool liveProgramTimelineActive: root.liveProgramSeekActive
+    // EPG visibility follows the channel/programme, even while track changes reset mpv's seekable cache.
+    readonly property bool liveProgramTimelineActive: root.hasPlaybackChannel
+        && root.player.playbackMode !== "catchup"
+        && !root.player.timeshiftActive
+        && root.liveCatchupState.visible
         && root.liveCatchupChannelCapable
+    readonly property bool liveProgramProgressActive: {
+        if (!root.hasPlaybackChannel || root.player.playbackMode === "catchup"
+                || root.player.timeshiftActive || root.liveCatchupChannelCapable)
+            return false
+        const program = root.playbackNowNext.currentProgram || ({})
+        const startMs = Date.parse(String(program.start || ""))
+        const stopMs = Date.parse(String(program.stop || ""))
+        return Number.isFinite(startMs) && Number.isFinite(stopMs)
+            && stopMs > startMs && startMs <= Date.now() && Date.now() < stopMs
+    }
     readonly property string transportTimelineMode: root.player.catchupTimelineActive
         ? "catchup"
-        : (root.player.timeshiftActive ? "timeshift" : (root.liveProgramTimelineActive ? "liveProgram" : "none"))
+        : (root.player.timeshiftActive ? "timeshift"
+            : (root.liveProgramTimelineActive ? "liveProgram"
+                : (root.liveProgramProgressActive ? "liveProgress" : "none")))
     readonly property bool transportTimelineActive: root.transportTimelineMode !== "none"
     readonly property bool transportSeekActive: root.player.catchupTimelineActive
         || root.player.timeshiftActive
@@ -262,8 +282,10 @@ Item {
     readonly property bool transportTimelineUsingCatchup: root.transportTimelineMode === "catchup"
     readonly property bool transportTimelineUsingTimeshift: root.transportTimelineMode === "timeshift"
     readonly property bool transportTimelineUsingLiveProgram: root.transportTimelineMode === "liveProgram"
+    readonly property bool transportTimelineUsingLiveProgress: root.transportTimelineMode === "liveProgress"
     readonly property real transportBehindLiveSeconds: root.player.catchupTimelineActive
-        ? Math.max(0, Number(root.player.catchupTimelineAvailableSeconds || 0) - Number(root.player.catchupTimelinePositionSeconds || 0))
+        ? Math.max(0, (Date.now() - Number(root.player.catchupTimelineStartEpochMs || 0)) / 1000
+                   - Number(root.player.catchupTimelinePositionSeconds || 0))
         : (root.player.timeshiftActive
             ? root.timeshiftUiBehindLiveSeconds
             : (root.liveProgramSeekActive ? Math.max(0, Number(root.player.liveBufferBehindLiveSeconds || 0)) : 0))
@@ -277,8 +299,10 @@ Item {
     }
     readonly property bool timeshiftUiAtLiveEdge: !root.transportSeekActive
         || root.transportBehindLiveSeconds <= root.transportLiveThresholdSeconds
-    readonly property bool timeshiftBadgeShowBehindLive: root.transportSeekActive
-        && (!root.timeshiftUiAtLiveEdge || root.timeshiftBadgeForceBehindLive)
+    readonly property bool timeshiftBadgeShowBehindLive: root.transportTimelineUsingLiveProgram
+        ? root.timeshiftBadgeForceBehindLive
+        : (root.transportSeekActive
+           && (!root.timeshiftUiAtLiveEdge || root.timeshiftBadgeForceBehindLive))
     property bool debugBubbleEnabled: false
     property real debugBubbleX: Theme.spacingL
     property real debugBubbleY: Theme.spacingL
@@ -311,7 +335,10 @@ Item {
         && root.numericInputState !== "none"
         && root.numericHudText.length > 0
     property bool channelChangeBubbleVisible: false
-    property bool playbackBubbleEpgLoading: root.app.epgCacheBootstrapPending
+    readonly property bool catchupPlayback: root.player.playbackMode === "catchup"
+    readonly property var playbackBubbleProgram: root.catchupPlayback
+        ? root.player.catchupCurrentProgram : root.playbackNowNext.currentProgram
+    property bool playbackBubbleEpgLoading: !root.catchupPlayback && root.app.epgCacheBootstrapPending
         && root.playbackNowNext.loading
     property bool browsePreviewActive: root.showShellChrome
         && root.hasSelectedChannel
@@ -324,9 +351,11 @@ Item {
     property bool playbackEpgAvailable: (root.playbackNowNext.currentProgram.title || "").length > 0
         || (root.playbackNowNext.nextProgram.title || "").length > 0
         || root.playbackNowNext.upcomingPrograms.length > 0
+        || root.playbackNowNext.pastPrograms.length > 0
     property bool browseEpgAvailable: (root.nowNext.currentProgram.title || "").length > 0
         || (root.nowNext.nextProgram.title || "").length > 0
         || root.nowNext.upcomingPrograms.length > 0
+        || root.nowNext.pastPrograms.length > 0
     readonly property int playbackChannelId: Number(root.player.currentChannel.id)
     readonly property bool selectedMatchesPlayback: !Number.isNaN(root.playbackChannelId)
         && root.playbackChannelId >= 0
@@ -338,22 +367,19 @@ Item {
     property var sideNowNextModel: root.sideUsesBrowseModel
         ? root.nowNext
         : root.playbackNowNext
+    readonly property bool sideShowsCatchup: root.catchupPlayback
+        && root.sideNowNextModel.channel.id !== undefined
+        && root.sideNowNextModel.channel.id === root.player.currentChannel.id
+        && String(root.sideNowNextModel.channel.profileId || "") === String(root.player.currentChannel.profileId || "")
     property var liveCatchupState: ({ "visible": false, "enabled": false, "reason": "" })
     readonly property bool liveCatchupEligible: root.liveCatchupState.visible && root.liveCatchupState.enabled
     readonly property bool liveCatchupChannelCapable: {
         const channel = root.player.currentChannel || ({})
         return Boolean(channel.catchupSupported) && Number(channel.catchupWindowHours || 0) > 0
     }
-    readonly property bool liveCatchupButtonVisible: root.liveCatchupChannelCapable
-        && (root.liveCatchupState.visible || root.player.playbackMode === "catchup")
-    readonly property bool liveCatchupButtonEnabled: root.liveCatchupEligible
-        && root.player.playbackMode !== "catchup"
-    readonly property bool sideHasCurrentProgram: (root.sideNowNextModel.currentProgram.title || "").length > 0
-    readonly property bool sideHasNextProgram: (root.sideNowNextModel.nextProgram.title || "").length > 0
-    readonly property bool sideHasUpcomingPrograms: root.sideNowNextModel.upcomingPrograms.length > 0
-    readonly property bool sideHasAnyEpgData: root.sideHasCurrentProgram
-        || root.sideHasNextProgram
-        || root.sideHasUpcomingPrograms
+    readonly property bool liveCatchupButtonVisible: root.catchupPlayback
+        || (root.liveCatchupChannelCapable && root.liveCatchupState.visible)
+    readonly property bool liveCatchupButtonEnabled: root.catchupPlayback || root.liveCatchupEligible
     property real leftPanelWidth: root.shell.layoutBand === "compact" ? 308 : 340
     property real rightPanelWidth: root.leftPanelWidth
     property real bottomPanelWidth: Math.max(
@@ -369,14 +395,13 @@ Item {
             ? Math.min((parent ? parent.width : 0) * 0.9, root.shell.layoutBand === "compact" ? 1140 : 1320)
             : settingsPage.preferredNarrowOverlayWidth)
     readonly property string iconBasePath: "qrc:/resources/icons/"
-    readonly property int rightPaneUpcomingRowHeight: 52
 
     function iconPath(fileName) {
         return root.iconBasePath + fileName
     }
 
     function volumeIconFile() {
-        const level = Math.round(Number(root.player.volume || 0))
+        const level = root.sliderPositionForPlayerVolume(root.player.volume)
         if (root.player.muted || level <= 0) {
             return "volume-muted.svg"
         }
@@ -690,6 +715,7 @@ Item {
     }
 
     function markTimeshiftBadgeLive() {
+        root.liveBadgeForwardSeekPending = false
         root.timeshiftBadgeForceBehindLive = false
     }
 
@@ -697,6 +723,7 @@ Item {
         if (!root.transportSeekActive) {
             return
         }
+        root.liveBadgeForwardSeekPending = false
         root.timeshiftBadgeForceBehindLive = true
     }
 
@@ -716,12 +743,15 @@ Item {
                 return root.jumpToLiveEdgeWithBadge()
             }
         }
+        if (delta > 0 && root.transportTimelineUsingLiveProgram) {
+            root.liveBadgeForwardSeekPending = root.timeshiftBadgeForceBehindLive
+        }
         root.player.seekTimeshiftRelative(delta)
         return true
     }
 
     function seekTimeshiftToFractionWithBadge(fraction) {
-        if (!root.transportTimelineActive) {
+        if (!root.transportTimelineActive || root.transportTimelineUsingLiveProgress) {
             return false
         }
         const clamped = Math.max(0, Math.min(1, Number(fraction)))
@@ -735,14 +765,6 @@ Item {
             const nowMs = Math.min(Date.now(), stopMs)
             const programmeAvailableSeconds = Math.max(0, (nowMs - startMs) / 1000.0)
             const targetProgrammeSeconds = clamped * programmeAvailableSeconds
-            const minElapsedSeconds = Math.max(0, Number(root.app.catchupMinElapsedSeconds || 0))
-            if (programmeAvailableSeconds > minElapsedSeconds) {
-                const targetSecondsBehindLive = Math.max(0, programmeAvailableSeconds - targetProgrammeSeconds)
-                if (targetSecondsBehindLive < minElapsedSeconds) {
-                    root.showLiveTimelineNotice("Timeline selection is locked within 10 minutes of live.")
-                    return true
-                }
-            }
             const localAvailableSeconds = Math.max(0, Number(root.player.liveBufferAvailableSeconds || 0))
             const localStartSeconds = Math.max(0, programmeAvailableSeconds - localAvailableSeconds)
             if (targetProgrammeSeconds + 0.05 >= localStartSeconds) {
@@ -757,9 +779,13 @@ Item {
                 root.player.seekTimeshiftToFraction(localFraction)
                 return true
             }
-            root.markTimeshiftBadgeBehindLive()
             if (!root.liveCatchupEligible) {
                 root.showLiveTimelineNotice(String(root.liveCatchupState.reason || "Catch-up is unavailable."))
+                return true
+            }
+            const safetySeconds = Math.max(180, Number(root.liveCatchupState.safetySeconds || 180))
+            if (startMs + targetProgrammeSeconds * 1000 > Math.min(stopMs, Date.now() - safetySeconds * 1000)) {
+                root.showLiveTimelineNotice("The last " + Math.round(safetySeconds / 60) + " minutes are not yet available in the archive.")
                 return true
             }
             root.app.playCatchupAtOffset(
@@ -768,7 +794,7 @@ Item {
                 targetProgrammeSeconds)
             return true
         }
-        if (clamped >= 0.995) {
+        if (clamped >= 0.995 && !root.player.catchupTimelineActive) {
             return root.jumpToLiveEdgeWithBadge()
         }
         if (clamped < 0.999) {
@@ -788,7 +814,8 @@ Item {
     }
 
     function togglePauseWithBadge() {
-        if (root.transportSeekActive && root.hasPlaybackChannel && root.player.isPlaying) {
+        if (!root.transportTimelineUsingLiveProgram
+                && root.transportSeekActive && root.hasPlaybackChannel && root.player.isPlaying) {
             root.markTimeshiftBadgeBehindLive()
         }
         root.player.togglePause()
@@ -808,7 +835,7 @@ Item {
         let endMs = 0
         if (root.transportTimelineUsingCatchup) {
             startMs = Number(root.player.catchupTimelineStartEpochMs || 0)
-            endMs = Number(root.player.catchupTimelineAvailableEdgeEpochMs || 0)
+            endMs = Number(root.player.catchupTimelineEndEpochMs || 0)
         } else if (root.transportTimelineUsingTimeshift) {
             startMs = Number(root.player.timeshiftWindowStartEpochMs || 0)
             endMs = Number(root.player.timeshiftLiveEdgeEpochMs || 0)
@@ -938,32 +965,7 @@ Item {
     }
 
     function sideDvrChannelData() {
-        if (root.sideUsesBrowseModel
-            && root.guideState.selectedChannel
-            && root.guideState.selectedChannel.id !== undefined) {
-            return root.guideState.selectedChannel
-        }
-        if (root.player.currentChannel && root.player.currentChannel.id !== undefined) {
-            return root.player.currentChannel
-        }
-        if (root.guideState.selectedChannel && root.guideState.selectedChannel.id !== undefined) {
-            return root.guideState.selectedChannel
-        }
-        return ({})
-    }
-
-    function isProgramDvrMarked(programData, channelData) {
-        const _scheduleCount = root.dvr.scheduledCount
-        if (!programData || !channelData) {
-            return false
-        }
-        if (channelData.id === undefined || channelData.profileId === undefined) {
-            return false
-        }
-        if ((programData.start || "").length === 0 || (programData.stop || "").length === 0) {
-            return false
-        }
-        return root.dvr.isProgramScheduled(channelData, programData)
+        return root.sideNowNextModel.channel
     }
 
     function toggleManualRecordingShortcut() {
@@ -1141,7 +1143,8 @@ Item {
 
     function overlayHideLocked() {
         const hoverLocksEnabled = root.overlayInteractionSource !== "keyboard" || root.keyboardModeLocked
-        return root.keyboardModeLocked
+        return root.mouseSelectionPinned
+            || root.keyboardModeLocked
             || searchField.activeFocus
             || groupPickerSearchField.activeFocus
             || sourcePickerSearchField.activeFocus
@@ -1215,12 +1218,17 @@ Item {
     }
 
     function noteBrowseInteraction() {
+        // Late hover/selection events from closing rows must not reopen chrome.
+        if (!root.showShellChrome || root.chromeAnimationsRunning) {
+            return
+        }
         revealUi("pointer")
         previewHoldTimer.restart()
     }
 
     function previewChannel(channelId) {
-        if (channelId < 0) {
+        if (channelId < 0 || (!root.showShellChrome && !root.pendingEmptyPipActive)
+            || root.chromeAnimationsRunning || root.leftPickerOpen) {
             return
         }
         hoverPreviewActive = true
@@ -1243,7 +1251,9 @@ Item {
         }
         const channelId = pendingHoverPreviewChannelId
         pendingHoverPreviewChannelId = -1
-        root.previewChannel(channelId)
+        if (leftChromeHover.hovered) {
+            root.previewChannel(channelId)
+        }
     }
 
     function updateChannelListScrollState() {
@@ -1253,25 +1263,66 @@ Item {
         channelListScrollSettleTimer.restart()
     }
 
+    function cancelPendingHoverPreview() {
+        pendingHoverPreviewChannelId = -1
+        hoverPreviewDebounceTimer.stop()
+        previewHoldTimer.stop()
+    }
+
+    function clearMouseSelectionPin() {
+        root.cancelPendingHoverPreview()
+        mousePinnedChannelId = -1
+        mousePinnedProfileId = ""
+        root.updateAutoHide()
+    }
+
     function commitChannelSelection(channelId) {
-        if (channelId < 0) {
+        root.cancelPendingHoverPreview()
+        if (channelId < 0 || !root.channelList.selectById(channelId)) {
             return
         }
         hoverPreviewActive = false
         previewPinned = true
         committedChannelId = channelId
-        if (root.channelList.selectedChannelId !== channelId) {
+        mousePinnedChannelId = channelId
+        mousePinnedProfileId = root.channelList.activeProfileId
+        interactionFocusTarget.forceActiveFocus()
+        root.setPlayerKeyboardFocusArea("leftPane")
+        root.updateAutoHide()
+    }
+
+    function restorePlaybackSelection() {
+        root.cancelPendingHoverPreview()
+        root.hoverPreviewActive = false
+        root.previewPinned = false
+        const channelId = root.hasPlaybackChannel ? root.playbackChannelId : root.committedChannelId
+        root.suppressSelectionInteraction = true
+        if (channelId >= 0) {
             root.channelList.selectById(channelId)
         }
+        root.suppressSelectionInteraction = false
     }
 
     function clearHoverPreview() {
+        root.cancelPendingHoverPreview()
         if (!hoverPreviewActive) {
             return
         }
+        const channelId = root.mouseSelectionPinned ? root.mousePinnedChannelId
+            : (root.hasPlaybackChannel ? root.playbackChannelId : root.committedChannelId)
         hoverPreviewActive = false
-        if (committedChannelId >= 0 && root.channelList.selectedChannelId !== committedChannelId) {
-            root.channelList.selectById(committedChannelId)
+        root.suppressSelectionInteraction = true
+        if (channelId >= 0 && !root.channelList.selectById(channelId) && root.mouseSelectionPinned) {
+            root.clearMouseSelectionPin()
+            root.restorePlaybackSelection()
+        }
+        root.suppressSelectionInteraction = false
+    }
+
+    function confirmChannelSelection(channelId) {
+        root.cancelPendingHoverPreview()
+        if (root.activateChannelById(channelId)) {
+            root.closeTransientPlayerChrome()
         }
     }
 
@@ -1368,10 +1419,7 @@ Item {
     }
 
     function playSelection(revealSource) {
-        if (root.guideState.selectedChannelId >= 0) {
-            root.activateChannelById(root.guideState.selectedChannelId)
-        }
-        revealUi(revealSource)
+        root.confirmChannelSelection(root.channelList.selectedChannelId)
     }
 
     function showChannelChangeBubble() {
@@ -1413,92 +1461,45 @@ Item {
         return activated
     }
 
-    function rightPaneProgramActive(kind, upcomingIndex, anchorItem) {
-        if (root.hoverBubbleVisible && root.hoverAnchorItem === anchorItem) {
-            return true
-        }
-        if (playerKeyboardFocusArea !== "rightPane" || rightPaneSelectionKind !== kind) {
-            return false
-        }
-        return kind !== "upcoming" || rightPaneUpcomingIndex === upcomingIndex
-    }
-
     function rightPaneEntries() {
-        const entries = []
-        if ((root.sideNowNextModel.currentProgram.title || "").length > 0) {
-            entries.push({
-                kind: "now",
-                listIndex: -1,
-                program: root.sideNowNextModel.currentProgram
-            })
-        }
-        if ((root.sideNowNextModel.nextProgram.title || "").length > 0) {
-            entries.push({
-                kind: "next",
-                listIndex: -1,
-                program: root.sideNowNextModel.nextProgram
-            })
-        }
-        for (let index = 0; index < root.sideNowNextModel.upcomingPrograms.length; ++index) {
-            entries.push({
-                kind: "upcoming",
-                listIndex: index,
-                program: root.sideNowNextModel.upcomingPrograms[index]
-            })
-        }
-        return entries
-    }
-
-    function upcomingRowFullyVisible(rowIndex) {
-        if (rowIndex < 0 || !root.sideHasUpcomingPrograms) {
-            return false
-        }
-        const rowHeight = root.rightPaneUpcomingRowHeight
-        const rowTop = rowIndex * rowHeight
-        const rowBottom = rowTop + rowHeight
-        const visibleTop = upcomingProgramsView.contentY
-        const visibleBottom = visibleTop + upcomingProgramsView.height
-        return rowTop >= visibleTop && rowBottom <= visibleBottom
+        return epgTimeline.entries
     }
 
     function updateKeyboardBubbleAnchor(entry) {
-        if (!entry) {
+        if (!entry)
             return
-        }
+        epgTimeline.showIndex(entry.listIndex)
+        Qt.callLater(function() {
+            if (root.playerKeyboardFocusArea !== "rightPane")
+                return
+            const item = epgTimeline.itemAt(root.rightPaneSelectionFlatIndex)
+            if (!item)
+                return
+            const position = item.mapToItem(root, 0, 0)
+            keyboardBubbleAnchor.x = position.x
+            keyboardBubbleAnchor.y = position.y
+            keyboardBubbleAnchor.width = item.width
+            keyboardBubbleAnchor.height = item.height
+            root.showKeyboardProgramBubble(root.rightPaneProgramData)
+        })
+    }
 
-        let anchorX = rightChrome.x
-        let anchorY = rightChrome.y
-        let anchorWidth = rightChrome.width
-        let anchorHeight = 1
-
-        if (entry.kind === "now") {
-            const position = nowProgramCard.mapToItem(root, 0, 0)
-            anchorX = position.x
-            anchorY = position.y
-            anchorWidth = nowProgramCard.width
-            anchorHeight = nowProgramCard.height
-        } else if (entry.kind === "next") {
-            const position = nextProgramCard.mapToItem(root, 0, 0)
-            anchorX = position.x
-            anchorY = position.y
-            anchorWidth = nextProgramCard.width
-            anchorHeight = nextProgramCard.height
+    function activateRightPaneProgram() {
+        const program = rightPaneProgramData
+        const channel = epgTimeline.channelData
+        if (epgTimeline.updating || !program || !program.start || channel.id === undefined
+            || rightPaneSelectionChannelKey !== epgTimeline.channelKey)
+            return false
+        if (new Date(program.stop).getTime() <= Date.now()) {
+            // Always revalidate in AppController; expired/disabled archives must never tune live.
+            const state = root.app.catchupActionState(channel, program)
+            root.app.resumeCatchup(channel, program)
+            if (state.enabled)
+                root.closeTransientPlayerChrome()
         } else {
-            if (!root.upcomingRowFullyVisible(entry.listIndex)) {
-                upcomingProgramsView.positionViewAtIndex(entry.listIndex, ListView.Contain)
-            }
-            const position = upcomingProgramsView.mapToItem(root, 0, 0)
-            anchorX = rightChrome.x
-            anchorY = position.y + entry.listIndex * root.rightPaneUpcomingRowHeight - upcomingProgramsView.contentY
-            anchorWidth = upcomingProgramsView.width
-            anchorHeight = root.rightPaneUpcomingRowHeight
+            root.confirmChannelSelection(Number(channel.id))
         }
-
-        keyboardBubbleAnchor.x = anchorX
-        keyboardBubbleAnchor.y = anchorY
-        keyboardBubbleAnchor.width = anchorWidth
-        keyboardBubbleAnchor.height = anchorHeight
-        showKeyboardProgramBubble(entry.program)
+        return true
     }
 
     function selectRightPaneEntry(flatIndex, revealSource) {
@@ -1509,12 +1510,12 @@ Item {
 
         const nextIndex = Math.max(0, Math.min(entries.length - 1, flatIndex))
         const entry = entries[nextIndex]
-        previewPinned = true
+        if (root.sideUsesBrowseModel)
+            previewPinned = true
         interactionFocusTarget.forceActiveFocus()
         setPlayerKeyboardFocusArea("rightPane")
         rightPaneSelectionFlatIndex = nextIndex
-        rightPaneSelectionKind = entry.kind
-        rightPaneUpcomingIndex = entry.listIndex
+        rightPaneSelectionChannelKey = epgTimeline.channelKey
         rightPaneProgramData = entry.program
         if ((revealSource || "").length > 0) {
             revealUi(revealSource)
@@ -1523,55 +1524,29 @@ Item {
         return true
     }
 
-    function syncRightPaneKeyboardSelection() {
-        if (playerKeyboardFocusArea !== "rightPane") {
-            return
-        }
-
-        const entries = rightPaneEntries()
-        if (entries.length === 0) {
-            setPlayerKeyboardFocusArea("none")
-            return
-        }
-
-        const nextIndex = rightPaneSelectionFlatIndex >= 0
-            ? Math.min(rightPaneSelectionFlatIndex, entries.length - 1)
-            : 0
-        // Keep keyboard selection anchored, but do not extend overlay auto-hide
-        // on passive NOW/NEXT model updates.
-        selectRightPaneEntry(nextIndex, "")
-    }
-
     function syncRightPaneSelectionForModelUpdate() {
-        if (playerKeyboardFocusArea !== "rightPane") {
+        if (playerKeyboardFocusArea !== "rightPane")
             return
-        }
-
         const entries = rightPaneEntries()
         if (entries.length === 0) {
-            setPlayerKeyboardFocusArea("none")
+            rightPaneSelectionFlatIndex = -1
+            rightPaneProgramData = ({})
+            clearKeyboardProgramBubble()
             return
         }
-
-        const nextIndex = rightPaneSelectionFlatIndex >= 0
-            ? Math.min(rightPaneSelectionFlatIndex, entries.length - 1)
-            : 0
-        const nextEntry = entries[nextIndex]
-        const previousStart = (rightPaneProgramData.start || "")
-        const nextStart = (nextEntry.program.start || "")
-        const sameSlotProgram = rightPaneSelectionKind === nextEntry.kind
-            && rightPaneUpcomingIndex === nextEntry.listIndex
-            && previousStart === nextStart
-
-        rightPaneSelectionFlatIndex = nextIndex
-        rightPaneProgramData = nextEntry.program
-        if (sameSlotProgram) {
-            return
-        }
-
-        // Keep keyboard selection anchored, but do not extend overlay auto-hide
-        // on passive NOW/NEXT model updates.
-        selectRightPaneEntry(nextIndex, "")
+        let index = rightPaneSelectionChannelKey === epgTimeline.channelKey
+            ? epgTimeline.indexForProgram(rightPaneProgramData) : -1
+        if (index < 0)
+            index = epgTimeline.preferredIndex
+        const entry = entries[index]
+        rightPaneSelectionFlatIndex = index
+        rightPaneSelectionChannelKey = epgTimeline.channelKey
+        rightPaneProgramData = entry.program
+        // Passive refresh must not scroll to a keyboard selection outside the viewport.
+        const item = epgTimeline.itemAt(index)
+        if (item && item.mapToItem(epgTimeline, 0, 0).y >= 0
+            && item.mapToItem(epgTimeline, 0, item.height).y <= epgTimeline.height)
+            updateKeyboardBubbleAnchor(entry)
     }
 
     function enterLeftPaneFocus(channelId, revealSource) {
@@ -1586,6 +1561,8 @@ Item {
                 : root.channelList.selectedChannelId
         }
 
+        root.cancelPendingHoverPreview()
+        hoverPreviewActive = false
         previewPinned = true
         interactionFocusTarget.forceActiveFocus()
         setPlayerKeyboardFocusArea("leftPane")
@@ -1593,27 +1570,42 @@ Item {
         if (targetChannelId >= 0
             && root.channelList.rowForChannelId(targetChannelId) >= 0
             && root.channelList.selectById(targetChannelId)) {
-            root.scheduleSelectedChannelVisible(ListView.Contain)
+            if (root.mouseSelectionPinned) {
+                root.mousePinnedChannelId = root.channelList.selectedChannelId
+            }
+            root.scheduleSelectedChannelVisible(ListView.Center)
             return true
         }
         const selected = root.channelList.selectAt(0)
         if (selected) {
+            if (root.mouseSelectionPinned) {
+                root.mousePinnedChannelId = root.channelList.selectedChannelId
+            }
             root.scheduleSelectedChannelVisible(ListView.Beginning)
         }
         return selected
     }
 
-    function focusTopChannel(revealSource) {
+    function focusChannelFromSearch(revealSource) {
+        if (root.channelList.searchText.trim().length === 0) {
+            return enterLeftPaneFocus(-1, revealSource)
+        }
+
         if (!root.hasChannelList) {
             return false
         }
 
+        root.cancelPendingHoverPreview()
+        hoverPreviewActive = false
         previewPinned = true
         interactionFocusTarget.forceActiveFocus()
         setPlayerKeyboardFocusArea("leftPane")
         revealUi(revealSource)
         const selected = root.channelList.selectAt(0)
         if (selected) {
+            if (root.mouseSelectionPinned) {
+                root.mousePinnedChannelId = root.channelList.selectedChannelId
+            }
             root.scheduleSelectedChannelVisible(ListView.Beginning)
         }
         return selected
@@ -1624,19 +1616,24 @@ Item {
             return false
         }
 
+        root.cancelPendingHoverPreview()
+        hoverPreviewActive = false
         previewPinned = true
         interactionFocusTarget.forceActiveFocus()
         setPlayerKeyboardFocusArea("leftPane")
         revealUi(revealSource)
         const moved = root.channelList.selectRelativeWrapped(delta)
         if (moved) {
+            if (root.mouseSelectionPinned) {
+                root.mousePinnedChannelId = root.channelList.selectedChannelId
+            }
             root.scheduleSelectedChannelVisible(ListView.Contain)
         }
         return moved
     }
 
     function enterRightPaneFocus() {
-        return selectRightPaneEntry(0, "keyboard")
+        return selectRightPaneEntry(epgTimeline.preferredIndex, "keyboard")
     }
 
     function moveRightPaneSelection(delta) {
@@ -1647,7 +1644,7 @@ Item {
 
         let nextIndex = rightPaneSelectionFlatIndex
         if (playerKeyboardFocusArea !== "rightPane" || nextIndex < 0 || nextIndex >= entries.length) {
-            nextIndex = 0
+            nextIndex = epgTimeline.preferredIndex
         } else {
             nextIndex = Math.max(0, Math.min(entries.length - 1, nextIndex + delta))
         }
@@ -1754,6 +1751,16 @@ Item {
         showKeyboardVolumeHud(hudIcon)
     }
 
+    function sliderPositionForPlayerVolume(volume) {
+        const clampedVolume = Math.max(0, Math.min(100, Number(volume || 0)))
+        return (clampedVolume * clampedVolume) / 100
+    }
+
+    function playerVolumeForSliderPosition(position) {
+        const clampedPosition = Math.max(0, Math.min(100, Number(position || 0)))
+        return 100 * Math.sqrt(clampedPosition / 100)
+    }
+
     function toggleMuteWithKeyboardHud() {
         root.player.toggleMute()
         showKeyboardVolumeHud(root.player.muted ? "volume-muted.svg" : "volume-over-50.svg")
@@ -1787,6 +1794,7 @@ Item {
         if (clearShellOverlay && root.shell.activeOverlay === "guide") {
             root.shell.clearOverlay()
         }
+        root.restorePlaybackSelection()
         if (hideOverlaysAfterClose) {
             root.exitKeyboardNavigation(true)
             root.shell.overlaysVisible = false
@@ -1884,8 +1892,10 @@ Item {
         revealUi(revealSource)
         root.shell.overlaysVisible = true
         Qt.callLater(function() {
-            root.ensureSourcePickerHighlight()
-            sourcePickerSearchField.forceActiveFocus()
+            if (root.sourcePickerOpen) {
+                root.ensureSourcePickerHighlight()
+                sourcePickerSearchField.forceActiveFocus()
+            }
         })
     }
 
@@ -1895,14 +1905,37 @@ Item {
     }
 
     function clearLeftPaneHideIfSettled() {
-        if (root.leftPickerOpen || root.showShellChrome || root.pendingEmptyPipActive) {
-            root.leftPaneClosingMode = ""
-            root.leftPaneClosingToHidden = false
+        // Picker and chrome visibility change in the same close operation.
+        // Wait for their bindings and animations before deciding it has settled.
+        Qt.callLater(root.finishLeftPaneHideIfSettled)
+    }
+
+    function finishLeftPaneHideIfSettled() {
+        if (!root.leftPaneClosingToHidden) {
             return
         }
-        if (!leftChromeSlideAnimation.running && !leftChromeOpacityAnimation.running) {
-            root.leftPaneClosingMode = ""
-            root.leftPaneClosingToHidden = false
+        const reopened = root.leftPickerOpen || root.showShellChrome || root.pendingEmptyPipActive
+        if (!reopened && (leftChromeSlideAnimation.running || leftChromeOpacityAnimation.running
+                         || leftChrome.opacity > 0 || leftChromeShift.x > -leftChrome.width)) {
+            return
+        }
+        root.leftPaneClosingToHidden = false
+        root.leftPaneClosingMode = ""
+        if (!root.sourcePickerOpen) {
+            root.sourcePickerSearchText = ""
+            root.sourcePickerHighlightedId = ""
+        }
+        if (!root.groupPickerOpen) {
+            root.groupPickerSearchText = ""
+            root.groupPickerHighlightedId = ""
+        }
+        if (!root.audioPickerOpen) {
+            root.audioPickerRows = []
+            root.audioPickerHighlightedId = -1
+        }
+        if (!root.subtitlePickerOpen) {
+            root.subtitlePickerRows = []
+            root.subtitlePickerHighlightedId = -1
         }
     }
 
@@ -1915,8 +1948,10 @@ Item {
             root.beginLeftPaneHide("source")
         }
         root.sourcePickerOpen = false
-        root.sourcePickerSearchText = ""
-        root.sourcePickerHighlightedId = ""
+        if (!hideOverlaysAfterClose) {
+            root.sourcePickerSearchText = ""
+            root.sourcePickerHighlightedId = ""
+        }
         if (sourcePickerSearchField.activeFocus) {
             interactionFocusTarget.forceActiveFocus()
         }
@@ -2010,7 +2045,7 @@ Item {
         return true
     }
 
-    function openGroupPicker(revealSource) {
+    function openGroupPicker(revealSource, focusCurrentGroup) {
         if (!root.hasActiveProfile) {
             root.openSettingsOverlay("sources", revealSource)
             return
@@ -2028,15 +2063,29 @@ Item {
         root.liveGroups.profileId = root.app.activeProfileId
         root.liveGroups.reload()
         root.groupPickerSearchText = ""
-        root.groupPickerHighlightedId = ""
+        root.groupPickerHighlightedId = root.channelList.selectedCategoryId
         root.groupPickerOpen = true
         interactionFocusTarget.forceActiveFocus()
-        root.setPlayerKeyboardFocusArea("groupSearch")
+        root.setPlayerKeyboardFocusArea(focusCurrentGroup ? "leftPane" : "groupSearch")
         revealUi(revealSource)
         root.shell.overlaysVisible = true
         Qt.callLater(function() {
+            if (!root.groupPickerOpen) {
+                return
+            }
             root.ensureGroupPickerHighlight()
-            groupPickerSearchField.forceActiveFocus()
+            if (focusCurrentGroup) {
+                root.moveGroupPickerSelection(0, revealSource)
+            } else {
+                groupPickerSearchField.forceActiveFocus()
+            }
+            const row = root.groupPickerVisibleRows.findIndex(function(group) {
+                return group.id === root.groupPickerHighlightedId
+            })
+            if (row >= 0) {
+                groupPickerView.forceLayout()
+                groupPickerView.positionViewAtIndex(row, ListView.Center)
+            }
         })
     }
 
@@ -2049,8 +2098,10 @@ Item {
             root.beginLeftPaneHide("group")
         }
         root.groupPickerOpen = false
-        root.groupPickerSearchText = ""
-        root.groupPickerHighlightedId = ""
+        if (!hideOverlaysAfterClose) {
+            root.groupPickerSearchText = ""
+            root.groupPickerHighlightedId = ""
+        }
         if (groupPickerSearchField.activeFocus) {
             interactionFocusTarget.forceActiveFocus()
         }
@@ -2060,7 +2111,7 @@ Item {
             root.shell.overlaysVisible = false
             return
         }
-        root.scheduleSelectedChannelVisible(ListView.Contain)
+        root.scheduleSelectedChannelVisible(ListView.Center)
         root.updateAutoHide()
     }
 
@@ -2091,8 +2142,10 @@ Item {
             root.beginLeftPaneHide("audio")
         }
         root.audioPickerOpen = false
-        root.audioPickerRows = []
-        root.audioPickerHighlightedId = -1
+        if (!hideOverlaysAfterClose) {
+            root.audioPickerRows = []
+            root.audioPickerHighlightedId = -1
+        }
         root.setPlayerKeyboardFocusArea("none")
         if (hideOverlaysAfterClose) {
             root.exitKeyboardNavigation(true)
@@ -2161,8 +2214,10 @@ Item {
             root.beginLeftPaneHide("subtitle")
         }
         root.subtitlePickerOpen = false
-        root.subtitlePickerRows = []
-        root.subtitlePickerHighlightedId = -1
+        if (!hideOverlaysAfterClose) {
+            root.subtitlePickerRows = []
+            root.subtitlePickerHighlightedId = -1
+        }
         root.setPlayerKeyboardFocusArea("none")
         if (hideOverlaysAfterClose) {
             root.exitKeyboardNavigation(true)
@@ -2274,8 +2329,7 @@ Item {
         keyboardModeLocked = false
         clearKeyboardNavigationCandidate()
         rightPaneSelectionFlatIndex = -1
-        rightPaneSelectionKind = ""
-        rightPaneUpcomingIndex = -1
+        rightPaneSelectionChannelKey = ""
         rightPaneProgramData = ({})
         if (playerKeyboardFocusArea === "rightPane") {
             clearKeyboardProgramBubble()
@@ -2298,6 +2352,7 @@ Item {
     }
 
     function closeTransientPlayerChrome() {
+        root.clearMouseSelectionPin()
         root.exitKeyboardNavigation(true)
         if (root.channelList.searchText.length > 0) {
             root.channelList.searchText = ""
@@ -2513,6 +2568,7 @@ Item {
             case Qt.Key_Down:
                 noteKeyboardNavigationKey()
                 return root.moveGroupPickerSelection(1, "keyboard")
+            case Qt.Key_Right:
             case Qt.Key_Return:
             case Qt.Key_Enter:
                 noteKeyboardNavigationKey()
@@ -2546,7 +2602,7 @@ Item {
                 || event.key === Qt.Key_Return
                 || event.key === Qt.Key_Enter) {
                 noteKeyboardNavigationKey()
-                return focusTopChannel("keyboard")
+                return focusChannelFromSearch("keyboard")
             }
             return false
         }
@@ -2667,8 +2723,9 @@ Item {
             if (playerKeyboardFocusArea === "rightPane") {
                 return enterLeftPaneFocus(root.channelList.selectedChannelId, "keyboard")
             }
-            if (playerKeyboardFocusArea === "leftPane") {
-                return false
+            if (root.shell.overlaysVisible && playerKeyboardFocusArea === "leftPane") {
+                openGroupPicker("keyboard", true)
+                return true
             }
             return enterLeftPaneFocus(-1, "keyboard")
         case Qt.Key_Right:
@@ -2711,6 +2768,8 @@ Item {
         case Qt.Key_Return:
         case Qt.Key_Enter:
             noteKeyboardNavigationKey()
+            if (playerKeyboardFocusArea === "rightPane")
+                return activateRightPaneProgram()
             playSelection("keyboard")
             return true
         default:
@@ -2769,6 +2828,20 @@ Item {
         }
 
         return handleLiveKey(event)
+    }
+
+    Timer {
+        id: overlayInactivityTimer
+        interval: root.settings.overlayInactivitySeconds * 1000
+        running: root.shell.overlaysVisible && root.shell.activeOverlay === "none"
+        repeat: true
+        onTriggered: {
+            root.closeAudioPicker(true)
+            root.closeSubtitlePicker(true)
+            root.closeSourcePicker(true)
+            root.closeGroupPicker(true)
+            root.closeTransientPlayerChrome()
+        }
     }
 
     Timer {
@@ -2919,15 +2992,11 @@ Item {
         }
     }
 
-    onSideNowNextModelChanged: {
-        if (root.playerKeyboardFocusArea === "rightPane") {
-            root.syncRightPaneKeyboardSelection()
-        } else {
-            root.hideProgramHoverBubble()
-        }
-    }
+    onSideNowNextModelChanged: root.hideProgramHoverBubble()
 
     onShowShellChromeChanged: {
+        if (root.showShellChrome && root.catchupPlayback)
+            Qt.callLater(function() { epgTimeline.centerPlayback(true) })
         root.clearLeftPaneHideIfSettled()
         if (!root.showShellChrome) {
             root.hideProgramHoverBubble()
@@ -3007,6 +3076,29 @@ Item {
     Connections {
         target: root.channelList
 
+        function onActiveProfileIdChanged() {
+            root.clearMouseSelectionPin()
+            root.hoverPreviewActive = false
+            root.previewPinned = false
+            root.committedChannelId = -1
+        }
+
+        function onTotalCountChanged() {
+            root.cancelPendingHoverPreview()
+            root.hoverPreviewActive = false
+            // Source replacement emits this even if its channel count is unchanged.
+            // selectById also resolves channels currently hidden by a filter.
+            if (root.mouseSelectionPinned) {
+                root.suppressSelectionInteraction = true
+                if (root.mousePinnedProfileId !== root.channelList.activeProfileId
+                    || !root.channelList.selectById(root.mousePinnedChannelId)) {
+                    root.clearMouseSelectionPin()
+                    root.previewPinned = false
+                }
+                root.suppressSelectionInteraction = false
+            }
+        }
+
         function onSelectedChannelIdChanged() {
             if (!root.hoverPreviewActive) {
                 root.committedChannelId = root.channelList.selectedChannelId
@@ -3027,11 +3119,6 @@ Item {
         function onChannelChanged() {
             root.hideProgramHoverBubble()
         }
-        function onDataChanged() {
-            if (root.sideNowNextModel === root.nowNext) {
-                root.syncRightPaneSelectionForModelUpdate()
-            }
-        }
     }
 
     Connections {
@@ -3041,9 +3128,6 @@ Item {
             root.refreshLiveCatchupState()
         }
         function onDataChanged() {
-            if (root.sideNowNextModel === root.playbackNowNext) {
-                root.syncRightPaneSelectionForModelUpdate()
-            }
             root.refreshLiveCatchupState()
         }
     }
@@ -3059,6 +3143,11 @@ Item {
         }
 
         function onProfileLoadFinished(profileId, ok) {
+            if (root.mouseSelectionPinned && profileId === root.mousePinnedProfileId) {
+                root.suppressSelectionInteraction = true
+                root.channelList.selectById(root.mousePinnedChannelId)
+                root.suppressSelectionInteraction = false
+            }
             if (profileId === root.liveGroups.profileId) {
                 root.liveGroups.reload()
                 if (root.groupPickerOpen) {
@@ -3095,7 +3184,9 @@ Item {
         target: root.player
 
         function onCurrentChannelChanged() {
-            root.markTimeshiftBadgeLive()
+            if (!root.hasPlaybackChannel) {
+                root.markTimeshiftBadgeLive()
+            }
             root.refreshLiveCatchupState()
             const currentChannelId = Number(root.player.currentChannel.id)
             if (Number.isNaN(currentChannelId) || currentChannelId < 0) {
@@ -3104,13 +3195,15 @@ Item {
         }
 
         function onPlaybackModeChanged() {
+            root.markTimeshiftBadgeLive()
             root.refreshLiveCatchupState()
             root.liveTimelineNoticeText = ""
             liveTimelineNoticeTimer.stop()
         }
 
         function onTimeshiftStateChanged() {
-            if (!root.transportTimelineActive || root.timeshiftUiAtLiveEdge) {
+            if (!root.transportTimelineUsingLiveProgram
+                    && (!root.transportTimelineActive || root.timeshiftUiAtLiveEdge)) {
                 root.markTimeshiftBadgeLive()
             }
             if (root.player.timeshiftActive) {
@@ -3119,12 +3212,22 @@ Item {
             }
         }
 
+        function onLiveBufferStateChanged() {
+            if (root.liveBadgeForwardSeekPending && root.liveProgramSeekActive
+                    && root.player.liveBufferBehindLiveSeconds < root.transportLiveThresholdSeconds) {
+                root.markTimeshiftBadgeLive()
+            }
+        }
+
         function onPlaybackChannelActivated(channelId) {
+            root.markTimeshiftBadgeLive()
             if (channelId < 0) {
                 root.channelChangeBubbleVisible = false
                 return
             }
             root.showChannelChangeBubble()
+            if (root.catchupPlayback)
+                Qt.callLater(function() { epgTimeline.centerPlayback(true) })
             root.liveTimelineNoticeText = ""
             liveTimelineNoticeTimer.stop()
         }
@@ -3133,12 +3236,27 @@ Item {
     Connections {
         target: root.shell
 
+        function onUserActivity() {
+            if (overlayInactivityTimer.running) {
+                overlayInactivityTimer.restart()
+            }
+        }
+
         function onActiveOverlayChanged() {
             if (root.shell.activeOverlay !== "none" && root.groupPickerOpen) {
                 root.closeGroupPicker(false)
             }
             if (root.shell.activeOverlay !== "none" && root.sourcePickerOpen) {
                 root.closeSourcePicker(false)
+            }
+
+            if (root.shell.activeOverlay !== "none") {
+                root.guideInitialChannelId = root.mouseSelectionPinned
+                    ? root.mousePinnedChannelId : root.channelList.selectedChannelId
+                root.clearMouseSelectionPin()
+                root.hoverPreviewActive = false
+                root.previewPinned = false
+                root.exitKeyboardNavigation(true)
             }
 
             if (root.shell.activeOverlay === "guide") {
@@ -3154,7 +3272,7 @@ Item {
                     guideOverlayOpen = false
                     Qt.callLater(function() {
                         guideOverlayOpen = true
-                        guidePage.prepareForOpen()
+                        guidePage.prepareForOpen(root.guideInitialChannelId)
                     })
                 }
             } else if (guideOverlayMounted && !guideOverlayClosing) {
@@ -3177,7 +3295,7 @@ Item {
         function onOverlaysVisibleChanged() {
             if (root.shell.overlaysVisible) {
                 root.updateAutoHide()
-                root.scheduleSelectedChannelVisible(ListView.Contain)
+                root.scheduleSelectedChannelVisible(ListView.Center)
             } else {
                 if (root.groupPickerOpen) {
                     root.groupPickerOpen = false
@@ -3193,6 +3311,7 @@ Item {
                 root.pendingSourcePickerRevealSource = ""
                 root.overlayInteractionSource = "none"
                 root.exitKeyboardNavigation(true)
+                root.clearMouseSelectionPin()
                 root.previewPinned = false
                 root.hoverPreviewActive = false
                 root.hideProgramHoverBubble()
@@ -3429,6 +3548,19 @@ Item {
         opacity: 0
         enabled: false
         playerObject: root.player.seamlessStandbyPlayerObject
+    }
+
+    MpvVideoItem {
+        readonly property var session: root.multiView.pipController
+        objectName: "pipSeamlessStandbyPrewarmVideo"
+        x: -2
+        y: -2
+        width: 1
+        height: 1
+        visible: session ? session.seamlessStandbyPrewarmActive : false
+        opacity: 0
+        enabled: false
+        playerObject: session ? session.seamlessStandbyPlayerObject : null
     }
 
     Item {
@@ -4139,18 +4271,30 @@ Item {
         focus: true
     }
 
+    HoverHandler {
+        id: playerPointerHover
+        // Track the pointer across child items: hiding chrome can synthesize
+        // MouseArea position changes without any actual pointer movement.
+        property point lastScenePosition: Qt.point(-1, -1)
+
+        onPointChanged: {
+            const position = point.scenePosition
+            if (position.x === lastScenePosition.x && position.y === lastScenePosition.y) {
+                return
+            }
+            lastScenePosition = position
+            if (!root.chromeAnimationsRunning) {
+                root.revealUi("pointer")
+            }
+        }
+    }
+
     MouseArea {
         anchors.fill: parent
         hoverEnabled: true
         acceptedButtons: Qt.AllButtons
         cursorShape: (!root.showHoverUi && !root.pendingEmptyPipActive) ? Qt.BlankCursor : Qt.ArrowCursor
         onClicked: root.revealUi("pointer")
-        onPositionChanged: {
-            if (root.chromeAnimationsRunning) {
-                return
-            }
-            root.revealUi("pointer")
-        }
     }
 
     Item {
@@ -4211,7 +4355,12 @@ Item {
         HoverHandler {
             id: leftChromeHover
             target: leftChrome
-            onHoveredChanged: root.updateAutoHide()
+            onHoveredChanged: {
+                if (!hovered && root.leftPaneDisplayMode === "channels") {
+                    root.clearHoverPreview()
+                }
+                root.updateAutoHide()
+            }
         }
 
         ColumnLayout {
@@ -4254,7 +4403,7 @@ Item {
                             || event.key === Qt.Key_Enter) {
                             event.accepted = true
                             root.noteKeyboardNavigationKey()
-                            root.focusTopChannel("keyboard")
+                            root.focusChannelFromSearch("keyboard")
                         }
                     }
                     onActiveFocusChanged: {
@@ -4312,6 +4461,12 @@ Item {
                         }
                     }
                     onActiveFocusChanged: {
+                        // A pointer focus restore can arrive after the picker closes.
+                        if (activeFocus && !root.groupPickerOpen) {
+                            interactionFocusTarget.forceActiveFocus()
+                            root.updateAutoHide()
+                            return
+                        }
                         if (activeFocus) {
                             root.setPlayerKeyboardFocusArea("groupSearch")
                             root.revealUi("keyboard")
@@ -4361,6 +4516,12 @@ Item {
                         }
                     }
                     onActiveFocusChanged: {
+                        // A pointer focus restore can arrive after the picker closes.
+                        if (activeFocus && !root.sourcePickerOpen) {
+                            interactionFocusTarget.forceActiveFocus()
+                            root.updateAutoHide()
+                            return
+                        }
                         if (activeFocus) {
                             root.setPlayerKeyboardFocusArea("sourceSearch")
                             root.revealUi("keyboard")
@@ -4766,8 +4927,6 @@ Item {
                         if (hovered) {
                             root.noteBrowseInteraction()
                         } else if (!searchField.activeFocus && !searchField.hovered) {
-                            // Keep browse selection stable when pointer leaves the pane.
-                            // Default-view reset happens when overlays are hidden.
                             previewHoldTimer.stop()
                         }
                     }
@@ -4818,6 +4977,7 @@ Item {
                     delegate: Rectangle {
                         property int channelId: model.id
                         property string channelName: model.name
+                        property bool channelCatchupSupported: model.catchupSupported
                         property string channelCachedIconPath: model.cachedIconPath
                         property bool channelIsSelected: model.isSelected
                         property bool channelIsFavorite: model.isFavorite
@@ -4864,13 +5024,33 @@ Item {
                                 Layout.fillWidth: true
                                 spacing: 1
 
-                                Text {
+                                Item {
                                     Layout.fillWidth: true
-                                    text: channelName
-                                    color: Theme.textPrimary
-                                    font.pixelSize: 14
-                                    font.bold: true
-                                    elide: Text.ElideRight
+                                    implicitHeight: Math.max(liveChannelName.implicitHeight, 16)
+
+                                    Text {
+                                        id: liveChannelName
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: Math.min(implicitWidth, Math.max(0, parent.width - (channelCatchupSupported ? 22 : 0)))
+                                        text: channelName
+                                        color: Theme.textPrimary
+                                        font.pixelSize: 14
+                                        font.bold: true
+                                        elide: Text.ElideRight
+                                    }
+
+                                    Image {
+                                        anchors.left: liveChannelName.right
+                                        anchors.leftMargin: 6
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: 16
+                                        height: 16
+                                        visible: channelCatchupSupported
+                                        source: "qrc:/resources/icons/catch-up-indicator.svg"
+                                        sourceSize.width: 16
+                                        sourceSize.height: 16
+                                        fillMode: Image.PreserveAspectFit
+                                    }
                                 }
 
                                 Text {
@@ -4940,12 +5120,16 @@ Item {
                             onPositionChanged: root.noteBrowseInteraction()
                             onClicked: function(mouse) {
                                 root.noteBrowseInteraction()
-                                root.pendingHoverPreviewChannelId = -1
-                                root.commitChannelSelection(channelId)
                                 if (mouse.button === Qt.RightButton) {
                                     root.channelList.toggleFavorite(channelId)
                                 } else if (mouse.button === Qt.LeftButton) {
-                                    root.activateChannelById(channelId)
+                                    root.commitChannelSelection(channelId)
+                                }
+                            }
+                            onDoubleClicked: function(mouse) {
+                                if (mouse.button === Qt.LeftButton) {
+                                    root.confirmChannelSelection(channelId)
+                                    mouse.accepted = true
                                 }
                             }
                         }
@@ -5166,7 +5350,7 @@ Item {
 
                     Text {
                         Layout.fillWidth: true
-                        text: root.sideUsesBrowseModel ? "Preview EPG" : "Live EPG"
+                        text: root.sideShowsCatchup ? "Catch-up EPG" : (root.sideUsesBrowseModel ? "Preview EPG" : "Live EPG")
                         color: Theme.textMuted
                         font.pixelSize: 11
                     }
@@ -5193,320 +5377,36 @@ Item {
                 }
             }
 
-            Item {
-                id: rightPaneBody
+            EpgTimeline {
+                id: epgTimeline
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-
-                Column {
-                    id: rightPaneTopStack
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    spacing: 10
-
-                    Rectangle {
-                        id: nowProgramCard
-                        width: parent.width
-                        height: visible ? implicitHeight : 0
-                        implicitHeight: Math.max(94, nowCardContent.implicitHeight + 24)
-                        property bool activeState: root.rightPaneProgramActive("now", -1, nowProgramCard)
-                        color: activeState ? "#ad1f2d3a" : "#96182431"
-                        radius: 6
-                        visible: root.sideHasCurrentProgram
-
-                        ColumnLayout {
-                            id: nowCardContent
-                            anchors.fill: parent
-                            anchors.margins: 12
-                            spacing: 8
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 10
-
-                                Rectangle {
-                                    color: Theme.accent
-                                    radius: 4
-                                    implicitWidth: 48
-                                    implicitHeight: 24
-
-                                    Text {
-                                        anchors.centerIn: parent
-                                        text: "NOW"
-                                        color: Theme.textPrimary
-                                        font.pixelSize: 11
-                                        font.bold: true
-                                    }
-                                }
-
-                                Text {
-                                    Layout.fillWidth: true
-                                    text: root.sideNowNextModel.currentProgram.timeRange || root.currentClockText
-                                    color: Theme.textSecondary
-                                    font.pixelSize: 12
-                                }
-
-                                Rectangle {
-                                    Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
-                                    Layout.preferredWidth: 9
-                                    Layout.preferredHeight: 9
-                                    radius: 4.5
-                                    color: "#ff3a3a"
-                                    visible: root.isProgramDvrMarked(
-                                        root.sideNowNextModel.currentProgram,
-                                        root.sideDvrChannelData())
-                                }
-                            }
-
-                            Text {
-                                Layout.fillWidth: true
-                                text: root.sideNowNextModel.currentProgram.title || "No current programme"
-                                color: Theme.textPrimary
-                                font.pixelSize: 15
-                                font.bold: true
-                                wrapMode: Text.Wrap
-                                maximumLineCount: root.programEpisodeTitle(root.sideNowNextModel.currentProgram).length > 0 ? 1 : 2
-                                elide: Text.ElideRight
-                            }
-
-                            Text {
-                                Layout.fillWidth: true
-                                visible: root.programEpisodeTitle(root.sideNowNextModel.currentProgram).length > 0
-                                text: root.programEpisodeTitle(root.sideNowNextModel.currentProgram)
-                                color: Theme.textSecondary
-                                font.pixelSize: 12
-                                font.italic: true
-                                elide: Text.ElideRight
-                            }
-
-                            Rectangle {
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: 4
-                                radius: 2
-                                color: "#283542"
-                                visible: (root.sideNowNextModel.currentProgram.progressPercent || 0) > 0
-
-                                Rectangle {
-                                    width: parent.width * ((root.sideNowNextModel.currentProgram.progressPercent || 0) / 100)
-                                    height: parent.height
-                                    radius: parent.radius
-                                    color: Theme.accent
-                                }
-                            }
-                        }
-
-                        HoverHandler {
-                            target: nowProgramCard
-                            acceptedDevices: PointerDevice.Mouse
-                            onHoveredChanged: {
-                                if (hovered) {
-                                    root.showProgramHoverBubble(root.sideNowNextModel.currentProgram, nowProgramCard)
-                                } else {
-                                    root.releaseProgramHoverBubble(nowProgramCard)
-                                }
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        id: nextProgramCard
-                        width: parent.width
-                        height: visible ? implicitHeight : 0
-                        implicitHeight: Math.max(86, nextCardContent.implicitHeight + 24)
-                        property bool activeState: root.rightPaneProgramActive("next", -1, nextProgramCard)
-                        color: activeState ? "#ad1f2d3a" : "#96182431"
-                        radius: 6
-                        visible: root.sideHasNextProgram
-
-                        ColumnLayout {
-                            id: nextCardContent
-                            anchors.fill: parent
-                            anchors.margins: 12
-                            spacing: 8
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 10
-
-                                Rectangle {
-                                    color: "#273244"
-                                    radius: 4
-                                    implicitWidth: 52
-                                    implicitHeight: 24
-
-                                    Text {
-                                        anchors.centerIn: parent
-                                        text: "NEXT"
-                                        color: Theme.textSecondary
-                                        font.pixelSize: 11
-                                        font.bold: true
-                                    }
-                                }
-
-                                Text {
-                                    Layout.fillWidth: true
-                                    text: root.sideNowNextModel.nextProgram.timeRange || ""
-                                    color: Theme.textSecondary
-                                    font.pixelSize: 12
-                                }
-
-                                Rectangle {
-                                    Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
-                                    Layout.preferredWidth: 9
-                                    Layout.preferredHeight: 9
-                                    radius: 4.5
-                                    color: "#ff3a3a"
-                                    visible: root.isProgramDvrMarked(
-                                        root.sideNowNextModel.nextProgram,
-                                        root.sideDvrChannelData())
-                                }
-                            }
-
-                            Text {
-                                Layout.fillWidth: true
-                                text: root.sideNowNextModel.nextProgram.title || "No upcoming programme"
-                                color: Theme.textPrimary
-                                font.pixelSize: 14
-                                font.bold: true
-                                wrapMode: Text.Wrap
-                                maximumLineCount: root.programEpisodeTitle(root.sideNowNextModel.nextProgram).length > 0 ? 1 : 2
-                                elide: Text.ElideRight
-                            }
-
-                            Text {
-                                Layout.fillWidth: true
-                                visible: root.programEpisodeTitle(root.sideNowNextModel.nextProgram).length > 0
-                                text: root.programEpisodeTitle(root.sideNowNextModel.nextProgram)
-                                color: Theme.textSecondary
-                                font.pixelSize: 12
-                                font.italic: true
-                                elide: Text.ElideRight
-                            }
-                        }
-
-                        HoverHandler {
-                            target: nextProgramCard
-                            acceptedDevices: PointerDevice.Mouse
-                            onHoveredChanged: {
-                                if (hovered) {
-                                    root.showProgramHoverBubble(root.sideNowNextModel.nextProgram, nextProgramCard)
-                                } else {
-                                    root.releaseProgramHoverBubble(nextProgramCard)
-                                }
-                            }
-                        }
-                    }
-
-                    Text {
-                        width: parent.width
-                        visible: !root.sideHasAnyEpgData
-                        text: "Programme data is not available for this channel right now."
-                        color: Theme.textMuted
-                        font.pixelSize: 11
-                        wrapMode: Text.Wrap
+                epgModel: root.sideNowNextModel
+                appController: root.app
+                dvrController: root.dvr
+                catchupActive: root.sideShowsCatchup
+                playbackChannel: root.player.currentChannel
+                playbackProgram: root.player.catchupCurrentProgram
+                selectedKey: programKey(root.rightPaneProgramData)
+                keyboardSelectionActive: root.playerKeyboardFocusArea === "rightPane"
+                onSelectionRequested: function(index) { root.selectRightPaneEntry(index, "pointer") }
+                onActivationRequested: function(index) {
+                    if (entries[index].kind === "past") {
+                        root.selectRightPaneEntry(index, "pointer")
+                        root.activateRightPaneProgram()
                     }
                 }
-
-                ListView {
-                    id: upcomingProgramsView
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.top: rightPaneTopStack.bottom
-                    anchors.topMargin: (root.sideHasCurrentProgram || root.sideHasNextProgram) && root.sideHasUpcomingPrograms ? 10 : 0
-                    anchors.bottom: parent.bottom
-                    clip: true
-                    spacing: 0
-                    model: root.sideNowNextModel.upcomingPrograms
-                    interactive: false
-                    visible: root.sideHasUpcomingPrograms
-                    ScrollBar.vertical: ScrollBar {
-                        policy: ScrollBar.AlwaysOff
+                onProgramHovered: function(program, anchor) {
+                    if (root.sideShowsCatchup && root.playerKeyboardFocusArea === "rightPane") {
+                        root.rightPaneSelectionFlatIndex = indexForProgram(program)
+                        root.rightPaneSelectionChannelKey = channelKey
+                        root.rightPaneProgramData = program
                     }
-
-                    delegate: Item {
-                        id: upcomingProgramRow
-                        property bool activeState: root.rightPaneProgramActive("upcoming", index, upcomingProgramRow)
-                        width: ListView.view.width
-                        height: root.rightPaneUpcomingRowHeight
-
-                        Rectangle {
-                            anchors.fill: parent
-                            color: activeState ? "#96182431" : "transparent"
-                            radius: 4
-                        }
-
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 2
-                            anchors.rightMargin: 2
-                            spacing: 2
-
-                            Text {
-                                Layout.preferredWidth: 40
-                                text: modelData.startTimeLabel || ""
-                                color: Theme.textSecondary
-                                font.pixelSize: 10
-                            }
-
-                            Rectangle {
-                                Layout.alignment: Qt.AlignVCenter
-                                Layout.preferredWidth: 8
-                                Layout.preferredHeight: 8
-                                radius: 4
-                                color: "#ff3a3a"
-                                visible: root.isProgramDvrMarked(modelData, root.sideDvrChannelData())
-                            }
-
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 0
-
-                                Text {
-                                    Layout.fillWidth: true
-                                    text: modelData.title
-                                    color: Theme.textPrimary
-                                    font.pixelSize: 11
-                                    font.bold: true
-                                    wrapMode: Text.Wrap
-                                    maximumLineCount: root.programEpisodeTitle(modelData).length > 0 ? 1 : 2
-                                    elide: Text.ElideRight
-                                }
-
-                                Text {
-                                    Layout.fillWidth: true
-                                    visible: root.programEpisodeTitle(modelData).length > 0
-                                    text: root.programEpisodeTitle(modelData)
-                                    color: Theme.textSecondary
-                                    font.pixelSize: 11
-                                    font.italic: true
-                                    elide: Text.ElideRight
-                                }
-                            }
-                        }
-
-                        Rectangle {
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            anchors.bottom: parent.bottom
-                            height: 1
-                            color: "#263240"
-                            opacity: 0.85
-                        }
-
-                        HoverHandler {
-                            target: upcomingProgramRow
-                            acceptedDevices: PointerDevice.Mouse
-                            onHoveredChanged: {
-                                if (hovered) {
-                                    root.showProgramHoverBubble(modelData, upcomingProgramRow)
-                                } else {
-                                    root.releaseProgramHoverBubble(upcomingProgramRow)
-                                }
-                            }
-                        }
-                    }
+                    root.showProgramHoverBubble(program, anchor)
                 }
+                onProgramReleased: function(anchor) { root.releaseProgramHoverBubble(anchor) }
+                onScrolling: root.hideProgramHoverBubble()
+                onRefreshed: root.syncRightPaneSelectionForModelUpdate()
             }
         }
     }
@@ -5520,6 +5420,17 @@ Item {
         opacity: visible ? 1 : 0
         z: 4
         programData: root.hoveredProgramData
+        noticeText: {
+            const clock = root.currentClockText
+            const revision = epgTimeline.revision
+            const program = root.hoveredProgramData
+            if (!program.stop || new Date(program.stop).getTime() > Date.now())
+                return ""
+            const state = root.app.catchupActionState(epgTimeline.channelData, program)
+            if (!state.enabled)
+                return state.reason || "Catch-up is unavailable."
+            return state.resumeAvailable ? "Double-click or Enter to resume" : "Double-click or Enter to watch"
+        }
         maxWidth: Math.max(220, Math.min(360, root.width - root.rightPanelWidth - Theme.spacingM))
 
         onHoveredChanged: {
@@ -5751,6 +5662,7 @@ Item {
                             Layout.alignment: Qt.AlignVCenter
                             Layout.fillWidth: true
                             visible: root.transportTimelineUsingCatchup || root.transportTimelineUsingLiveProgram
+                                || root.transportTimelineUsingLiveProgress
                             text: root.transportTimelineUsingCatchup
                                 ? (root.player.catchupProgramLabel || "")
                                 : String((root.playbackNowNext.currentProgram || {}).title || "")
@@ -5763,16 +5675,18 @@ Item {
 
                         Item {
                             Layout.fillWidth: root.transportTimelineUsingTimeshift
-                            Layout.preferredWidth: root.transportTimelineUsingTimeshift ? undefined : 0
+                            Layout.preferredWidth: root.transportTimelineUsingTimeshift ? -1 : 0
                         }
 
                         Text {
                             Layout.alignment: Qt.AlignVCenter
                             text: root.formatTimeshiftClock(root.transportTimelineUsingCatchup
-                                ? root.player.catchupTimelineAvailableEdgeEpochMs
+                                ? root.player.catchupTimelineEndEpochMs
                                 : (root.transportTimelineUsingTimeshift
                                     ? root.player.timeshiftLiveEdgeEpochMs
-                                    : Math.min(Date.now(), Date.parse(String((root.playbackNowNext.currentProgram || {}).stop || "")))))
+                                    : (root.transportTimelineUsingLiveProgress
+                                        ? Date.parse(String((root.playbackNowNext.currentProgram || {}).stop || ""))
+                                        : Math.min(Date.now(), Date.parse(String((root.playbackNowNext.currentProgram || {}).stop || ""))))))
                             color: Theme.textSecondary
                             font.pixelSize: 11
                             renderType: Text.NativeRendering
@@ -5828,19 +5742,23 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             height: 6
                             radius: 3
-                            color: "#36454f"
+                            color: root.transportTimelineUsingLiveProgress ? "#283542" : "#36454f"
 
                             Rectangle {
-                                width: root.timeshiftBadgeShowBehindLive
-                                    ? (timeshiftThumb.x + timeshiftThumb.width * 0.5)
-                                    : parent.width
+                                width: root.transportTimelineUsingLiveProgress
+                                    ? parent.width * Math.min(100, Math.max(0,
+                                        Number((root.playbackNowNext.currentProgram || {}).progressPercent || 0))) / 100
+                                    : (root.timeshiftBadgeShowBehindLive
+                                        ? (timeshiftThumb.x + timeshiftThumb.width * 0.5)
+                                        : parent.width)
                                 height: parent.height
                                 radius: parent.radius
-                                color: "#a9d8ff"
+                                color: root.transportTimelineUsingLiveProgress ? Theme.accent : "#a9d8ff"
                             }
 
                             Rectangle {
                                 id: timeshiftThumb
+                                visible: !root.transportTimelineUsingLiveProgress
                                 width: 12
                                 height: 12
                                 radius: 6
@@ -5860,7 +5778,7 @@ Item {
                                         ? Math.max(0, (Math.min(Date.now(), stopMs) - startMs) / 1000.0)
                                         : 0
                                     const total = root.transportTimelineUsingCatchup
-                                        ? Number(root.player.catchupTimelineAvailableSeconds || 0)
+                                        ? Number(root.player.catchupTimelineDurationSeconds || 0)
                                         : (root.transportTimelineUsingTimeshift
                                             ? Number(root.player.timeshiftAvailableSeconds || 0)
                                             : liveProgramTotal)
@@ -5876,7 +5794,13 @@ Item {
 
                             MouseArea {
                                 anchors.fill: parent
+                                enabled: !root.transportTimelineUsingLiveProgress
                                 hoverEnabled: true
+
+                                onEnabledChanged: {
+                                    if (!enabled)
+                                        root.timeshiftTimelineHoverVisible = false
+                                }
 
                                 function updateHover(mouseX) {
                                     root.timeshiftTimelineHoverFraction = Math.max(0, Math.min(1, mouseX / Math.max(1, width)))
@@ -5900,7 +5824,7 @@ Item {
                             }
 
                             Rectangle {
-                                visible: root.timeshiftTimelineHoverVisible
+                                visible: root.timeshiftTimelineHoverVisible && !root.transportTimelineUsingLiveProgress
                                 anchors.bottom: parent.top
                                 anchors.bottomMargin: 6
                                 x: Math.max(0, Math.min(parent.width - width, parent.width * root.timeshiftTimelineHoverFraction - width * 0.5))
@@ -6012,7 +5936,8 @@ Item {
                     onClicked: {
                         root.app.playCatchup(
                             root.player.currentChannel || ({}),
-                            root.playbackNowNext.currentProgram || ({}))
+                            (root.catchupPlayback ? root.player.catchupCurrentProgram
+                                                  : root.playbackNowNext.currentProgram) || ({}))
                         root.revealUi("pointer")
                     }
                 }
@@ -6093,9 +6018,9 @@ Item {
                             width: 22
                             from: 0
                             to: 100
-                            value: root.player.volume
+                            value: root.sliderPositionForPlayerVolume(root.player.volume)
                             onMoved: {
-                                root.player.volume = value
+                                root.player.volume = root.playerVolumeForSliderPosition(value)
                                 root.revealUi("pointer")
                             }
 
@@ -6228,8 +6153,9 @@ Item {
                     anchors.topMargin: root.shell.layoutBand === "compact" ? 28 : 30
                     overlayMode: true
                     onCollapseRequested: root.collapseGuideOverlayToVideoOnly()
-                    onPlayChannelRequested: root.activateChannelById(channelId)
-                    onPlayCatchupRequested: root.app.playCatchup(channel, program)
+                    onPlayChannelRequested: function(channelId) { root.activateChannelById(channelId) }
+                    onPlayCatchupRequested: function(channel, program) { root.app.resumeCatchup(channel, program) }
+                    onPlayCatchupFromBeginningRequested: function(channel, program) { root.app.playCatchup(channel, program) }
                 }
             }
         }
@@ -6283,9 +6209,9 @@ Item {
         title: "Reduce multiview load"
         standardButtons: Dialog.Yes | Dialog.No
         closePolicy: Popup.NoAutoClose
+        implicitWidth: 360 + leftPadding + rightPadding
 
         contentItem: Text {
-            width: 360
             text: root.multiView.pendingDegradeLayout === "pip"
                 ? "Dropped frames stayed high on the focused tile. Step down to PiP?"
                 : "Dropped frames stayed high on the focused tile. Exit multiview and keep the focused tile as primary playback?"
@@ -6433,6 +6359,7 @@ Item {
                 spacing: 8
 
                 ColumnLayout {
+                    id: playbackBubbleSummary
                     Layout.fillWidth: true
                     spacing: 4
 
@@ -6443,12 +6370,12 @@ Item {
                         Rectangle {
                             color: Theme.accent
                             radius: 4
-                            implicitWidth: 42
+                            implicitWidth: root.catchupPlayback ? 78 : 42
                             implicitHeight: 22
 
                             Text {
                                 anchors.centerIn: parent
-                                text: "NOW"
+                                text: root.catchupPlayback ? "CATCH-UP" : "NOW"
                                 color: Theme.textPrimary
                                 font.pixelSize: 10
                                 font.bold: true
@@ -6459,7 +6386,7 @@ Item {
                             Layout.fillWidth: true
                             text: root.playbackBubbleEpgLoading
                                 ? ""
-                                : (root.playbackNowNext.currentProgram.timeRange || "")
+                                : (root.playbackBubbleProgram.timeRange || "")
                             visible: text.length > 0
                             color: Theme.textSecondary
                             font.pixelSize: 11
@@ -6471,7 +6398,7 @@ Item {
                         Layout.fillWidth: true
                         text: root.playbackBubbleEpgLoading
                             ? "Loading EPG..."
-                            : (root.playbackNowNext.currentProgram.title || "No EPG data")
+                            : (root.playbackBubbleProgram.title || (root.catchupPlayback ? "Catch-up" : "No EPG data"))
                         color: Theme.textPrimary
                         font.pixelSize: 14
                         font.bold: true
@@ -6483,11 +6410,12 @@ Item {
                         Layout.preferredHeight: 4
                         radius: 2
                         visible: !root.playbackBubbleEpgLoading
-                            && (root.playbackNowNext.currentProgram.progressPercent || 0) > 0
+                            && (root.catchupPlayback ? Boolean(root.playbackBubbleProgram.start)
+                                : (root.playbackBubbleProgram.progressPercent || 0) > 0)
                         color: "#2f455a"
 
                         Rectangle {
-                            width: parent.width * ((root.playbackNowNext.currentProgram.progressPercent || 0) / 100)
+                            width: parent.width * ((root.playbackBubbleProgram.progressPercent || 0) / 100)
                             height: parent.height
                             radius: parent.radius
                             color: Theme.accent
@@ -6495,9 +6423,25 @@ Item {
                     }
                 }
 
+                Text {
+                    Layout.fillWidth: true
+                    Layout.maximumHeight: Math.max(0, channelChangeBubble.contentHeight - playbackBubbleSummary.implicitHeight - 8)
+                    visible: root.catchupPlayback && text.length > 0
+                    text: String(root.playbackBubbleProgram.description || "").trim()
+                    textFormat: Text.PlainText
+                    color: Theme.textSecondary
+                    font.pixelSize: 12
+                    font.bold: false
+                    font.italic: false
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 3
+                    elide: Text.ElideRight
+                }
+
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 4
+                    visible: !root.catchupPlayback
 
                     RowLayout {
                         Layout.fillWidth: true

@@ -1,6 +1,9 @@
 #pragma once
 
+#include <QTemporaryDir>
+
 #include <QMap>
+#include <QList>
 #include <QObject>
 #include <QPointer>
 #include <QString>
@@ -17,17 +20,27 @@
 
 namespace OKILTV::Player {
 
+class CatchupStreamSession;
+
 class MpvPlayer final : public QObject
 {
     Q_OBJECT
 
 public:
+    struct CacheReadState
+    {
+        double endSeconds;
+        bool idle;
+        bool eof;
+    };
+
     struct SteadyStateBufferingPolicy
     {
         double cacheLimitSeconds;
         double hysteresisSeconds;
         qint64 maxBytes;
         qint64 maxBackBytes;
+        std::optional<double> refillSeconds {};
     };
 
     explicit MpvPlayer(QObject *parent = nullptr);
@@ -41,6 +54,8 @@ public:
 
     void configureLibraryPath(const QString &path);
     void configureOptions(const QMap<QString, QString> &options);
+    void configureImageSmoothing(bool enabled);
+    void configurePicturePreset(const QString &preset);
     void configurePlaybackTuning(double waitForDataStreamSeconds, bool deinterlaceEnabled, double bufferSeconds);
     void configureUserAgent(const QString &userAgent);
     void setStartupBufferingStrictMode(bool enabled);
@@ -67,6 +82,7 @@ public:
     void seekRelative(double seconds);
     void seekAbsolute(double seconds);
     void seekAbsoluteFast(double seconds);
+    void seekAbsoluteExact(double seconds);
     double position() const;
     std::optional<bool> seekable() const;
     std::optional<bool> pauseState() const;
@@ -76,6 +92,7 @@ public:
     std::optional<std::pair<double, double>> demuxerSeekableRangeSeconds() const;
     std::optional<double> cacheSpeedBytesPerSecond() const;
     std::optional<bool> demuxerCacheReaderEof() const;
+    std::optional<CacheReadState> cacheReadState() const;
     double bufferTargetSeconds() const;
     std::optional<int> videoWidth() const;
     std::optional<int> videoHeight() const;
@@ -107,6 +124,7 @@ public:
 
 signals:
     void fileLoaded();
+    void liveMediaPeriodChanged();
     void videoReconfigured();
     void pauseStateChanged(bool paused);
     void bufferingStateChanged(bool buffering);
@@ -116,6 +134,7 @@ signals:
     void errorOccurred(const QString &message);
 
 private:
+    void applyPicturePresetLocked();
     struct CachedTelemetry
     {
         double positionSeconds { -1.0 };
@@ -124,6 +143,7 @@ private:
         std::optional<bool> bufferingState;
         std::optional<double> volumePercent;
         std::optional<double> demuxerCacheDurationSeconds;
+        std::optional<CacheReadState> cacheReadState;
         std::optional<std::pair<double, double>> demuxerSeekableRangeSeconds;
         std::optional<double> cacheSpeedBytesPerSecond;
         std::optional<int> videoWidth;
@@ -149,6 +169,10 @@ private:
     bool registerCatchupStreamProtocol();
     void startEventThread();
     void processEvents();
+    void closeLiveStream(const QString &reason);
+    bool advanceLiveMediaPeriod();
+    void releaseRetiredLiveStreams();
+    void queueError(const QString &message);
     void refreshCachedTelemetryFast();
     void refreshCachedTelemetrySlow(bool refreshTracks);
     QVariantList queryTrackList() const;
@@ -157,12 +181,13 @@ private:
     void logWindowsRenderStats();
     bool setRuntimeDoubleOption(const char *name, double value);
     bool setRuntimeInt64Option(const char *name, qint64 value);
+    bool setPlaybackPropertyAsync(const char *name, int format, void *value, quint64 requestId);
     std::optional<double> propertyDouble(const char *name) const;
     std::optional<int> propertyInt(const char *name) const;
     std::optional<bool> propertyFlag(const char *name) const;
     std::optional<bool> propertyNodeBoolField(const char *prop, const char *key) const;
     std::optional<double> propertyNodeDoubleField(const char *prop, const char *key) const;
-    std::optional<std::pair<double, double>> propertyDemuxerSeekableRangeSeconds() const;
+    std::optional<std::pair<double, double>> propertyDemuxerSeekableRangeSeconds(std::optional<CacheReadState> *readState = nullptr) const;
     std::optional<QString> propertyString(const char *name) const;
 
     static void *getProcAddress(void *ctx, const char *name);
@@ -172,8 +197,18 @@ private:
     std::unique_ptr<State> m_state;
     QString m_libraryPath;
     QMap<QString, QString> m_options;
+    std::shared_ptr<CatchupStreamSession> m_liveStream;
+    QList<std::shared_ptr<CatchupStreamSession>> m_retiredLiveStreams;
+    bool m_liveStreamCleanupScheduled { false };
+    QTimer m_livePeriodTimer;
+    bool m_livePeriodLoading { false };
+    bool m_pauseRequested { false };
     double m_waitForDataStreamSeconds { 5.0 };
     bool m_deinterlaceEnabled { true };
+    bool m_imageSmoothingEnabled { false };
+    QString m_picturePreset { QStringLiteral("standard") };
+    QString m_appliedPictureShader;
+    std::unique_ptr<QTemporaryDir> m_pictureShaderDirectory;
     double m_bufferSeconds { 3.0 };
     double m_steadyStateCacheLimitSeconds { 6.0 };
     double m_steadyStateCacheHysteresisSeconds { 5.0 };
@@ -181,13 +216,16 @@ private:
     qint64 m_steadyStateDemuxerMaxBackBytes { static_cast<qint64>(64) * 1024 * 1024 };
     QString m_userAgent;
     bool m_startupBufferingStrictMode { true };
+    double m_liveRefillSeconds { 0.0 };
     bool m_reinitializePending { false };
     std::optional<bool> m_sourceInterlaced;
     bool m_recording { false };
     bool m_audioEnabledRequested { true };
+    bool m_audioEnableApplied { false };
     int m_volumeRequested { 100 };
     QString m_diagnostics;
     QPointer<QObject> m_updateTarget;
+    std::atomic_bool m_frameUpdateQueued { false };
     CachedTelemetry m_cachedTelemetry;
     std::atomic_bool m_eventThreadRunning { false };
     std::unique_ptr<std::thread> m_eventThread;

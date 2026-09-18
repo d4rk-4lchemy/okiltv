@@ -172,6 +172,8 @@ QVariant EpgGridModel::data(const QModelIndex &index, const int role) const
         return row.channel.streamUrl;
     case ProgramsRole:
         return buildPrograms(index.row(), row);
+    case ChannelCatchupSupportedRole:
+        return row.channel.catchupSupported;
     default:
         return {};
     }
@@ -186,7 +188,8 @@ QHash<int, QByteArray> EpgGridModel::roleNames() const
         { ChannelTvgIdRole, "channelTvgId" },
         { ChannelProfileIdRole, "channelProfileId" },
         { ChannelStreamUrlRole, "channelStreamUrl" },
-        { ProgramsRole, "programs" }
+        { ProgramsRole, "programs" },
+        { ChannelCatchupSupportedRole, "channelCatchupSupported" }
     };
 }
 
@@ -533,6 +536,7 @@ void EpgGridModel::setRenderViewport(const double startMinutes, const double dur
     m_renderProgramsRangeEndMinutes = rangeEnd;
     invalidateProgramTilesCache();
     emitProgramsChangedForVisibleRows();
+    scheduleOffscreenRowWarmup();
 }
 
 void EpgGridModel::setVisibleRowRange(int firstRow, int lastRow)
@@ -627,6 +631,7 @@ void EpgGridModel::emitProgramsChangedForVisibleRows()
 
 void EpgGridModel::invalidateProgramTilesCache()
 {
+    ++m_rowWarmupGeneration;
     m_programTilesCacheByRow.clear();
 }
 
@@ -648,13 +653,13 @@ void EpgGridModel::scheduleOffscreenRowWarmup()
 
         const auto from = std::max(0, m_visibleRowStart - kViewportRowPrefetch);
         const auto to = std::min(static_cast<int>(m_rows.size()) - 1, m_visibleRowEnd + kViewportRowPrefetch);
-        warmProgramTilesForRows(from, to);
+        warmProgramTilesForRows(from, to, generation);
     });
 }
 
-void EpgGridModel::warmProgramTilesForRows(int firstRow, int lastRow)
+void EpgGridModel::warmProgramTilesForRows(int firstRow, int lastRow, const quint64 generation)
 {
-    if (m_rows.isEmpty()) {
+    if (generation != m_rowWarmupGeneration || m_rows.isEmpty()) {
         return;
     }
 
@@ -664,12 +669,19 @@ void EpgGridModel::warmProgramTilesForRows(int firstRow, int lastRow)
         return;
     }
 
+    int warmedRows = 0;
     for (auto rowIndex = firstRow; rowIndex <= lastRow; ++rowIndex) {
         if (m_programTilesCacheByRow.contains(rowIndex)) {
             continue;
         }
         const auto &row = m_rows.at(rowIndex);
         buildPrograms(rowIndex, row);
+        if (++warmedRows == 2 && rowIndex < lastRow) {
+            QTimer::singleShot(16, this, [this, rowIndex, lastRow, generation]() {
+                warmProgramTilesForRows(rowIndex + 1, lastRow, generation);
+            });
+            return;
+        }
     }
 }
 
@@ -678,6 +690,8 @@ void EpgGridModel::applyRows(
     QList<Row> rows,
     const int guidePastHours,
     const int lookAheadHours,
+    // Ordered time-window bounds shared by synchronous and asynchronous rebuilds.
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     const QDateTime &windowStart,
     const QDateTime &resolvedWindowEnd)
 {
@@ -696,7 +710,16 @@ void EpgGridModel::applyRows(
     }
     m_windowSpanMinutes = computedWindowSpanMinutes;
 
-    beginResetModel();
+    // A periodic EPG refresh changes programmes, not the channel list. Resetting
+    // an unchanged list makes ListView discard its scroll position and delegates.
+    const auto sameRows = m_rows.size() == rows.size()
+        && std::equal(m_rows.cbegin(), m_rows.cend(), rows.cbegin(), [](const Row &oldRow, const Row &newRow) {
+            return oldRow.channel.id == newRow.channel.id
+                && oldRow.channel.profileId == newRow.channel.profileId;
+        });
+    if (!sameRows) {
+        beginResetModel();
+    }
     m_rows = std::move(rows);
     m_rowIndexByChannelId.clear();
     m_rowIndexByChannelId.reserve(m_rows.size());
@@ -722,7 +745,11 @@ void EpgGridModel::applyRows(
     m_renderProgramsRangeEndMinutes = -1;
     m_timeSlots = computeTimeSlots();
     m_visibleTimeSlots = computeVisibleTimeSlots();
-    endResetModel();
+    if (!sameRows) {
+        endResetModel();
+    } else if (!m_rows.isEmpty()) {
+        emit dataChanged(index(0), index(static_cast<int>(m_rows.size()) - 1));
+    }
 
     emit timeSlotsChanged();
     emit visibleTimeSlotsChanged();
@@ -739,7 +766,7 @@ QList<EpgGridModel::Row> EpgGridModel::buildRows(
     QDateTime *resolvedWindowEnd) const
 {
     QList<Row> rows;
-    const auto from = windowStart;
+    const auto &from = windowStart;
     const auto to = from.addSecs(minutesToSeconds((std::max(1, guidePastHours) + std::max(1, lookAheadHours)) * 60));
 
     for (const auto &channel : channels) {
@@ -747,7 +774,7 @@ QList<EpgGridModel::Row> EpgGridModel::buildRows(
             continue;
         }
 
-        if (m_epg->programsInRange(channel.tvgId, from, to).isEmpty()) {
+        if (m_epg->programsInRange(channel.tvgId, from, to, 1).isEmpty()) {
             continue;
         }
 
@@ -894,6 +921,9 @@ QList<EpgEntry> EpgGridModel::channelProgramsInWindow(const int channelId) const
 QVariantMap EpgGridModel::findSelectedProgram() const
 {
     const auto selectedStart = m_selectedProgramStart.trimmed();
+    if (selectedStart.isEmpty()) {
+        return {};
+    }
     const auto nowUtc = QDateTime::currentDateTimeUtc();
     const auto fullWindowEnd = windowEnd();
 

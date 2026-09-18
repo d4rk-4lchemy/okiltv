@@ -31,6 +31,7 @@ public:
     explicit DvrController(Core::SettingsManager *settings, PlayerController *playerController, QObject *parent = nullptr);
     ~DvrController() override;
 
+    void setPlayerController(PlayerController *controller) { m_playerController = controller; }
     int scheduledCount() const;
     int activeRecordingCount() const;
     bool exitConfirmationRequired() const;

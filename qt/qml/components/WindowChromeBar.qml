@@ -24,13 +24,6 @@ Item {
     readonly property int occupiedHeight: root.visible ? root.barHeight : 0
 
     readonly property bool canResize: root.window !== undefined && root.window !== null && root.window.visibility !== Window.FullScreen && root.window.visibility !== Window.Maximized
-    readonly property bool useManualWindowDrag: Qt.platform.os === "windows"
-    property bool manualDragActive: false
-    property bool manualDragThresholdPassed: false
-    property real manualDragPressGlobalX: 0
-    property real manualDragPressGlobalY: 0
-    property real manualDragStartWindowX: 0
-    property real manualDragStartWindowY: 0
     readonly property bool interactionActive: enabled && (dragArea.containsMouse || dragArea.pressed || topLeftResizeMouseArea.containsMouse || topLeftResizeMouseArea.pressed || topCenterResizeMouseArea.containsMouse || topCenterResizeMouseArea.pressed || topRightResizeMouseArea.containsMouse || topRightResizeMouseArea.pressed || leftEdgeResizeMouseArea.containsMouse || leftEdgeResizeMouseArea.pressed || rightEdgeResizeMouseArea.containsMouse || rightEdgeResizeMouseArea.pressed || minimizeButton.hovered || maximizeButton.hovered || closeButton.hovered || minimizeButton.down || maximizeButton.down || closeButton.down)
 
     function revealChrome() {
@@ -49,45 +42,6 @@ Item {
         if (root.window.startSystemResize) {
             root.window.startSystemResize(edges);
         }
-    }
-
-    function beginManualWindowDrag(mouse) {
-        if (!root.window) {
-            return;
-        }
-        const globalPoint = dragArea.mapToGlobal(mouse.x, mouse.y);
-        root.manualDragActive = true;
-        root.manualDragThresholdPassed = false;
-        root.manualDragPressGlobalX = globalPoint.x;
-        root.manualDragPressGlobalY = globalPoint.y;
-        root.manualDragStartWindowX = root.window.x;
-        root.manualDragStartWindowY = root.window.y;
-    }
-
-    function updateManualWindowDrag(mouse) {
-        if (!root.manualDragActive || !root.window) {
-            return;
-        }
-
-        const globalPoint = dragArea.mapToGlobal(mouse.x, mouse.y);
-        const deltaX = globalPoint.x - root.manualDragPressGlobalX;
-        const deltaY = globalPoint.y - root.manualDragPressGlobalY;
-        const threshold = Math.max(1, Application.styleHints.startDragDistance);
-
-        if (!root.manualDragThresholdPassed) {
-            if (Math.abs(deltaX) < threshold && Math.abs(deltaY) < threshold) {
-                return;
-            }
-            root.manualDragThresholdPassed = true;
-        }
-
-        root.window.x = Math.round(root.manualDragStartWindowX + deltaX);
-        root.window.y = Math.round(root.manualDragStartWindowY + deltaY);
-    }
-
-    function endManualWindowDrag() {
-        root.manualDragActive = false;
-        root.manualDragThresholdPassed = false;
     }
 
     Behavior on opacity {
@@ -246,22 +200,15 @@ Item {
                 if (!root.window) {
                     return;
                 }
-                if (root.useManualWindowDrag && root.window.visibility === Window.Windowed) {
-                    root.beginManualWindowDrag(mouse);
-                } else if (root.window.startSystemMove) {
+                // Let the OS own the drag so Windows can preview and apply edge snapping.
+                if (root.window.startSystemMove) {
                     root.window.startSystemMove();
                 }
             }
-            onPositionChanged: function (mouse) {
-                root.updateManualWindowDrag(mouse);
-            }
-            onReleased: root.endManualWindowDrag()
-            onCanceled: root.endManualWindowDrag()
             onDoubleClicked: function (mouse) {
                 if (mouse.button !== Qt.LeftButton || !root.window) {
                     return;
                 }
-                root.endManualWindowDrag();
                 root.revealChrome();
                 if (root.window.visibility === Window.Maximized) {
                     root.window.showNormal();

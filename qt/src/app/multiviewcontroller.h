@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../core/models.h"
+#include "playercontroller.h"
 
 #include <QObject>
 #include <QPointer>
@@ -27,6 +28,8 @@ class PlayerController;
 class MultiViewController final : public QObject
 {
     Q_OBJECT
+    Q_PROPERTY(QObject *primaryController READ primaryControllerObject NOTIFY primaryControllerChanged)
+    Q_PROPERTY(QObject *pipController READ pipControllerObject NOTIFY tilesChanged)
     Q_PROPERTY(QString layoutMode READ layoutMode NOTIFY layoutModeChanged)
     Q_PROPERTY(int tileCount READ tileCount NOTIFY tilesChanged)
     Q_PROPERTY(int focusedTileIndex READ focusedTileIndex NOTIFY focusedTileIndexChanged)
@@ -57,6 +60,12 @@ public:
     bool degradePromptVisible() const;
     QString pendingDegradeLayout() const;
 
+    PlayerController *primaryController() const { return m_playerController; }
+    QObject *primaryControllerObject() const { return m_playerController; }
+    QObject *pipControllerObject() const;
+    PlayerController *prepareCatchupPictureInPicture();
+    void shutdownPlaybackSessions();
+    quint64 pipRevision() const { return m_pipRevision; }
     bool isActive() const;
     bool focusedTileIsPrimary() const;
     bool assignResolvedChannel(const Core::Channel &channel);
@@ -80,6 +89,9 @@ public slots:
     void applySettings();
 
 signals:
+    void primaryControllerChanged();
+    void playbackSessionCreated(PlayerController *controller);
+    void primaryPlaybackChanged();
     void layoutModeChanged();
     void focusedTileIndexChanged();
     void tilesChanged();
@@ -100,6 +112,7 @@ private:
     struct SecondarySlot
     {
         int slotIndex { 1 };
+        QPointer<PlayerController> controller;
         std::unique_ptr<Player::MpvPlayer> player;
         QPointer<Player::MpvPlayer> borrowedPlayer;
         std::optional<Core::Channel> channel;
@@ -109,10 +122,13 @@ private:
 
         [[nodiscard]] Player::MpvPlayer *playbackPlayer() const
         {
-            return player ? player.get() : borrowedPlayer.data();
+            return controller ? controller->player() : (player ? player.get() : borrowedPlayer.data());
         }
     };
 
+    void connectPlaybackSession(PlayerController *controller);
+    void enablePipSessions();
+    bool hasCatchupSession() const;
     static QString normalizedLayoutMode(const QString &mode);
     static bool isGridLayout(const QString &mode);
     static QString layoutLabel(const QString &mode);
@@ -166,6 +182,9 @@ private:
     Core::SettingsManager *m_settings;
     ChannelListModel *m_channelListModel;
     PlayerController *m_playerController;
+    PlayerController *m_originalController;
+    quint64 m_pipRevision { 0 };
+    std::unique_ptr<PlayerController> m_pipController;
     QString m_layoutMode { QStringLiteral("off") };
     std::vector<SecondarySlot> m_secondarySlots;
     std::unique_ptr<Player::MpvPlayer> m_adoptedPrimaryPlayer;

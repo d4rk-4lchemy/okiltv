@@ -6,10 +6,12 @@
 
 #include <QCoreApplication>
 #include <QFileInfo>
+#include <QFile>
 #include <QLibrary>
 #include <QMetaObject>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QThread>
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
 #include <QVariantList>
@@ -36,12 +38,16 @@ constexpr int kMpvFormatNodeMap = 8;
 constexpr int kMpvEventNone = 0;
 constexpr int kMpvEventShutdown = 1;
 constexpr int kMpvEventLogMessage = 2;
-constexpr int kMpvEventPropertyChange = 16;
+constexpr int kMpvEventSetPropertyReply = 4;
+constexpr int kMpvEventPropertyChange = 22; // MPV_EVENT_PROPERTY_CHANGE; 16 is CLIENT_MESSAGE.
 constexpr int kMpvEventEndFile = 7;
 constexpr int kMpvEventFileLoaded = 8;
 constexpr int kMpvEventVideoReconfig = 17;
 constexpr int kMpvEventAudioReconfig = 18;
 constexpr int kMpvEventPlaybackRestart = 21;
+constexpr quint64 kVolumePropertyRequest = 10;
+constexpr quint64 kAudioPropertyRequest = 11;
+constexpr quint64 kSubtitlePropertyRequest = 12;
 
 constexpr int kMpvEndFileEof = 0;      // stream reached end naturally
 constexpr int kMpvEndFileStop = 2;     // stop command or loadfile replace
@@ -181,7 +187,7 @@ QString secondsOptionValue(const double value)
 
 constexpr qint64 kMiB = 1024LL * 1024LL;
 constexpr qint64 kDemuxerMaxBytesFloor = 8 * kMiB;
-constexpr qint64 kDemuxerMaxBytesCeil = 8 * 1024 * kMiB;
+constexpr qint64 kDemuxerMaxBytesCeil = 8LL * 1024 * kMiB;
 constexpr qint64 kSteadyStateDemuxerMaxBytesFloor = 8 * kMiB;
 constexpr qint64 kSteadyStateDemuxerMaxBackBytesFloor = 8 * kMiB;
 constexpr double kDemuxerBytesPerSecond = 2.0 * static_cast<double>(kMiB);
@@ -202,15 +208,18 @@ double effectiveMpvNetworkTimeoutSeconds(const double waitForDataStreamSeconds, 
     return std::clamp(timeoutSeconds, kMpvNetworkTimeoutFloorSeconds, kMpvNetworkTimeoutCeilSeconds);
 }
 
-using CatchupSessionHandle = std::shared_ptr<CatchupStreamSession>;
+struct CatchupSessionHandle {
+    std::shared_ptr<CatchupStreamSession> session;
+    quint64 generation;
+};
 
 qint64 catchupStreamRead(void *cookie, char *buffer, const quint64 maxBytes)
 {
     auto *handle = static_cast<CatchupSessionHandle *>(cookie);
-    if (handle == nullptr || !(*handle)) {
+    if (handle == nullptr || !handle->session) {
         return -1;
     }
-    return (*handle)->read(buffer, maxBytes);
+    return handle->session->read(handle->generation, buffer, maxBytes);
 }
 
 qint64 catchupStreamSeek(void *, qint64)
@@ -229,8 +238,8 @@ void catchupStreamClose(void *cookie)
     if (handle == nullptr) {
         return;
     }
-    if (*handle) {
-        (*handle)->cancelRead();
+    if (handle->session) {
+        handle->session->cancelRead(handle->generation);
     }
     delete handle;
 }
@@ -238,8 +247,8 @@ void catchupStreamClose(void *cookie)
 void catchupStreamCancel(void *cookie)
 {
     auto *handle = static_cast<CatchupSessionHandle *>(cookie);
-    if (handle != nullptr && *handle) {
-        (*handle)->cancelRead();
+    if (handle != nullptr && handle->session) {
+        handle->session->cancelRead(handle->generation);
     }
 }
 
@@ -256,7 +265,7 @@ int catchupStreamOpen(void *, char *uri, mpv_stream_cb_info *info)
                 .arg(QString::fromUtf8(uri)));
         return -1;
     }
-    info->cookie = new CatchupSessionHandle(std::move(session));
+    info->cookie = new CatchupSessionHandle {session, session->readGeneration()};
     info->read_fn = catchupStreamRead;
     info->seek_fn = catchupStreamSeek;
     info->size_fn = catchupStreamSize;
@@ -276,6 +285,7 @@ struct MpvPlayer::Api
     using CommandFn = int (*)(mpv_handle *, const char *const[]);
     using CommandStringFn = int (*)(mpv_handle *, const char *);
     using SetPropertyFn = int (*)(mpv_handle *, const char *, int, void *);
+    using SetPropertyAsyncFn = int (*)(mpv_handle *, quint64, const char *, int, void *);
     using GetPropertyFn = int (*)(mpv_handle *, const char *, int, void *);
     using ObservePropertyFn = int (*)(mpv_handle *, quint64, const char *, int);
     using RequestLogMessagesFn = int (*)(mpv_handle *, const char *);
@@ -299,6 +309,7 @@ struct MpvPlayer::Api
     CommandFn command = nullptr;
     CommandStringFn commandString = nullptr;
     SetPropertyFn setProperty = nullptr;
+    SetPropertyAsyncFn setPropertyAsync = nullptr;
     GetPropertyFn getProperty = nullptr;
     ObservePropertyFn observeProperty = nullptr;
     RequestLogMessagesFn requestLogMessages = nullptr;
@@ -367,13 +378,15 @@ double MpvPlayer::steadyStateBackBufferSeconds()
 
 double MpvPlayer::steadyStateCacheLimitSecondsForBufferTarget(const double bufferTargetSeconds)
 {
-    return Core::normalizePlayerBufferSeconds(bufferTargetSeconds);
+    // The playback reserve is not a download ceiling. Accept provider bursts
+    // beyond it, while keeping read-ahead bounded by time and byte budgets.
+    return cacheWindowSecondsForBufferTarget(bufferTargetSeconds);
 }
 
-double MpvPlayer::steadyStateCacheHysteresisSecondsForBufferTarget(const double bufferTargetSeconds)
+double MpvPlayer::steadyStateCacheHysteresisSecondsForBufferTarget(const double /*bufferTargetSeconds*/)
 {
-    const auto normalizedTarget = Core::normalizePlayerBufferSeconds(bufferTargetSeconds);
-    return std::clamp(roundToSingleDecimal(normalizedTarget - 1.0), 0.1, normalizedTarget);
+    // Zero disables mpv's refill hysteresis: read whenever cache space opens.
+    return 0.0;
 }
 
 void MpvPlayer::configureLibraryPath(const QString &path)
@@ -400,6 +413,118 @@ void MpvPlayer::configureOptions(const QMap<QString, QString> &options)
     QMutexLocker locker(&m_state->mutex);
     if (m_state->initialized) {
         m_reinitializePending = true;
+    }
+}
+
+void MpvPlayer::configurePicturePreset(const QString &preset)
+{
+    QMutexLocker locker(&m_state->mutex);
+    m_picturePreset = Core::normalizePlayerPicturePreset(preset);
+    if (m_state->initialized) {
+        applyPicturePresetLocked();
+    }
+}
+
+void MpvPlayer::applyPicturePresetLocked()
+{
+    QString shaderPath;
+    if (m_picturePreset != QStringLiteral("standard")) {
+        if (!m_pictureShaderDirectory) {
+            m_pictureShaderDirectory = std::make_unique<QTemporaryDir>();
+        }
+        if (!m_pictureShaderDirectory->isValid()) {
+            Core::DebugLogger::instance().log(QStringLiteral("mpv"), QStringLiteral("Cannot create picture preset shader directory."));
+            return;
+        }
+        shaderPath = m_pictureShaderDirectory->filePath(m_picturePreset + QStringLiteral(".glsl"));
+        if (!QFile::exists(shaderPath)) {
+            // Gentle display-referred RGB grading, after mpv's scaling and tone mapping.
+            QString gains = QStringLiteral("1.0, 1.0, 1.0");
+            double saturation = 1.0;
+            double contrast = 1.0;
+            double gamma = 1.0;
+            if (m_picturePreset == QStringLiteral("warm")) {
+                gains = QStringLiteral("1.0, 0.97, 0.90");
+            } else if (m_picturePreset == QStringLiteral("cold")) {
+                gains = QStringLiteral("0.91, 0.97, 1.0");
+            } else if (m_picturePreset == QStringLiteral("movie")) {
+                gains = QStringLiteral("1.0, 0.985, 0.95");
+                saturation = 0.94;
+                contrast = 1.03;
+                gamma = 1.04;
+            } else if (m_picturePreset == QStringLiteral("vivid")) {
+                saturation = 1.16;
+                contrast = 1.06;
+            } else if (m_picturePreset == QStringLiteral("sport")) {
+                saturation = 1.08;
+                contrast = 1.03;
+                gamma = 0.96;
+            }
+            const auto shader = QStringLiteral(
+                "//!HOOK OUTPUT\n//!BIND HOOKED\n//!DESC OKILTV picture preset\n"
+                "vec4 hook() {\n"
+                "    vec4 pixel = HOOKED_tex(HOOKED_pos);\n"
+                "    vec3 rgb = pixel.rgb * vec3(%1);\n"
+                "    float luma = dot(rgb, vec3(0.2126, 0.7152, 0.0722));\n"
+                "    rgb = mix(vec3(luma), rgb, %2);\n"
+                "    rgb = (rgb - vec3(0.5)) * %3 + vec3(0.5);\n"
+                "    pixel.rgb = pow(clamp(rgb, 0.0, 1.0), vec3(%4));\n"
+                "    return pixel;\n}\n")
+                                    .arg(gains).arg(saturation, 0, 'f', 3)
+                                    .arg(contrast, 0, 'f', 3).arg(gamma, 0, 'f', 3).toUtf8();
+            QFile file(shaderPath);
+            if (!file.open(QIODevice::WriteOnly) || file.write(shader) != shader.size() || !file.flush()) {
+                file.close();
+                file.remove();
+                Core::DebugLogger::instance().log(QStringLiteral("mpv"), QStringLiteral("Cannot write picture preset shader."));
+                return;
+            }
+        }
+    }
+    if (shaderPath == m_appliedPictureShader) {
+        return;
+    }
+    const auto changeShader = [this](const char *operation, const QString &path) {
+        const auto encoded = path.toUtf8();
+        const char *args[] = { "change-list", "glsl-shaders", operation, encoded.constData(), nullptr };
+        const auto result = m_api->command(m_state->handle, args);
+        if (result < 0) {
+            Core::DebugLogger::instance().log(QStringLiteral("mpv"),
+                QStringLiteral("Failed to update picture preset: %1").arg(QString::fromUtf8(m_api->errorString(result))));
+        }
+        return result >= 0;
+    };
+    // Remove only our shader; preserve advanced user shaders and their ordering.
+    if (!m_appliedPictureShader.isEmpty()) {
+        if (!changeShader("remove", m_appliedPictureShader)) {
+            return;
+        }
+        m_appliedPictureShader.clear();
+    }
+    if (!shaderPath.isEmpty() && changeShader("append", shaderPath)) {
+        m_appliedPictureShader = shaderPath;
+    }
+}
+
+void MpvPlayer::configureImageSmoothing(const bool enabled)
+{
+    QMutexLocker locker(&m_state->mutex);
+    m_imageSmoothingEnabled = enabled;
+    if (!m_state->initialized) {
+        return;
+    }
+
+    // The OpenGL render API supports negative sharpening as a GPU softening filter.
+    // Restore the advanced user option when smoothing is disabled.
+    const auto value = (enabled ? QStringLiteral("-0.5")
+                               : m_options.value(QStringLiteral("sharpen"), QStringLiteral("0"))).toUtf8();
+    const char *propertyValue = value.constData();
+    const auto result = m_api->setProperty(
+        m_state->handle, "sharpen", kMpvFormatString, static_cast<void *>(&propertyValue));
+    if (result < 0) {
+        Core::DebugLogger::instance().log(
+            QStringLiteral("mpv"),
+            QStringLiteral("Failed to update image smoothing: %1").arg(QString::fromUtf8(m_api->errorString(result))));
     }
 }
 
@@ -441,11 +566,12 @@ void MpvPlayer::configureUserAgent(const QString &userAgent)
 
 void MpvPlayer::setStartupBufferingStrictMode(const bool enabled)
 {
-    if (m_startupBufferingStrictMode == enabled) {
+    if (m_startupBufferingStrictMode == enabled && m_liveRefillSeconds == 0.0) {
         return;
     }
 
     m_startupBufferingStrictMode = enabled;
+    m_liveRefillSeconds = 0.0;
     if (!ensureInitialized()) {
         return;
     }
@@ -505,14 +631,17 @@ bool MpvPlayer::setSteadyStateBufferingPolicy(const SteadyStateBufferingPolicy &
         std::clamp(roundToSingleDecimal(policy.cacheLimitSeconds), m_bufferSeconds, 120.0);
     const auto normalizedHysteresisSeconds = std::clamp(
         roundToSingleDecimal(policy.hysteresisSeconds),
-        0.1,
+        0.0,
         normalizedCacheLimitSeconds);
     const auto normalizedMaxBytes = std::clamp(policy.maxBytes, kSteadyStateDemuxerMaxBytesFloor, kDemuxerMaxBytesCeil);
     const auto normalizedMaxBackBytes =
         std::clamp(policy.maxBackBytes, kSteadyStateDemuxerMaxBackBytesFloor, normalizedMaxBytes);
 
+    const auto refill = policy.refillSeconds.has_value() && std::isfinite(*policy.refillSeconds)
+        ? std::clamp(*policy.refillSeconds, 0.0, 2.0) : m_liveRefillSeconds;
     const auto changed =
-        std::abs(m_steadyStateCacheLimitSeconds - normalizedCacheLimitSeconds) > 0.0001
+        refill != m_liveRefillSeconds
+        || std::abs(m_steadyStateCacheLimitSeconds - normalizedCacheLimitSeconds) > 0.0001
         || std::abs(m_steadyStateCacheHysteresisSeconds - normalizedHysteresisSeconds) > 0.0001
         || m_steadyStateDemuxerMaxBytes != normalizedMaxBytes
         || m_steadyStateDemuxerMaxBackBytes != normalizedMaxBackBytes;
@@ -525,6 +654,17 @@ bool MpvPlayer::setSteadyStateBufferingPolicy(const SteadyStateBufferingPolicy &
     QMutexLocker locker(&m_state->mutex);
     if (!changed || !m_state->initialized || m_state->handle == nullptr) {
         return true;
+    }
+
+    bool refillOk = true;
+    if (policy.refillSeconds.has_value()) {
+        int flag = refill > 0.0 ? 1 : 0;
+        refillOk = m_api->setProperty != nullptr
+            && m_api->setProperty(m_state->handle, "cache-pause", kMpvFormatFlag, &flag) >= 0;
+        refillOk = setRuntimeDoubleOption("cache-pause-wait", refill) && refillOk;
+        if (refillOk) {
+            m_liveRefillSeconds = refill;
+        }
     }
 
     const auto readaheadOk = setRuntimeDoubleOption("demuxer-readahead-secs", m_steadyStateCacheLimitSeconds);
@@ -544,7 +684,7 @@ bool MpvPlayer::setSteadyStateBufferingPolicy(const SteadyStateBufferingPolicy &
             .arg(m_steadyStateDemuxerMaxBytes)
             .arg(m_steadyStateDemuxerMaxBackBytes));
 
-    return readaheadOk && cacheOk && hysteresisOk && maxBytesOk && maxBackBytesOk;
+    return refillOk && readaheadOk && cacheOk && hysteresisOk && maxBytesOk && maxBackBytesOk;
 }
 
 void MpvPlayer::resetSteadyStateBuffering()
@@ -578,6 +718,18 @@ bool MpvPlayer::catchupStreamProtocolAvailable() const
 
 void MpvPlayer::setRenderUpdateTarget(QObject *target)
 {
+    if (QThread::currentThread() != thread()) {
+        // Called during QQuickFramebufferObject::synchronize(), with the GUI
+        // thread blocked. Capture the guard there, then only access our target
+        // state on the owner thread, including all callback delivery.
+        const QPointer<QObject> guardedTarget(target);
+        QMetaObject::invokeMethod(this, [this, guardedTarget]() {
+            if (guardedTarget) {
+                setRenderUpdateTarget(guardedTarget.data());
+            }
+        }, Qt::QueuedConnection);
+        return;
+    }
     if (m_updateTarget == target) {
         return;
     }
@@ -599,7 +751,7 @@ bool MpvPlayer::ensureInitialized()
     }
 
     if (!loadApi()) {
-        emit errorOccurred(m_diagnostics);
+        queueError(m_diagnostics);
         return false;
     }
 
@@ -607,7 +759,7 @@ bool MpvPlayer::ensureInitialized()
     if (m_state->handle == nullptr) {
         m_diagnostics = QStringLiteral("mpv_create returned null.");
         Core::DebugLogger::instance().log(QStringLiteral("mpv"), m_diagnostics);
-        emit errorOccurred(m_diagnostics);
+        queueError(m_diagnostics);
         return false;
     }
 
@@ -619,6 +771,10 @@ bool MpvPlayer::ensureInitialized()
     applyOption("cache", QStringLiteral("yes"));
     applyOption("idle", QStringLiteral("yes"));
     applyOption("keep-open", QStringLiteral("yes"));
+    // IPTV retunes have independent timestamp origins. Recreate the audio output
+    // on loadfile replace, just as Stop -> Play does, instead of retaining it via
+    // mpv's default weak gapless mode when consecutive streams share a format.
+    applyOption("gapless-audio", QStringLiteral("no"));
     applyOption("force-window", QStringLiteral("yes"));
     applyOption("gpu-api", QStringLiteral("opengl"));
     applyOption("opengl-es", QStringLiteral("no"));
@@ -660,6 +816,9 @@ bool MpvPlayer::ensureInitialized()
     // Deinterlacing is controlled directly by the user setting. mpv/yadif decides per-frame
     // handling internally; app logic does not gate filter activation by source scan type.
     applyOption("deinterlace", m_deinterlaceEnabled ? QStringLiteral("yes") : QStringLiteral("no"));
+    if (m_imageSmoothingEnabled) {
+        applyOption("sharpen", QStringLiteral("-0.5"));
+    }
     registerCatchupStreamProtocol();
 
     const auto initCode = m_api->initialize(m_state->handle);
@@ -667,7 +826,9 @@ bool MpvPlayer::ensureInitialized()
         const auto error = QString::fromUtf8(m_api->errorString(initCode));
         m_diagnostics = QStringLiteral("mpv_initialize failed: %1").arg(error);
         Core::DebugLogger::instance().log(QStringLiteral("mpv"), m_diagnostics);
-        emit errorOccurred(m_diagnostics);
+        m_api->terminateDestroy(m_state->handle);
+        m_state->handle = nullptr;
+        queueError(m_diagnostics);
         return false;
     }
 
@@ -712,6 +873,8 @@ bool MpvPlayer::ensureInitialized()
     }
 
     m_state->initialized = true;
+    m_appliedPictureShader.clear();
+    applyPicturePresetLocked();
     m_diagnostics = QStringLiteral("Loaded mpv from %1").arg(m_api->library.fileName());
     Core::DebugLogger::instance().log(QStringLiteral("mpv"), m_diagnostics);
     if (!envFlagEnabled("OKILTV_HEADLESS_TEST")) {
@@ -742,7 +905,7 @@ bool MpvPlayer::ensureRenderContext()
         m_diagnostics = QStringLiteral("No current OpenGL context available for mpv render context.");
 #endif
         Core::DebugLogger::instance().log(QStringLiteral("mpv"), m_diagnostics);
-        emit errorOccurred(m_diagnostics);
+        queueError(m_diagnostics);
         return false;
     }
 
@@ -762,7 +925,7 @@ bool MpvPlayer::ensureRenderContext()
         const auto error = QString::fromUtf8(m_api->errorString(renderCode));
         m_diagnostics = QStringLiteral("mpv_render_context_create failed: %1").arg(error);
         Core::DebugLogger::instance().log(QStringLiteral("mpv"), m_diagnostics);
-        emit errorOccurred(m_diagnostics);
+        queueError(m_diagnostics);
         return false;
     }
 
@@ -798,6 +961,7 @@ bool MpvPlayer::registerCatchupStreamProtocol()
 
 void MpvPlayer::play(const QString &url, const QString &loadfileOptions)
 {
+    closeLiveStream(QStringLiteral("channel-switch"));
     if (m_reinitializePending) {
         Core::DebugLogger::instance().log(
             QStringLiteral("mpv"),
@@ -815,6 +979,57 @@ void MpvPlayer::play(const QString &url, const QString &loadfileOptions)
             QStringLiteral("Skipping loadfile in headless test mode for %1.").arg(url));
         return;
     }
+    auto transportUrl = url;
+    const QUrl sourceUrl(url);
+    bool nativeHttpOptions = false;
+    for (auto it = m_options.cbegin(); it != m_options.cend(); ++it) {
+        const auto &key = it.key();
+        if (key == QStringLiteral("stream-lavf-o") || key == QStringLiteral("cookies")
+            || key == QStringLiteral("cookies-file") || key.startsWith(QStringLiteral("tls-"))
+            || (key.startsWith(QStringLiteral("http-")) && key != QStringLiteral("http-header-fields"))) {
+            nativeHttpOptions = true;
+            break;
+        }
+    }
+    if (catchupStreamProtocolAvailable()
+        && loadfileOptions.trimmed().isEmpty()
+        && !nativeHttpOptions
+        && !envFlagEnabled("OKILTV_DISABLE_TS_TIMESTAMP_NORMALIZATION")
+        && (sourceUrl.scheme() == QStringLiteral("http") || sourceUrl.scheme() == QStringLiteral("https"))
+        && sourceUrl.path().endsWith(QStringLiteral(".ts"), Qt::CaseInsensitive)) {
+        CatchupStreamSession::BufferingPolicy policy {};
+        policy.queueHighWaterBytes = 2 * kMiB;
+        policy.queueLowWaterBytes = kMiB;
+        policy.replyReadBufferBytes = 2 * kMiB;
+        policy.roleLabel = QStringLiteral("live-mpegts");
+        policy.normalizeMpegTsTimestamps = true;
+        policy.transferTimeoutMs = static_cast<int>(1000.0
+            * effectiveMpvNetworkTimeoutSeconds(m_waitForDataStreamSeconds, m_bufferSeconds));
+        const auto userAgent = propertyString("user-agent").value_or(m_userAgent);
+        m_liveStream = CatchupStreamSession::create(url,
+            CatchupStreamSession::requestHeadersFromOptions(userAgent, m_options), policy);
+        m_liveStream->configureMediaPeriods();
+        if (!m_liveStream->start()) {
+            const auto message = m_liveStream->errorString();
+            closeLiveStream(QStringLiteral("start-failed"));
+            emit errorOccurred(message);
+            return;
+        }
+        transportUrl = m_liveStream->virtualUrl();
+        m_livePeriodTimer.setInterval(100);
+        m_livePeriodTimer.disconnect(this);
+        connect(&m_livePeriodTimer, &QTimer::timeout, this, [this]() {
+            if (propertyFlag("eof-reached").value_or(false)) {
+                advanceLiveMediaPeriod();
+            }
+        });
+        m_livePeriodTimer.start();
+        Core::DebugLogger::instance().log(QStringLiteral("mpv"),
+            QStringLiteral("Live MPEG-TS transport uses a shared dynamic PCR/PTS/DTS origin: %1.").arg(transportUrl));
+    } else if (nativeHttpOptions && sourceUrl.path().endsWith(QStringLiteral(".ts"), Qt::CaseInsensitive)) {
+        Core::DebugLogger::instance().log(QStringLiteral("mpv"),
+            QStringLiteral("Retaining native HTTP transport for custom HTTP/TLS/cookie options."));
+    }
     Core::DebugLogger::instance().log(
         QStringLiteral("mpv"),
         loadfileOptions.trimmed().isEmpty()
@@ -823,7 +1038,7 @@ void MpvPlayer::play(const QString &url, const QString &loadfileOptions)
 
     int commandCode = 0;
     if (m_api->command != nullptr) {
-        const auto urlUtf8 = url.toUtf8();
+        const auto urlUtf8 = transportUrl.toUtf8();
         const auto optionsUtf8 = loadfileOptions.toUtf8();
         if (optionsUtf8.isEmpty()) {
             const char *arguments[] = { "loadfile", urlUtf8.constData(), "replace", nullptr };
@@ -841,13 +1056,14 @@ void MpvPlayer::play(const QString &url, const QString &loadfileOptions)
         }
     } else {
         const auto command = loadfileOptions.trimmed().isEmpty()
-            ? QStringLiteral("loadfile %1 replace").arg(escapeArg(url))
+            ? QStringLiteral("loadfile %1 replace").arg(escapeArg(transportUrl))
             : QStringLiteral("loadfile %1 replace -1 %2")
-                  .arg(escapeArg(url), escapeArg(loadfileOptions));
+                  .arg(escapeArg(transportUrl), escapeArg(loadfileOptions));
         commandCode = m_api->commandString(m_state->handle, command.toUtf8().constData());
     }
 
     if (commandCode < 0) {
+        closeLiveStream(QStringLiteral("loadfile-failed"));
         const auto error = QString::fromUtf8(m_api->errorString(commandCode));
         m_diagnostics = QStringLiteral("mpv loadfile failed: %1").arg(error);
         Core::DebugLogger::instance().log(QStringLiteral("mpv"), m_diagnostics);
@@ -855,8 +1071,68 @@ void MpvPlayer::play(const QString &url, const QString &loadfileOptions)
     }
 }
 
+bool MpvPlayer::advanceLiveMediaPeriod()
+{
+    if (!m_liveStream || !m_liveStream->nextPeriodBaseSeconds()) {
+        return m_livePeriodLoading;
+    }
+    if (m_pauseRequested || m_livePeriodLoading) {
+        return true;
+    }
+    if (!m_liveStream->advancePeriod()) {
+        const auto detail = m_liveStream->errorString();
+        closeLiveStream(QStringLiteral("period-advance-failed"));
+        // keep-open may never emit END_FILE: explicitly hand real failures
+        // back to controller recovery instead of remaining paused at EOF.
+        emit errorOccurred(QStringLiteral("Cannot advance live MPEG-TS configuration: %1")
+            .arg(detail.isEmpty() ? QStringLiteral("retained media unavailable") : detail));
+        return true;
+    }
+    m_livePeriodLoading = true;
+    Core::DebugLogger::instance().log(QStringLiteral("mpv"),
+        QStringLiteral("Live MPEG-TS configuration cutover: generation=%1; replacing demuxer/decoders on the same HTTP response.")
+            .arg(m_liveStream->readGeneration()));
+    const auto command = QStringLiteral("loadfile %1 replace")
+        .arg(escapeArg(m_liveStream->virtualUrl()));
+    const auto result = m_api->commandString(m_state->handle, command.toUtf8().constData());
+    if (result < 0) {
+        closeLiveStream(QStringLiteral("period-load-failed"));
+        emit errorOccurred(QStringLiteral("Live configuration cutover failed: %1")
+            .arg(QString::fromUtf8(m_api->errorString(result))));
+    }
+    return true;
+}
+
+void MpvPlayer::closeLiveStream(const QString &reason)
+{
+    m_livePeriodTimer.stop();
+    m_livePeriodLoading = false;
+    if (!m_liveStream) {
+        return;
+    }
+    m_liveStream->closeProviderConnection(reason);
+    m_liveStream->cancelRead();
+    // The mpv read callback can still own this session. Keep its last owning
+    // reference on the Qt thread so QNetworkAccessManager is destroyed there.
+    m_retiredLiveStreams.append(std::move(m_liveStream));
+    releaseRetiredLiveStreams();
+}
+
+void MpvPlayer::releaseRetiredLiveStreams()
+{
+    m_retiredLiveStreams.removeIf([](const auto &session) { return session.use_count() == 1; });
+    if (!m_retiredLiveStreams.isEmpty() && !m_liveStreamCleanupScheduled) {
+        m_liveStreamCleanupScheduled = true;
+        QTimer::singleShot(100, this, [this]() {
+            m_liveStreamCleanupScheduled = false;
+            releaseRetiredLiveStreams();
+        });
+    }
+}
+
 void MpvPlayer::stop()
 {
+    closeLiveStream(QStringLiteral("stop"));
     stopStreamRecord();
     if (!ensureInitialized()) {
         return;
@@ -924,11 +1200,13 @@ void MpvPlayer::togglePause()
         return;
     }
 
+    m_pauseRequested = !pauseState().value_or(false);
     m_api->commandString(m_state->handle, "cycle pause");
 }
 
 void MpvPlayer::setPaused(const bool paused)
 {
+    m_pauseRequested = paused;
     if (!ensureInitialized()) {
         return;
     }
@@ -940,31 +1218,20 @@ void MpvPlayer::setPaused(const bool paused)
 void MpvPlayer::setVolume(const int volume)
 {
     m_volumeRequested = std::clamp(volume, 0, 100);
-    if (!ensureInitialized()) {
-        return;
-    }
-
     auto value = static_cast<double>(m_volumeRequested);
-    m_api->setProperty(m_state->handle, "volume", kMpvFormatDouble, &value);
+    setPlaybackPropertyAsync("volume", kMpvFormatDouble, &value, kVolumePropertyRequest);
 }
 
 void MpvPlayer::setAudioEnabled(const bool enabled)
 {
-    m_audioEnabledRequested = enabled;
-    if (!ensureInitialized()) {
+    // Volume/focus changes must not reset an explicitly selected track to "auto".
+    if (m_audioEnableApplied && m_audioEnabledRequested == enabled) {
         return;
     }
-
+    m_audioEnabledRequested = enabled;
     const char *trackSelection = enabled ? "auto" : "no";
-    const auto result =
-        m_api->setProperty(m_state->handle, "aid", kMpvFormatString, static_cast<void *>(&trackSelection));
-    if (result < 0) {
-        Core::DebugLogger::instance().log(
-            QStringLiteral("mpv"),
-            QStringLiteral("Failed to set audio %1: %2")
-                .arg(enabled ? QStringLiteral("enabled") : QStringLiteral("disabled"),
-                     QString::fromUtf8(m_api->errorString(result))));
-    }
+    m_audioEnableApplied = setPlaybackPropertyAsync(
+        "aid", kMpvFormatString, static_cast<void *>(&trackSelection), kAudioPropertyRequest);
 }
 
 int MpvPlayer::requestedVolume() const
@@ -1004,6 +1271,15 @@ void MpvPlayer::seekAbsoluteFast(const double seconds)
     }
 
     const auto command = QStringLiteral("no-osd seek %1 absolute+keyframes").arg(seconds, 0, 'f', 3);
+    m_api->commandString(m_state->handle, command.toUtf8().constData());
+}
+
+void MpvPlayer::seekAbsoluteExact(const double seconds)
+{
+    if (!ensureInitialized()) {
+        return;
+    }
+    const auto command = QStringLiteral("no-osd seek %1 absolute+exact").arg(seconds, 0, 'f', 3);
     m_api->commandString(m_state->handle, command.toUtf8().constData());
 }
 
@@ -1081,7 +1357,7 @@ void MpvPlayer::refreshCachedTelemetryFast()
     telemetry.bufferingState = propertyFlag("paused-for-cache");
     telemetry.volumePercent = propertyDouble("volume");
     telemetry.demuxerCacheDurationSeconds = propertyDouble("demuxer-cache-duration");
-    telemetry.demuxerSeekableRangeSeconds = propertyDemuxerSeekableRangeSeconds();
+    telemetry.demuxerSeekableRangeSeconds = propertyDemuxerSeekableRangeSeconds(&telemetry.cacheReadState);
     telemetry.cacheSpeedBytesPerSecond = propertyDouble("cache-speed");
 
     QMutexLocker locker(&m_state->mutex);
@@ -1230,6 +1506,12 @@ std::optional<bool> MpvPlayer::demuxerCacheReaderEof() const
     return propertyNodeBoolField("demuxer-cache-state", "eof");
 }
 
+std::optional<MpvPlayer::CacheReadState> MpvPlayer::cacheReadState() const
+{
+    QMutexLocker locker(&m_state->mutex);
+    return m_cachedTelemetry.cacheReadState;
+}
+
 double MpvPlayer::bufferTargetSeconds() const
 {
     return m_bufferSeconds;
@@ -1316,29 +1598,39 @@ QVariantList MpvPlayer::trackList() const
 
 void MpvPlayer::selectAudioTrack(const int id)
 {
-    if (!ensureInitialized()) {
-        return;
-    }
     qint64 v = id;
-    m_api->setProperty(m_state->handle, "aid", kMpvFormatInt64, &v);
-    m_trackListRefreshPending.store(true);
-    m_slowTelemetryRefreshPending.store(true);
+    if (setPlaybackPropertyAsync("aid", kMpvFormatInt64, &v, kAudioPropertyRequest)) {
+        m_audioEnabledRequested = true;
+        m_audioEnableApplied = true;
+    }
 }
 
 void MpvPlayer::selectSubtitleTrack(const int id)
 {
-    if (!ensureInitialized()) {
-        return;
-    }
     if (id == 0) {
         const char *no = "no";
-        m_api->setProperty(m_state->handle, "sid", kMpvFormatString, static_cast<void *>(&no));
+        setPlaybackPropertyAsync("sid", kMpvFormatString, static_cast<void *>(&no), kSubtitlePropertyRequest);
     } else {
         qint64 v = id;
-        m_api->setProperty(m_state->handle, "sid", kMpvFormatInt64, &v);
+        setPlaybackPropertyAsync("sid", kMpvFormatInt64, &v, kSubtitlePropertyRequest);
     }
-    m_trackListRefreshPending.store(true);
-    m_slowTelemetryRefreshPending.store(true);
+}
+
+bool MpvPlayer::setPlaybackPropertyAsync(const char *name, const int format, void *value, const quint64 requestId)
+{
+    if (!ensureInitialized()) {
+        return false;
+    }
+    // Synchronous audio reconfiguration can wait for rendering, while Qt's render
+    // thread waits for the UI thread. Queue the request so rendering keeps running.
+    const auto result = m_api->setPropertyAsync(m_state->handle, requestId, name, format, value);
+    if (result < 0) {
+        Core::DebugLogger::instance().log(
+            QStringLiteral("mpv"),
+            QStringLiteral("Failed to queue property %1: %2")
+                .arg(QString::fromUtf8(name), QString::fromUtf8(m_api->errorString(result))));
+    }
+    return result >= 0;
 }
 
 void MpvPlayer::detectAndApplyDeinterlace()
@@ -1402,7 +1694,7 @@ void MpvPlayer::renderToFbo(const int fbo, const int width, const int height)
         m_diagnostics = QStringLiteral("mpv_render_context_render failed: %1")
                             .arg(QString::fromUtf8(m_api->errorString(renderCode)));
         Core::DebugLogger::instance().log(QStringLiteral("mpv"), m_diagnostics);
-        emit errorOccurred(m_diagnostics);
+        queueError(m_diagnostics);
         return;
     }
 
@@ -1435,9 +1727,9 @@ void MpvPlayer::renderToFbo(const int fbo, const int width, const int height)
                 .arg(sample[3]));
     }
 
-#if defined(Q_OS_WIN)
     const auto nowMs = monotonicNowMs();
-    const auto previousRenderMs = m_lastRenderTimestampMs.exchange(nowMs);
+    [[maybe_unused]] const auto previousRenderMs = m_lastRenderTimestampMs.exchange(nowMs);
+#if defined(Q_OS_WIN)
     if (m_windowsPacingDiagEnabled) {
         m_renderCallsSinceLastStats.fetch_add(1);
         const auto gapMs = previousRenderMs >= 0 ? nowMs - previousRenderMs : -1;
@@ -1482,6 +1774,7 @@ qint64 MpvPlayer::lastRenderUpdateTimestampMs() const
 
 void MpvPlayer::unload()
 {
+    closeLiveStream(QStringLiteral("player-unload"));
     stopStreamRecord();
     m_eventThreadRunning = false;
     if (m_eventThread != nullptr && m_eventThread->joinable()) {
@@ -1499,8 +1792,10 @@ void MpvPlayer::unload()
         m_api->terminateDestroy(m_state->handle);
         m_state->handle = nullptr;
     }
+    m_retiredLiveStreams.clear();
 
     m_state->initialized = false;
+    m_audioEnableApplied = false;
     m_cachedTelemetry = {};
     m_trackListRefreshPending.store(false);
     m_slowTelemetryRefreshPending.store(false);
@@ -1531,6 +1826,7 @@ bool MpvPlayer::loadApi()
         && resolve(m_api->terminateDestroy, "mpv_terminate_destroy")
         && resolve(m_api->setOptionString, "mpv_set_option_string")
         && resolve(m_api->setProperty, "mpv_set_property")
+        && resolve(m_api->setPropertyAsync, "mpv_set_property_async")
         && resolve(m_api->getProperty, "mpv_get_property")
         && resolve(m_api->observeProperty, "mpv_observe_property")
         && resolve(m_api->requestLogMessages, "mpv_request_log_messages")
@@ -1620,6 +1916,12 @@ void MpvPlayer::startEventThread()
     });
 }
 
+void MpvPlayer::queueError(const QString &message)
+{
+    // Error handlers may query player state; run them on the owner thread after unlocking.
+    QMetaObject::invokeMethod(this, [this, message]() { emit errorOccurred(message); }, Qt::QueuedConnection);
+}
+
 void MpvPlayer::processEvents()
 {
     if (!m_eventThreadRunning) {
@@ -1640,6 +1942,20 @@ void MpvPlayer::processEvents()
         }
 
         switch (event->event_id) {
+        case kMpvEventSetPropertyReply:
+            if (event->error < 0) {
+                Core::DebugLogger::instance().log(
+                    QStringLiteral("mpv"),
+                    QStringLiteral("Async playback property request %1 failed: %2")
+                        .arg(event->reply_userdata)
+                        .arg(QString::fromUtf8(m_api->errorString(event->error))));
+            }
+            if (event->reply_userdata == kAudioPropertyRequest
+                || event->reply_userdata == kSubtitlePropertyRequest) {
+                m_trackListRefreshPending.store(true);
+                m_slowTelemetryRefreshPending.store(true);
+            }
+            break;
         case kMpvEventLogMessage:
             if (event->data != nullptr) {
                 const auto *message = static_cast<mpv_event_log_message *>(event->data);
@@ -1661,7 +1977,16 @@ void MpvPlayer::processEvents()
             Core::DebugLogger::instance().log(QStringLiteral("mpv"), QStringLiteral("Received MPV_EVENT_FILE_LOADED."));
             m_trackListRefreshPending.store(true);
             m_slowTelemetryRefreshPending.store(true);
-            queueOnOwnerThread([this]() { emit fileLoaded(); });
+            queueOnOwnerThread([this]() {
+                if (m_livePeriodLoading) {
+                    m_livePeriodLoading = false;
+                    // The old item can enter keep-open pause after loadfile was
+                    // requested. Restore intent only once the new item is loaded.
+                    setPaused(m_pauseRequested);
+                    emit liveMediaPeriodChanged();
+                }
+                emit fileLoaded();
+            });
             break;
         case kMpvEventPropertyChange:
             if (event->data != nullptr) {
@@ -1719,7 +2044,7 @@ void MpvPlayer::processEvents()
                 break;
             }
             // EOF (0) or unrecognised reason — treat as natural stream end
-            queueOnOwnerThread([this]() { emit playbackEnded(); });
+            queueOnOwnerThread([this]() { if (!advanceLiveMediaPeriod()) { emit playbackEnded(); } });
             break;
         }
         case kMpvEventVideoReconfig:
@@ -1751,19 +2076,15 @@ void MpvPlayer::processEvents()
 
 void MpvPlayer::requestFrameUpdate()
 {
-    if (m_updateTarget == nullptr) {
-        return;
-    }
-
     const auto updateCount = ++m_renderUpdateCount;
     if (updateCount <= 10) {
         Core::DebugLogger::instance().log(
             QStringLiteral("mpv"),
             QStringLiteral("Render update callback #%1 received.").arg(updateCount));
     }
-#if defined(Q_OS_WIN)
     const auto nowMs = monotonicNowMs();
-    const auto previousUpdateMs = m_lastRenderUpdateTimestampMs.exchange(nowMs);
+    [[maybe_unused]] const auto previousUpdateMs = m_lastRenderUpdateTimestampMs.exchange(nowMs);
+#if defined(Q_OS_WIN)
     if (m_windowsPacingDiagEnabled) {
         m_renderUpdateCallbacksSinceLastStats.fetch_add(1);
         const auto gapMs = previousUpdateMs >= 0 ? nowMs - previousUpdateMs : -1;
@@ -1777,12 +2098,15 @@ void MpvPlayer::requestFrameUpdate()
         }
     }
 #endif
-    if (!QMetaObject::invokeMethod(m_updateTarget, "requestUpdateFromMpv", Qt::QueuedConnection)) {
-        Core::DebugLogger::instance().log(
-            QStringLiteral("mpv"),
-            QStringLiteral("Failed to queue requestUpdateFromMpv: player=%1 target=%2.")
-                .arg(reinterpret_cast<quintptr>(this), 0, 16)
-                .arg(reinterpret_cast<quintptr>(m_updateTarget.data()), 0, 16));
+    // mpv's callback never reads a QPointer or touches a QQuickItem. Coalesce
+    // notifications and resolve the current target on its owning GUI thread.
+    if (!m_frameUpdateQueued.exchange(true)) {
+        QMetaObject::invokeMethod(this, [this]() {
+            m_frameUpdateQueued.store(false);
+            if (m_updateTarget) {
+                QMetaObject::invokeMethod(m_updateTarget.data(), "requestUpdateFromMpv", Qt::DirectConnection);
+            }
+        }, Qt::QueuedConnection);
     }
 }
 
@@ -1929,8 +2253,11 @@ std::optional<double> MpvPlayer::propertyNodeDoubleField(const char *prop, const
     return result;
 }
 
-std::optional<std::pair<double, double>> MpvPlayer::propertyDemuxerSeekableRangeSeconds() const
+std::optional<std::pair<double, double>> MpvPlayer::propertyDemuxerSeekableRangeSeconds(std::optional<CacheReadState> *readState) const
 {
+    if (readState != nullptr) {
+        readState->reset();
+    }
     QMutexLocker locker(&m_state->mutex);
     if (!m_state->initialized || m_state->handle == nullptr || m_api->freeNodeContents == nullptr) {
         return std::nullopt;
@@ -1949,6 +2276,29 @@ std::optional<std::pair<double, double>> MpvPlayer::propertyDemuxerSeekableRange
 
     if (stateNode.format != kMpvFormatNodeMap || stateNode.u.list == nullptr) {
         return freeAndReturn(std::nullopt);
+    }
+
+    if (readState != nullptr) {
+        std::optional<double> end;
+        std::optional<bool> idle;
+        std::optional<bool> eof;
+        const auto *fields = stateNode.u.list;
+        for (int i = 0; i < fields->num; ++i) {
+            if (fields->keys[i] == nullptr) {
+                continue;
+            }
+            const auto &value = fields->values[i];
+            if (qstrcmp(fields->keys[i], "cache-end") == 0 && value.format == kMpvFormatDouble) {
+                end = value.u.double_;
+            } else if (qstrcmp(fields->keys[i], "idle") == 0 && value.format == kMpvFormatFlag) {
+                idle = value.u.flag != 0;
+            } else if (qstrcmp(fields->keys[i], "eof") == 0 && value.format == kMpvFormatFlag) {
+                eof = value.u.flag != 0;
+            }
+        }
+        if (end.has_value() && std::isfinite(*end) && idle.has_value() && eof.has_value()) {
+            *readState = CacheReadState { *end, *idle, *eof };
+        }
     }
 
     const auto currentPositionSeconds = m_cachedTelemetry.positionSeconds;

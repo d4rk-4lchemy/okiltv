@@ -16,7 +16,7 @@ wine_debug="${WINEDEBUG:--all}"
 app_version="${APP_VERSION:-$(sed -n 's/^project(OKILTVQt VERSION \([0-9.]*\).*/\1/p' "$repo_root/qt/CMakeLists.txt" | head -n 1)}"
 zip_path="${publish_dir}/OKILTV-qt-win-x64-${app_version}.zip"
 installer_path="${publish_dir}/OKILTV-qt-win-x64-setup-${app_version}.exe"
-portable_path="${publish_dir}/OKILTV-qt-win-x64-portable-${app_version}.exe"
+legacy_portable_path="${publish_dir}/OKILTV-qt-win-x64-portable-${app_version}.exe"
 package_mode="${PACKAGE_QT_WIN64_MODE:-full}"
 
 require_file() {
@@ -120,13 +120,19 @@ EOF
 }
 
 package_zip() {
+    local portable_bootstrap_template
+
     require_command 7z
     mkdir -p "$publish_dir"
+    portable_bootstrap_template="$repo_root/scripts/windows/portable-bootstrap.json"
+    require_file "$portable_bootstrap_template"
     rm -f "$zip_path"
+    cp -f "$portable_bootstrap_template" "$stage_root/OKILTV-portable.json"
     (
         cd "$stage_parent"
         7z a -tzip "$zip_path" app >/dev/null
     )
+    rm -f "$stage_root/OKILTV-portable.json"
 }
 
 package_installer() {
@@ -147,30 +153,11 @@ package_installer() {
         -e "s#@OUTPUT_DIR@#${publish_dir}#g" \
         -e "s#@LICENSE_FILE@#${repo_root}/scripts/windows/installer_license.txt#g" \
         -e "s#@STAGE_ROOT@#${stage_root}#g" \
+        -e "s#@WINDOWS_SCRIPTS_DIR@#${repo_root}/scripts/windows#g" \
         "$config_template" > "$config_path"
 
     rm -f "$installer_path"
     cpack --config "$config_path"
-}
-
-package_portable() {
-    local nsis_script app_icon
-
-    require_command makensis
-    mkdir -p "$publish_dir"
-    nsis_script="$repo_root/scripts/windows/portable_launcher.nsi"
-    app_icon="${PORTABLE_APP_ICON_PATH:-$repo_root/qt/resources/icons/app.ico}"
-    require_file "$nsis_script"
-    require_file "$app_icon"
-    echo "Portable launcher icon: $app_icon"
-
-    rm -f "$portable_path"
-    makensis \
-        -DAPP_DIR="$stage_root" \
-        -DAPP_VERSION="$app_version" \
-        -DAPP_ICON="$app_icon" \
-        -DOUTPUT_FILE="$portable_path" \
-        "$nsis_script" >/dev/null
 }
 
 verify_outputs() {
@@ -179,9 +166,6 @@ verify_outputs() {
     fi
     if [[ "$package_mode" == "full" ]]; then
         require_file "$installer_path"
-        require_file "$portable_path"
-    elif [[ "$package_mode" == "portable" ]]; then
-        require_file "$portable_path"
     fi
 }
 
@@ -193,18 +177,16 @@ cleanup_generated() {
     rm -rf "$repo_root/_CPack_Packages"
 }
 
+rm -f "$legacy_portable_path"
 stage_app_bundle
-if [[ "$package_mode" == "full" || "$package_mode" == "zip" ]]; then
-    package_zip
-fi
 if [[ "$package_mode" == "full" ]]; then
     package_installer
-    package_portable
-elif [[ "$package_mode" == "portable" ]]; then
-    package_portable
 elif [[ "$package_mode" != "zip" ]]; then
     echo "Unsupported PACKAGE_QT_WIN64_MODE: $package_mode" >&2
     exit 1
+fi
+if [[ "$package_mode" == "full" || "$package_mode" == "zip" ]]; then
+    package_zip
 fi
 verify_outputs
 cleanup_publish
@@ -216,7 +198,4 @@ if [[ "$package_mode" == "full" || "$package_mode" == "zip" ]]; then
 fi
 if [[ "$package_mode" == "full" ]]; then
     echo "Installer: $installer_path"
-    echo "Portable: $portable_path"
-elif [[ "$package_mode" == "portable" ]]; then
-    echo "Portable: $portable_path"
 fi

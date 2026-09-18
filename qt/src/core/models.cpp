@@ -98,7 +98,7 @@ int normalizeAutoRefreshIntervalHours(const int value)
 
 int normalizeGuideHours(const int value)
 {
-    return std::clamp(value, 1, 48);
+    return std::clamp(value, 1, 999);
 }
 
 double normalizePlayerWaitForStreamSeconds(const double value)
@@ -108,6 +108,14 @@ double normalizePlayerWaitForStreamSeconds(const double value)
     }
 
     return std::clamp(roundToSingleDecimal(value), 0.1, 120.0);
+}
+
+QString normalizePlayerPicturePreset(const QString &value)
+{
+    const auto normalized = value.trimmed().toLower();
+    static const QStringList presets { QStringLiteral("standard"), QStringLiteral("warm"), QStringLiteral("cold"),
+                                       QStringLiteral("movie"), QStringLiteral("vivid"), QStringLiteral("sport") };
+    return presets.contains(normalized) ? normalized : QStringLiteral("standard");
 }
 
 double normalizePlayerBufferSeconds(const double value)

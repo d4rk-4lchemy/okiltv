@@ -44,9 +44,8 @@ Download the latest build from the **Releases** page.
 
 Expected Windows artifacts:
 
-- `OKILTV-qt-win-x64-{version}.zip` -> just unzip and use
+- `OKILTV-qt-win-x64-{version}.zip` -> portable build; unzip and run `OKILTV.exe`. Its settings, cache, and database stay in `data` beside the app.
 - `OKILTV-qt-win-x64-setup-{version}.exe` -> proper installer
-- `OKILTV-qt-win-x64-portable-{version}.exe` -> portable version
 
 _Windows SmartScreen may block the app on first run. Click **More info** → **Run anyway** to proceed._
 
@@ -130,7 +129,6 @@ Outputs (example version 0.4.0):
 
 - `publish/OKILTV-qt-win-x64-0.4.0.zip`
 - `publish/OKILTV-qt-win-x64-setup-0.4.0.exe`
-- `publish/OKILTV-qt-win-x64-portable-0.4.0.exe`
 
 To package with a different version, set `APP_VERSION` before running the packaging script or helper.
 
@@ -221,8 +219,8 @@ Test binaries:
 ## Data Location
 
 - Linux: app data under the platform-specific Qt writable app-data location
-- Windows: app data under `%APPDATA%\\OKILTV`
-- Portable launcher mode: supports runtime data-root override
+- Windows installer: app data under `%APPDATA%\\OKILTV`
+- Windows ZIP: app data under `data` beside `OKILTV.exe`; the Portable settings panel can override that location.
 
 ## Disclaimer
 

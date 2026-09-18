@@ -134,7 +134,6 @@ public:
 
         QQuickOpenGLUtils::resetOpenGLState();
 
-        m_player->setRenderUpdateTarget(m_item);
         m_player->renderToFbo(
             static_cast<int>(framebufferObject()->handle()),
             static_cast<int>(framebufferObject()->width()),

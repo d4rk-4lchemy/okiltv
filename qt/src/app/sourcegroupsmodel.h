@@ -72,6 +72,7 @@ public:
     Q_INVOKABLE void discardDraftChanges();
 
 signals:
+    void selectionEdited(const QString &profileId);
     void profileIdChanged();
     void groupsChanged();
     void loadingChanged();

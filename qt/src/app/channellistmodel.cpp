@@ -68,6 +68,8 @@ QVariant ChannelListModel::data(const QModelIndex &index, const int role) const
         return m_currentProgramInfoByChannelId.value(channel.id).value(QStringLiteral("title")).toString();
     case CurrentProgramTimeRangeRole:
         return m_currentProgramInfoByChannelId.value(channel.id).value(QStringLiteral("timeRange")).toString();
+    case CatchupSupportedRole:
+        return channel.catchupSupported;
     default:
         return {};
     }
@@ -89,7 +91,8 @@ QHash<int, QByteArray> ChannelListModel::roleNames() const
         { IsFavoriteRole, "isFavorite" },
         { IsDvrRecordingRole, "isDvrRecording" },
         { CurrentProgramTitleRole, "currentProgramTitle" },
-        { CurrentProgramTimeRangeRole, "currentProgramTimeRange" }
+        { CurrentProgramTimeRangeRole, "currentProgramTimeRange" },
+        { CatchupSupportedRole, "catchupSupported" }
     };
 }
 
@@ -186,11 +189,14 @@ void ChannelListModel::setChannels(const QList<Channel> &channels, const QList<C
     m_watchSecondsByChannelId.clear();
     reloadManualFavourites();
     invalidateCategoriesCache();
+    // Reset/property observers can immediately read rows and look up selection.
+    // Replace the old source's indices before publishing the new channel list.
+    rebuildFilteredRows();
     endResetModel();
     emit totalCountChanged();
     emit selectedChannelIdChanged();
     emit categoriesChanged();
-    rebuildFilter();
+    emit filteredCountChanged();
 }
 
 void ChannelListModel::clear()
@@ -643,6 +649,13 @@ void ChannelListModel::rebuildCategoriesCache() const
 void ChannelListModel::rebuildFilter()
 {
     beginResetModel();
+    rebuildFilteredRows();
+    endResetModel();
+    emit filteredCountChanged();
+}
+
+void ChannelListModel::rebuildFilteredRows()
+{
     m_filteredRows.clear();
     const auto query = m_searchText.trimmed();
     const auto favouritesCategoryId = QString::fromUtf8(kFavouritesCategoryId);
@@ -682,9 +695,6 @@ void ChannelListModel::rebuildFilter()
                 return leftIndex < rightIndex;
             });
     }
-
-    endResetModel();
-    emit filteredCountChanged();
 }
 
 int ChannelListModel::filteredRowForChannel(const int channelId) const

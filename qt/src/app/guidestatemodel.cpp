@@ -142,6 +142,9 @@ void GuideStateModel::selectProgramByStart(const QString &startIso)
             return;
         }
     }
+
+    // The requested programme may be outside the loaded preview or still loading.
+    updatePrograms();
 }
 
 void GuideStateModel::setSelectedGroupId(const QString &value)
@@ -206,11 +209,24 @@ void GuideStateModel::startProgramsUpdateJob(
     const int lookAheadHours)
 {
     m_updateInFlight = true;
-    m_backgroundTasks.addFuture(QtConcurrent::run([this, generation, selectedChannel, lookAheadHours]() {
+    const auto preferredStart = QDateTime::fromString(m_preferredProgramStart, Qt::ISODateWithMs);
+    m_backgroundTasks.addFuture(QtConcurrent::run([this, generation, selectedChannel, lookAheadHours, preferredStart]() {
         ProgramsUpdate result;
         const auto from = QDateTime::currentDateTimeUtc().addSecs(-1800);
         const auto to = QDateTime::currentDateTimeUtc().addSecs(static_cast<qint64>(lookAheadHours) * 3600);
         result.channelPrograms = m_epg->programsInRange(selectedChannel.tvgId, from, to);
+        // Guide navigation can select programmes outside the short preview list.
+        // Resolve that identity separately without expanding the entire list.
+        if (preferredStart.isValid()) {
+            const auto candidates = m_epg->programsInRange(
+                selectedChannel.tvgId, preferredStart, preferredStart.addMSecs(1));
+            for (const auto &program : candidates) {
+                if (program.start == preferredStart) {
+                    result.preferredProgram = program;
+                    break;
+                }
+            }
+        }
         for (const auto &program : result.channelPrograms) {
             if (epgEntryIsNow(program)) {
                 result.selectedProgram = program;
@@ -285,21 +301,20 @@ void GuideStateModel::applyProgramsUpdate(const quint64 generation, ProgramsUpda
         return;
     }
 
-    if (!m_preferredProgramStart.isEmpty()) {
-        for (const auto &program : result.channelPrograms) {
-            const auto startIsoWithMs = program.start.toUTC().toString(Qt::ISODateWithMs);
-            const auto startIso = program.start.toUTC().toString(Qt::ISODate);
-            if (startIsoWithMs != m_preferredProgramStart && startIso != m_preferredProgramStart) {
-                continue;
-            }
-
-            result.selectedProgram = program;
-            result.selectedProgramVariant = toVariantMap(program);
-            break;
-        }
+    if (result.preferredProgram.has_value()) {
+        result.selectedProgram = result.preferredProgram;
+        result.selectedProgramVariant = toVariantMap(result.preferredProgram.value());
+    } else if (m_selectedProgram.has_value()
+               && m_selectedProgram->start == QDateTime::fromString(m_preferredProgramStart, Qt::ISODateWithMs)) {
+        // Keep the user's selection if an EPG refresh temporarily omits it.
+        result.selectedProgram = m_selectedProgram;
+        result.selectedProgramVariant = toVariantMap(m_selectedProgram.value());
     }
 
     m_selectedProgram = std::move(result.selectedProgram);
+    if (m_selectedProgram.has_value()) {
+        m_preferredProgramStart = m_selectedProgram->start.toUTC().toString(Qt::ISODateWithMs);
+    }
     m_channelPrograms = std::move(result.channelPrograms);
     m_selectedProgramVariant = std::move(result.selectedProgramVariant);
     m_channelProgramsVariant = std::move(result.channelProgramsVariant);

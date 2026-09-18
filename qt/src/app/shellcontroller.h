@@ -41,12 +41,16 @@ public slots:
     Q_INVOKABLE void setReopenMaximizedOnLaunch(bool value);
 
 signals:
+    void userActivity();
     void overlaysVisibleChanged();
     void fullscreenChanged();
     void layoutBandChanged();
     void focusedZoneChanged();
     void activeOverlayChanged();
     void overlaySectionChanged();
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     QString computeLayoutBand(int width, bool fullscreen) const;

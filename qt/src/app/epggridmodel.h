@@ -14,6 +14,7 @@ class EpgGridModel final : public QAbstractListModel
     Q_PROPERTY(QVariantList timeSlots READ timeSlots NOTIFY timeSlotsChanged)
     Q_PROPERTY(QVariantList visibleTimeSlots READ visibleTimeSlots NOTIFY visibleTimeSlotsChanged)
     Q_PROPERTY(QString windowStartLabel READ windowStartLabel NOTIFY windowChanged)
+    Q_PROPERTY(qint64 windowStartEpochMs READ windowStartEpochMs NOTIFY windowChanged)
     Q_PROPERTY(QString windowEndLabel READ windowEndLabel NOTIFY windowChanged)
     Q_PROPERTY(int windowSpanMinutes READ windowSpanMinutes NOTIFY windowChanged)
     Q_PROPERTY(int selectedChannelId READ selectedChannelId WRITE setSelectedChannelId NOTIFY selectedChannelIdChanged)
@@ -32,7 +33,8 @@ public:
         ChannelTvgIdRole,
         ChannelProfileIdRole,
         ChannelStreamUrlRole,
-        ProgramsRole
+        ProgramsRole,
+        ChannelCatchupSupportedRole
     };
     Q_ENUM(Roles)
 
@@ -45,6 +47,7 @@ public:
     QVariantList timeSlots() const;
     QVariantList visibleTimeSlots() const;
     QString windowStartLabel() const;
+    qint64 windowStartEpochMs() const { return m_windowStart.toMSecsSinceEpoch(); }
     QString windowEndLabel() const;
     int windowSpanMinutes() const;
     int selectedChannelId() const;
@@ -91,7 +94,7 @@ private:
     void emitProgramsChangedForVisibleRows();
     void invalidateProgramTilesCache();
     void scheduleOffscreenRowWarmup();
-    void warmProgramTilesForRows(int firstRow, int lastRow);
+    void warmProgramTilesForRows(int firstRow, int lastRow, quint64 generation);
     void applyRows(
         const QList<Core::Channel> &channels,
         QList<Row> rows,

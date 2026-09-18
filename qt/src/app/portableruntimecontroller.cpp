@@ -43,7 +43,7 @@ void PortableRuntimeController::setCustomDataRoot(const QString &value)
     if (!error.isEmpty()) {
         setStatus(error);
     } else if (m_customDataRoot.isEmpty()) {
-        setStatus(QStringLiteral("Portable build will use %%APPDATA%%\\OKILTV after restart."));
+        setStatus(QStringLiteral("Portable build will use its local data directory after restart."));
     } else {
         setStatus(QStringLiteral("Portable build will switch to %1 after restart.").arg(m_customDataRoot));
     }
@@ -74,11 +74,7 @@ void PortableRuntimeController::reload()
     const auto config = PortableBootstrap::load(context.portableBootstrapPath);
     m_customDataRoot = config.dataRootOverride;
     m_restartRequired = false;
-    if (m_customDataRoot.isEmpty()) {
-        setStatus(QStringLiteral("Portable build is currently using %%APPDATA%%\\OKILTV."));
-    } else {
-        setStatus(QStringLiteral("Portable build is currently using %1.").arg(AppDataPaths::dataDirectory()));
-    }
+    setStatus(QStringLiteral("Portable build is currently using %1.").arg(AppDataPaths::dataDirectory()));
     emit stateChanged();
 }
 

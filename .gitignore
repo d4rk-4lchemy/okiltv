@@ -8,6 +8,8 @@ _CPack_Packages/
 .temp/
 .secrets/
 */__pycache__/
+ui-tests/**/__pycache__/
+ui-tests/**/*.pyc
 build*/
 !build/
 build/*
