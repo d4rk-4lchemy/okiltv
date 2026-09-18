@@ -39,6 +39,7 @@ public:
         QObject *parent = nullptr);
     ~TimeshiftController() override;
 
+    void setPlayerController(PlayerController *controller);
     bool enabled() const;
     bool isActive() const;
     bool isPreparing() const;

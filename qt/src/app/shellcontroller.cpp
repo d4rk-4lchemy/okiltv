@@ -1,15 +1,47 @@
 #include "shellcontroller.h"
 
+#include <QCoreApplication>
+#include <QEvent>
+#include <QWindow>
+
 namespace OKILTV::App {
 
 ShellController::ShellController(Core::SettingsManager *settings, QObject *parent)
     : QObject(parent)
     , m_settings(settings)
 {
+    if (auto *application = QCoreApplication::instance()) {
+        application->installEventFilter(this);
+    }
     m_overlaysVisible = false;
     m_activeOverlay = QStringLiteral("none");
     m_overlaySection = QStringLiteral("appearance");
     m_lastSettingsSection = QStringLiteral("appearance");
+}
+
+bool ShellController::eventFilter(QObject *watched, QEvent *event)
+{
+    // Observe window input before QML controls or shortcuts consume it.
+    if (qobject_cast<QWindow *>(watched)) {
+        switch (event->type()) {
+        case QEvent::MouseMove:
+        case QEvent::MouseButtonPress:
+        case QEvent::MouseButtonRelease:
+        case QEvent::MouseButtonDblClick:
+        case QEvent::Wheel:
+        case QEvent::KeyPress:
+        case QEvent::KeyRelease:
+        case QEvent::ShortcutOverride:
+        case QEvent::TouchBegin:
+        case QEvent::TouchUpdate:
+        case QEvent::TouchEnd:
+            emit userActivity();
+            break;
+        default:
+            break;
+        }
+    }
+    return QObject::eventFilter(watched, event);
 }
 
 bool ShellController::overlaysVisible() const

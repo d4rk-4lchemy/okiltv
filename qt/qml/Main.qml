@@ -138,7 +138,7 @@ ApplicationWindow {
     onHeightChanged: updateWindowState()
     onVisibilityChanged: {
         updateWindowState()
-        if (visibility === Window.Minimized
+        if (window.visibility === Window.Minimized
             && window.settings.minimizeToTrayOnMinimize
             && window.tray.available) {
             window.tray.showTrayIcon()
@@ -267,9 +267,9 @@ ApplicationWindow {
         focus: true
         title: "Recording in progress"
         standardButtons: Dialog.Yes | Dialog.No
+        implicitWidth: 360 + leftPadding + rightPadding
 
         contentItem: Text {
-            width: 360
             text: "A recording is active or scheduled to start within 15 minutes. Exit anyway?"
             wrapMode: Text.Wrap
             color: Theme.textPrimary

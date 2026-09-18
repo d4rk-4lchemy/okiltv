@@ -37,6 +37,7 @@ struct ServerProfile
     QString xtreamUsername;
     QString xtreamPassword;
     QString xtreamServerTimezone;
+    int catchupSafetyMinutes { 3 };
 
     QString m3uUrl;
     QString m3uFilePath;
@@ -126,12 +127,15 @@ struct AppSettings
     bool guidePreviewEnabled { true };
     bool overlayAutoHide { true };
     int overlayAutoHideSeconds { 3 };
+    int overlayInactivitySeconds { 60 };
     int guidePastHours { 6 };
     int epgLookAheadHours { 24 };
     bool autoRefreshEpg { true };
     int refreshIntervalMinutes { 360 };
     double playerWaitForStreamSeconds { 5.0 };
     bool playerDeinterlaceEnabled { true };
+    bool playerImageSmoothingEnabled { false };
+    QString playerPicturePreset { QStringLiteral("standard") };
     double playerBufferSeconds { 3.0 };
     QString playerUserAgent;
     bool timeshiftEnabled { false };
@@ -160,6 +164,7 @@ struct AppSettings
     int dvrEndOffsetMinutes { 2 };
     QList<DvrScheduleEntry> dvrSchedules;
 
+    QJsonObject lastCatchupSession;
     QMap<QString, int> lastWatchedChannelId;
     QMap<QString, QList<int>> favoriteChannelIdsByProfile;
     QMap<QString, QStringList> hiddenGroupsByProfile;
@@ -180,6 +185,7 @@ int normalizeAutoRefreshIntervalHours(int value);
 int normalizeGuideHours(int value);
 double normalizePlayerWaitForStreamSeconds(double value);
 double normalizePlayerBufferSeconds(double value);
+QString normalizePlayerPicturePreset(const QString &value);
 int normalizeTimeshiftWindowMinutes(int value);
 int normalizeTimeshiftSegmentSeconds(int value);
 int normalizeTimeshiftMaxDiskGb(int value);

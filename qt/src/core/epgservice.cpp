@@ -204,6 +204,7 @@ EpgService::Snapshot EpgService::buildSnapshot(const QList<EpgEntry> &entries)
         if (!currentMaxStop.isValid() || entry.stop > currentMaxStop) {
             snapshot.maxStopByChannelId.insert(key, entry.stop);
         }
+        snapshot.prefixMaxStopsByChannelId[key].push_back(snapshot.maxStopByChannelId.value(key));
     }
 
     return snapshot;
@@ -268,8 +269,11 @@ std::optional<EpgEntry> EpgService::nextProgram(const QString &tvgId) const
     return std::nullopt;
 }
 
-QList<EpgEntry> EpgService::programsInRange(const QString &tvgId, const QDateTime &from, const QDateTime &to) const
+QList<EpgEntry> EpgService::programsInRange(const QString &tvgId, const QDateTime &from, const QDateTime &to, const int limit) const
 {
+    if (from >= to || limit == 0) {
+        return {};
+    }
     std::shared_ptr<const Snapshot> snapshot;
     {
         QReadLocker locker(&m_lock);
@@ -286,13 +290,23 @@ QList<EpgEntry> EpgService::programsInRange(const QString &tvgId, const QDateTim
     }
 
     const auto &entries = it.value();
+    auto first = entries.cbegin();
+    const auto stops = snapshot->prefixMaxStopsByChannelId.constFind(it.key());
+    if (stops != snapshot->prefixMaxStopsByChannelId.cend() && stops->size() == entries.size()) {
+        const auto candidate = std::upper_bound(stops->cbegin(), stops->cend(), from);
+        first += std::distance(stops->cbegin(), candidate);
+    }
     QList<EpgEntry> result;
-    for (const auto &entry : entries) {
+    for (auto candidate = first; candidate != entries.cend(); ++candidate) {
+        const auto &entry = *candidate;
         if (entry.start >= to) {
             break;
         }
         if (entry.stop > from && entry.start < to) {
             result.push_back(entry);
+            if (limit > 0 && result.size() >= limit) {
+                break;
+            }
         }
     }
 

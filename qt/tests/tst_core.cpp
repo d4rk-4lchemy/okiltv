@@ -127,6 +127,7 @@ private slots:
     void settingsCompatibilityRoundTrips();
     void settingsCompatibilityDefaultsNewPlayerTuningFields();
     void portableBootstrapRoundTripsIndependentOfSettings();
+    void portableBootstrapDefaultsDataBesideMarker();
     void appDataPathsSupportPortableOverridesAndFallback();
     void appDataPathsMigratesLegacyRootIntoOKILTVDirectory();
     void debugLoggerOnlyWritesFilesForExplicitDump();
@@ -149,11 +150,16 @@ private slots:
     void epgCacheAgeCalculationsStayStable();
     void epgCacheFingerprintInvalidatesChangedSource();
     void epgSnapshotAppliesPrebuiltIndex();
+    void epgRangeLookupPreservesOverlapsAndBoundaries();
     void databaseKeepsSchemaCompatible();
     void databasePersistsWatchSecondsForChannelIdZero();
+    void catchupProgressRoundsAndCompletes_data();
+    void catchupProgressRoundsAndCompletes();
+    void databaseCatchupProgressPersistsAndIsolatesEmissions();
     void databaseUpsertRefreshesTvgAndSourceFields();
     void databaseReplaceChannelsForProfilePrunesStaleRows();
     void catchupUrlResolverBuildsXtreamAndM3uTargets();
+    void catchupUrlResolverBuildsIndependentWindows();
     void catchupUrlResolverRejectsUnavailableTargets();
     void settingsLoadInvalidJsonCreatesBackupAndReportsError();
     void settingsSaveReportsErrorAndCreatesParentDirectory();
@@ -197,6 +203,8 @@ void CoreTests::settingsCompatibilityRoundTrips()
   "refreshIntervalMinutes": 360,
   "playerWaitForStreamSeconds": 7.36,
   "playerDeinterlaceEnabled": false,
+  "playerImageSmoothingEnabled": true,
+  "playerPicturePreset": "warm",
   "playerBufferSeconds": 2.24,
   "playerUserAgent": "OKILTV-Test-Agent/1.0",
   "mpvDllPath": "C:/mpv/mpv-2.dll",
@@ -262,9 +270,12 @@ void CoreTests::settingsCompatibilityRoundTrips()
     QCOMPARE(settings.current().preventDisplaySleep, false);
     QCOMPARE(settings.current().guidePreviewEnabled, false);
     QCOMPARE(settings.current().overlayAutoHide, false);
+    QCOMPARE(settings.current().overlayInactivitySeconds, 60);
     QCOMPARE(settings.current().guidePastHours, 5);
     QVERIFY(std::abs(settings.current().playerWaitForStreamSeconds - 7.4) < 0.0001);
     QCOMPARE(settings.current().playerDeinterlaceEnabled, false);
+    QCOMPARE(settings.current().playerImageSmoothingEnabled, true);
+    QCOMPARE(settings.current().playerPicturePreset, QStringLiteral("warm"));
     QVERIFY(std::abs(settings.current().playerBufferSeconds - 2.2) < 0.0001);
     QCOMPARE(settings.current().playerUserAgent, QStringLiteral("OKILTV-Test-Agent/1.0"));
     QCOMPARE(settings.current().multiviewEnabled, false);
@@ -315,6 +326,7 @@ void CoreTests::settingsCompatibilityRoundTrips()
     QVERIFY(document.object().contains(QStringLiteral("hideUncheckedGroupsByProfile")));
     QVERIFY(std::abs(document.object().value(QStringLiteral("playerWaitForStreamSeconds")).toDouble() - 7.4) < 0.0001);
     QCOMPARE(document.object().value(QStringLiteral("playerDeinterlaceEnabled")).toBool(), false);
+    QCOMPARE(document.object().value(QStringLiteral("playerImageSmoothingEnabled")).toBool(), true);
     QVERIFY(std::abs(document.object().value(QStringLiteral("playerBufferSeconds")).toDouble() - 2.2) < 0.0001);
     QCOMPARE(document.object().value(QStringLiteral("playerUserAgent")).toString(), QStringLiteral("OKILTV-Test-Agent/1.0"));
     QCOMPARE(document.object().value(QStringLiteral("preventDisplaySleep")).toBool(), false);
@@ -377,6 +389,9 @@ void CoreTests::settingsCompatibilityDefaultsNewPlayerTuningFields()
     QCOMPARE(settings.current().preventDisplaySleep, true);
     QCOMPARE(settings.current().guidePastHours, 6);
     QCOMPARE(settings.current().playerDeinterlaceEnabled, true);
+    QCOMPARE(settings.current().playerImageSmoothingEnabled, false);
+    QCOMPARE(settings.current().playerPicturePreset, QStringLiteral("standard"));
+    QCOMPARE(normalizePlayerPicturePreset(QStringLiteral("unknown")), QStringLiteral("standard"));
     QVERIFY(std::abs(settings.current().playerBufferSeconds - 3.0) < 0.0001);
     QCOMPARE(settings.current().playerUserAgent, QStringLiteral(""));
     QCOMPARE(settings.current().timeshiftEnabled, false);
@@ -415,6 +430,18 @@ void CoreTests::portableBootstrapRoundTripsIndependentOfSettings()
     QCOMPARE(loaded.schemaVersion, 1);
     QCOMPARE(loaded.dataRootOverride, QDir::cleanPath(customRoot));
     QVERIFY(!QFile::exists(tempDir.filePath(QStringLiteral("settings.json"))));
+}
+
+void CoreTests::portableBootstrapDefaultsDataBesideMarker()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const auto markerPath = tempDir.filePath(QStringLiteral("OKILTV-portable.json"));
+    QCOMPARE(
+        PortableBootstrap::defaultDataRootForBootstrap(markerPath),
+        tempDir.filePath(QStringLiteral("data")));
+    QCOMPARE(PortableBootstrap::defaultDataRootForBootstrap({}), QString());
 }
 
 void CoreTests::appDataPathsSupportPortableOverridesAndFallback()
@@ -975,6 +1002,38 @@ void CoreTests::epgSnapshotAppliesPrebuiltIndex()
     QCOMPARE(service.allEntries().first().title, QStringLiteral("A"));
 }
 
+void CoreTests::epgRangeLookupPreservesOverlapsAndBoundaries()
+{
+    EpgService service;
+    const auto start = QDateTime::fromString(QStringLiteral("2026-03-17T00:00:00Z"), Qt::ISODate);
+    const auto channel = QStringLiteral("test");
+    const QList<EpgEntry> entries {
+        { channel, QStringLiteral("Long"), {}, {}, start, start.addSecs(10 * 3600) },
+        { channel, QStringLiteral("Short"), {}, {}, start.addSecs(3600), start.addSecs(2 * 3600) },
+        { channel, QStringLiteral("Later"), {}, {}, start.addSecs(8 * 3600), start.addSecs(9 * 3600) }
+    };
+    service.loadFromEntries(entries);
+    const auto from = start.addSecs(8 * 3600);
+    const auto to = start.addSecs(9 * 3600);
+    const auto result = service.programsInRange(QStringLiteral("TEST"), from, to);
+    QCOMPARE(result.size(), 2);
+    QCOMPARE(result.first().title, QStringLiteral("Long"));
+    QCOMPARE(result.last().title, QStringLiteral("Later"));
+    QCOMPARE(service.programsInRange(channel, from, to, 1).size(), 1);
+    QVERIFY(service.programsInRange(channel, from, to, 0).isEmpty());
+    QVERIFY(service.programsInRange(channel, to, from).isEmpty());
+    QVERIFY(service.programsInRange(channel, from, from).isEmpty());
+    QVERIFY(service.programsInRange(channel, start.addSecs(10 * 3600), start.addDays(1)).isEmpty());
+    QVERIFY(service.programsInRange(channel, start.addSecs(-1), start).isEmpty());
+    QCOMPARE(service.programsInRange(channel, to, start.addSecs(10 * 3600)).size(), 1);
+
+    // Replacing a snapshot must also replace its range index.
+    service.loadFromEntries({ entries.last() });
+    QCOMPARE(service.programsInRange(channel, from, to).size(), 1);
+    service.clear();
+    QVERIFY(service.programsInRange(channel, from, to).isEmpty());
+}
+
 void CoreTests::databaseKeepsSchemaCompatible()
 {
     QTemporaryDir tempDir;
@@ -1023,6 +1082,75 @@ void CoreTests::databaseKeepsSchemaCompatible()
     database.incrementWatchSeconds(profileId, channel.id, 59);
     const auto watchSeconds = database.loadWatchSecondsByProfile(profileId);
     QCOMPARE(watchSeconds.value(channel.id, 0), 120);
+}
+
+void CoreTests::catchupProgressRoundsAndCompletes_data()
+{
+    QTest::addColumn<qint64>("positionMs");
+    QTest::addColumn<qint64>("expectedSeconds");
+    QTest::newRow("first-minute") << qint64(59999) << qint64(0);
+    QTest::newRow("minute-boundary") << qint64(60000) << qint64(60);
+    QTest::newRow("round-down") << qint64(1427000) << qint64(1380);
+    QTest::newRow("before-completion") << qint64(3539999) << qint64(3480);
+    QTest::newRow("last-minute") << qint64(3540000) << qint64(0);
+    QTest::newRow("completed") << qint64(3600000) << qint64(0);
+    QTest::newRow("beyond-end") << qint64(3700000) << qint64(0);
+}
+
+void CoreTests::catchupProgressRoundsAndCompletes()
+{
+    QFETCH(qint64, positionMs);
+    QFETCH(qint64, expectedSeconds);
+    CatchupProgress progress;
+    progress.programStartMs = 10000000;
+    progress.positionMs = positionMs;
+    QCOMPARE(progress.resumeSeconds(progress.programStartMs + 3600000), expectedSeconds);
+}
+
+void CoreTests::databaseCatchupProgressPersistsAndIsolatesEmissions()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const auto path = dir.filePath(QStringLiteral("progress.sqlite"));
+    DatabaseService database(path);
+    database.ensureSchema();
+    Channel channel;
+    channel.id = 0;
+    channel.profileId = QUuid::createUuid();
+    channel.source = ChannelSource::M3U;
+    channel.tvgId = QStringLiteral("station");
+    channel.streamUrl = QStringLiteral("https://provider/live");
+    const auto start = QDateTime::currentDateTimeUtc().addSecs(-7200);
+    CatchupProgress progress { CatchupProgress::keyFor(channel, start), channel.profileId,
+        start.toMSecsSinceEpoch(), start.addSecs(3600).toMSecsSinceEpoch(), 1427000,
+        start.addDays(2).toMSecsSinceEpoch() };
+    database.saveCatchupProgress(progress);
+    DatabaseService reopened(path);
+    const auto records = reopened.loadCatchupProgress();
+    QCOMPARE(records.size(), 1);
+    QCOMPARE(records.first().positionMs, 1427000);
+    QCOMPARE(records.first().resumeSeconds(progress.programStopMs), 1380);
+    channel.name = QStringLiteral("Renamed station");
+    QCOMPARE(CatchupProgress::keyFor(channel, start), progress.key);
+    QVERIFY(CatchupProgress::keyFor(channel, start.addSecs(60)) != progress.key);
+    channel.streamUrl += QStringLiteral("-different");
+    QVERIFY(CatchupProgress::keyFor(channel, start) != progress.key);
+    channel.streamUrl.chop(10);
+    channel.profileId = QUuid::createUuid();
+    QVERIFY(CatchupProgress::keyFor(channel, start) != progress.key);
+    auto other = progress;
+    other.key = CatchupProgress::keyFor(channel, start);
+    other.profileId = channel.profileId;
+    database.saveCatchupProgress(other);
+    progress.positionMs = 600000; // A backward seek replaces the previous position.
+    database.saveCatchupProgress(progress);
+    QCOMPARE(database.loadCatchupProgress().size(), 2);
+    progress.positionMs = 3540000;
+    database.saveCatchupProgress(progress);
+    QCOMPARE(database.loadCatchupProgress().size(), 1);
+    QCOMPARE(database.loadCatchupProgress().first().key, other.key);
+    database.removeCatchupProgress(other.key);
+    QVERIFY(database.loadCatchupProgress().isEmpty());
 }
 
 void CoreTests::databasePersistsWatchSecondsForChannelIdZero()
@@ -1166,8 +1294,56 @@ void CoreTests::settingsSaveReportsErrorAndCreatesParentDirectory()
     QVERIFY(!failingSettings.lastSaveError().isEmpty());
 }
 
+void CoreTests::catchupUrlResolverBuildsIndependentWindows()
+{
+    Channel channel;
+    channel.id = 99;
+    channel.source = ChannelSource::Xtream;
+    channel.streamUrl = QStringLiteral("https://provider/live/99.ts");
+    channel.catchupSupported = true;
+    channel.catchupWindowHours = 72;
+    ServerProfile profile;
+    profile.xtreamBaseUrl = QStringLiteral("https://provider");
+    profile.xtreamUsername = QStringLiteral("user");
+    profile.xtreamPassword = QStringLiteral("pass");
+    profile.xtreamServerTimezone = QStringLiteral("Europe/Warsaw");
+    CatchupUrlResolver resolver(profile);
+    const auto start = QDateTime::fromString(QStringLiteral("2026-09-18T10:00:17Z"), Qt::ISODate);
+    const auto end = start.addSecs(7200);
+    auto window = resolver.resolveWindow(channel, start, end);
+    QVERIFY(window);
+    QCOMPARE(window->programStartUtc, start.addSecs(-17));
+    QCOMPARE(window->programStopUtc, end.addSecs(-17));
+    QCOMPARE(window->durationSeconds, 7200);
+    QCOMPARE(window->url, QStringLiteral("https://provider/timeshift/user/pass/120/2026-09-18:12-00/99.ts"));
+    channel.source = ChannelSource::M3U;
+    channel.catchupMode = QStringLiteral("append");
+    channel.catchupSourceTemplate = QStringLiteral("utc=%7Butc%7D&lutc={lutc}&duration={duration}&units={duration:1000}");
+    window = resolver.resolveWindow(channel, start, end);
+    QVERIFY(window);
+    QCOMPARE(window->programStartUtc, start);
+    QCOMPARE(window->programStopUtc, end);
+    QCOMPARE(window->url, QStringLiteral("https://provider/live/99.ts?utc=%1&lutc=%2&duration=7200&units=7200000")
+        .arg(start.toSecsSinceEpoch()).arg(end.toSecsSinceEpoch()));
+    channel.catchupMode = QStringLiteral("default");
+    channel.catchupSourceTemplate.prepend(QStringLiteral("https://archive/channel.ts?"));
+    window = resolver.resolveWindow(channel, start.addSecs(3600), end);
+    QVERIFY(window);
+    QVERIFY(window->url.startsWith(QStringLiteral("https://archive/channel.ts?")));
+    QVERIFY(window->url.contains(QStringLiteral("duration=3600&units=3600000")));
+    QVERIFY(!resolver.resolveWindow(channel, end, start));
+}
+
 void CoreTests::catchupUrlResolverBuildsXtreamAndM3uTargets()
 {
+    QCOMPARE(serverProfileFromJson(QJsonObject {}).catchupSafetyMinutes, 3);
+    ServerProfile safetyProfile;
+    safetyProfile.catchupSafetyMinutes = 2;
+    QCOMPARE(serverProfileFromJson(toJson(safetyProfile)).catchupSafetyMinutes, 3);
+    QCOMPARE(serverProfileFromJson(QJsonObject {{ QStringLiteral("catchupSafetyMinutes"), 1 }}).catchupSafetyMinutes, 3);
+    QCOMPARE(serverProfileFromJson(QJsonObject {{ QStringLiteral("catchupSafetyMinutes"), 2 }}).catchupSafetyMinutes, 3);
+    safetyProfile.catchupSafetyMinutes = 100;
+    QCOMPARE(serverProfileFromJson(toJson(safetyProfile)).catchupSafetyMinutes, 30);
     Channel xtreamChannel;
     xtreamChannel.id = 99;
     xtreamChannel.streamUrl = QStringLiteral("https://xtream.example/live/bob/pw/99.m3u8");
@@ -1226,11 +1402,11 @@ void CoreTests::catchupUrlResolverBuildsXtreamAndM3uTargets()
     const auto startMinuteEpoch = static_cast<qint64>(std::floor(static_cast<double>(liveProgram.start.toUTC().toSecsSinceEpoch()) / 60.0));
     const auto expectedLowerBound = std::max<qint64>(
         1,
-        static_cast<qint64>(std::floor(static_cast<double>(beforeResolve.addSecs(-65).toSecsSinceEpoch()) / 60.0))
+        static_cast<qint64>(std::floor(static_cast<double>(beforeResolve.addSecs(-180).toSecsSinceEpoch()) / 60.0))
             - startMinuteEpoch);
     const auto expectedUpperBound = std::max<qint64>(
         1,
-        static_cast<qint64>(std::floor(static_cast<double>(afterResolve.addSecs(-65).toSecsSinceEpoch()) / 60.0))
+        static_cast<qint64>(std::floor(static_cast<double>(afterResolve.addSecs(-180).toSecsSinceEpoch()) / 60.0))
             - startMinuteEpoch);
     QVERIFY(observedDurationMinutes >= expectedLowerBound);
     QVERIFY(observedDurationMinutes <= expectedUpperBound);

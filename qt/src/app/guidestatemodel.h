@@ -61,6 +61,7 @@ private:
     struct ProgramsUpdate
     {
         std::optional<Core::EpgEntry> selectedProgram;
+        std::optional<Core::EpgEntry> preferredProgram;
         QList<Core::EpgEntry> channelPrograms;
         QVariantMap selectedProgramVariant;
         QVariantList channelProgramsVariant;

@@ -28,17 +28,18 @@ class ProfilesModel;
 class ShellController;
 class SettingsController;
 class TimeshiftController;
+struct CatchupProgressSample;
 
 class AppController final : public QObject
 {
     Q_OBJECT
+    Q_PROPERTY(QStringList groupAutoEnableNoticeProfileIds READ groupAutoEnableNoticeProfileIds NOTIFY groupAutoEnableNoticesChanged)
     Q_PROPERTY(QString statusText READ statusText NOTIFY statusTextChanged)
     Q_PROPERTY(bool isBusy READ isBusy NOTIFY isBusyChanged)
     Q_PROPERTY(QString activeProfileId READ activeProfileId NOTIFY activeProfileIdChanged)
     Q_PROPERTY(QString epgLastRefreshText READ epgLastRefreshText NOTIFY epgRefreshStateChanged)
     Q_PROPERTY(bool epgRefreshInProgress READ epgRefreshInProgress NOTIFY epgRefreshStateChanged)
     Q_PROPERTY(bool epgCacheBootstrapPending READ epgCacheBootstrapPending NOTIFY epgRefreshStateChanged)
-    Q_PROPERTY(int catchupMinElapsedSeconds READ catchupMinElapsedSeconds CONSTANT)
 
 public:
     ~AppController() override;
@@ -62,32 +63,37 @@ public:
         Core::EpgService *epgService,
         QObject *parent = nullptr);
 
+    QStringList groupAutoEnableNoticeProfileIds() const;
+    Q_INVOKABLE void dismissGroupAutoEnableNotice(const QString &profileId);
     QString statusText() const;
     bool isBusy() const;
     QString activeProfileId() const;
     QString epgLastRefreshText() const;
     bool epgRefreshInProgress() const;
     bool epgCacheBootstrapPending() const;
-    int catchupMinElapsedSeconds() const;
 
 public slots:
     void initialize();
+    void savePlaybackForApplicationExit();
     void loadProfile(const QString &profileId);
     void refreshActiveProfile();
     Q_INVOKABLE void refreshActiveEpg();
     Q_INVOKABLE bool activatePreviousChannel();
     Q_INVOKABLE void playCatchup(const QVariantMap &channel, const QVariantMap &program);
+    Q_INVOKABLE void resumeCatchup(const QVariantMap &channel, const QVariantMap &program);
     Q_INVOKABLE void playCatchupAtOffset(const QVariantMap &channel, const QVariantMap &program, double targetSeconds);
     Q_INVOKABLE QVariantMap catchupActionState(const QVariantMap &channel, const QVariantMap &program) const;
     void dumpDebugReport();
     Q_INVOKABLE QString debugSummary() const;
 
 signals:
+    void groupAutoEnableNoticesChanged();
     void statusTextChanged();
     void isBusyChanged();
     void activeProfileIdChanged();
     void epgRefreshStateChanged();
     void profileLoadFinished(const QString &profileId, bool ok);
+    void catchupProgressChanged();
 
 private:
     QString buildDebugSummary() const;
@@ -113,6 +119,15 @@ private:
     bool syncProfileGroupPreferences(const QUuid &profileId, const QList<Core::Channel> &channels);
     void beginWatchTrackingForCurrentChannel();
     void flushTrackedWatchSeconds();
+    bool restoreStartupCatchup(const Core::Channel &channel);
+    std::optional<Core::EpgEntry> catchupProgramAt(const Core::Channel &channel, const QDateTime &time,
+        const std::optional<Core::EpgEntry> &validatedProgram = std::nullopt) const;
+    void playCatchupAtOffsetInternal(const QVariantMap &channel, const QVariantMap &program,
+        double targetSeconds);
+    void connectPlaybackSession(PlayerController *controller);
+    void recordCatchupProgress(const CatchupProgressSample &sample, PlayerController *source = nullptr);
+    void flushCatchupProgress();
+    void pruneCatchupProgress();
     void scheduleGuideGridRebuild(bool asyncRequested);
     void rebuildGuideGrid();
     void rebuildGuideGridAsync();
@@ -142,12 +157,22 @@ private:
     Core::EpgCacheService m_epgCacheService;
     Core::IconCacheService m_iconCacheService;
     QList<Core::Channel> m_loadedChannels;
+    QStringList m_groupAutoEnableNoticeProfileIds;
     QString m_statusText { QStringLiteral("Ready") };
     bool m_isBusy { false };
     QTimer m_epgUiTimer;
     QTimer m_refreshTimer;
     QTimer m_guideRebuildTimer;
     QTimer m_watchStatsFlushTimer;
+    QTimer m_catchupProgressFlushTimer;
+    QJsonObject m_startupCatchupSession;
+    QJsonObject m_observedCatchupSession;
+    std::optional<Core::EpgEntry> m_restoredCatchupProgram;
+    QString m_restoredCatchupProgramKey;
+    QHash<QString, Core::CatchupProgress> m_catchupProgress;
+    QSet<QString> m_dirtyCatchupProgress;
+    QHash<PlayerController *, QString> m_catchupProgressSessionKeys;
+    QHash<PlayerController *, QString> m_catchupProgressProgrammeKeys;
     QTimer m_selectedNowNextRefreshTimer;
     QTimer m_selectedGuideRefreshTimer;
     bool m_guideRebuildAsyncRequested { false };

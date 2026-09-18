@@ -17,6 +17,7 @@ qt_add_executable(OKILTVQtCoreTests
     ../src/core/models.cpp
     ../src/core/models_json.cpp
     ../src/core/models_variant.cpp
+    ../src/core/sourcegrouppreferences.h
     ../src/core/models.h
     ../src/core/networkaccess.cpp
     ../src/core/networkaccess.h
@@ -100,6 +101,7 @@ qt_add_executable(OKILTVQtAppTests
     ../src/core/models.cpp
     ../src/core/models_json.cpp
     ../src/core/models_variant.cpp
+    ../src/core/sourcegrouppreferences.h
     ../src/core/models.h
     ../src/core/networkaccess.cpp
     ../src/core/networkaccess.h
@@ -117,6 +119,12 @@ qt_add_executable(OKILTVQtAppTests
     ../src/core/xtreamservice.h
     ../src/player/catchupstreamsession.cpp
     ../src/player/catchupstreamsession.h
+    ../src/player/catchuptsjoiner.cpp
+    ../src/player/catchuptsjoiner.h
+    ../src/player/mpegtstimestampnormalizer.cpp
+    ../src/player/mpegtstimestampnormalizer.h
+    ../src/player/livebuffertuner.cpp
+    ../src/player/livebuffertuner.h
     ../src/player/mpvplayer.cpp
     ../src/player/mpvplayer.h
     ../src/player/mpvvideoitem.cpp
@@ -143,3 +151,34 @@ set_tests_properties(
     PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;OKILTV_HEADLESS_TEST=1"
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+qt_add_executable(OKILTVQtCatchupTests
+    tst_catchup_stream.cpp
+    ../src/player/catchupstreamsession.cpp
+    ../src/player/catchuptsjoiner.cpp
+    ../src/player/mpegtstimestampnormalizer.cpp
+    ../src/core/catchupurlresolver.cpp
+    ../src/core/models.cpp
+    ../src/core/debuglogger.cpp
+    ../src/core/redaction.cpp
+    ../src/core/appdatapaths.cpp
+)
+target_include_directories(OKILTVQtCatchupTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(OKILTVQtCatchupTests PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent Qt6::Test)
+add_test(NAME OKILTVQtCatchupTests COMMAND OKILTVQtCatchupTests)
+
+# Component-level interaction tests run without provider credentials or media playback.
+# Cross builds cannot execute the target SDK's QML runner on the host.
+if (NOT CMAKE_CROSSCOMPILING)
+    find_program(OKILTV_QMLTESTRUNNER qmltestrunner HINTS "${Qt6_DIR}/../../../bin")
+    if (OKILTV_QMLTESTRUNNER)
+        add_test(NAME OKILTVQtEpgTimelineTests
+            COMMAND "${OKILTV_QMLTESTRUNNER}" -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_epgtimeline.qml")
+        add_test(NAME OKILTVQtSourceGroupsListTests
+            COMMAND "${OKILTV_QMLTESTRUNNER}" -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_sourcegroupslist.qml")
+        set_tests_properties(OKILTVQtSourceGroupsListTests PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+        set_tests_properties(OKILTVQtEpgTimelineTests PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+    endif ()
+endif ()

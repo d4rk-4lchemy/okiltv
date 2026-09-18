@@ -186,6 +186,18 @@ void UiTestBridge::setWindow(QObject *windowObject)
     }
 }
 
+void UiTestBridge::setPlayerController(PlayerController *controller)
+{
+    if (m_playerController != nullptr) {
+        disconnect(m_playerController, nullptr, this, nullptr);
+    }
+    m_playerController = controller;
+    if (m_enabled && m_playerController != nullptr) {
+        connect(m_playerController, &PlayerController::currentPlaybackUrlChanged, this, &UiTestBridge::observePlaybackUrl);
+        observePlaybackUrl();
+    }
+}
+
 void UiTestBridge::attachControllers(
     AppController *appController,
     ShellController *shellController,
@@ -202,7 +214,7 @@ void UiTestBridge::attachControllers(
     m_channelListModel = channelListModel;
     m_guideStateModel = guideStateModel;
     m_playbackNowNextModel = playbackNowNextModel;
-    m_playerController = playerController;
+    setPlayerController(playerController);
     m_timeshiftController = timeshiftController;
     m_settingsController = settingsController;
     m_captureController = captureController;
@@ -211,9 +223,6 @@ void UiTestBridge::attachControllers(
         return;
     }
 
-    if (m_playerController != nullptr) {
-        connect(m_playerController, &PlayerController::currentPlaybackUrlChanged, this, &UiTestBridge::observePlaybackUrl);
-    }
     if (m_timeshiftController != nullptr) {
         connect(
             m_timeshiftController,

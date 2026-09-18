@@ -1,6 +1,7 @@
 #include "profilesmodel.h"
 
 #include <QDateTime>
+#include <algorithm>
 
 namespace OKILTV::App {
 
@@ -70,14 +71,13 @@ QVariantMap ProfilesModel::get(const int row) const
     if (row < 0 || row >= summaries.size()) {
         return {};
     }
-    const auto summary = summaries.at(row);
-    auto result = toVariantMap(summary);
+    const auto &summary = summaries.at(row);
     const auto detail = m_settings->profileDetailById(summary.id);
-    if (detail.has_value()) {
-        const auto detailMap = toVariantMap(detail.value());
-        for (auto it = detailMap.cbegin(); it != detailMap.cend(); ++it) {
-            result.insert(it.key(), it.value());
-        }
+    auto result = detail.has_value() ? toVariantMap(detail.value()) : QVariantMap {};
+    // Runtime summary fields take precedence over the persisted profile detail.
+    const auto summaryMap = toVariantMap(summary);
+    for (auto it = summaryMap.cbegin(); it != summaryMap.cend(); ++it) {
+        result.insert(it.key(), it.value());
     }
     return result;
 }
@@ -88,7 +88,8 @@ QString ProfilesModel::addXtreamProfile(
     const QString &username,
     const QString &password,
     const QString &xmltvUrl,
-    const int autoRefreshIntervalHours)
+    const int autoRefreshIntervalHours,
+    const int catchupSafetyMinutes)
 {
     ServerProfile profile;
     profile.name = name.trimmed();
@@ -96,6 +97,7 @@ QString ProfilesModel::addXtreamProfile(
     profile.xtreamBaseUrl = baseUrl.trimmed();
     profile.xtreamUsername = username.trimmed();
     profile.xtreamPassword = password.trimmed();
+    profile.catchupSafetyMinutes = std::clamp(catchupSafetyMinutes, 3, 30);
     profile.xmltvUrl = xmltvUrl.trimmed();
     profile.autoRefreshIntervalHours = normalizeAutoRefreshIntervalHours(autoRefreshIntervalHours);
 
@@ -188,6 +190,9 @@ bool ProfilesModel::replaceProfile(const QString &profileId, const QVariantMap &
     }
     if (changes.contains(QStringLiteral("xtreamServerTimezone"))) {
         profile.xtreamServerTimezone = changes.value(QStringLiteral("xtreamServerTimezone")).toString().trimmed();
+    }
+    if (changes.contains(QStringLiteral("catchupSafetyMinutes"))) {
+        profile.catchupSafetyMinutes = std::clamp(changes.value(QStringLiteral("catchupSafetyMinutes")).toInt(), 3, 30);
     }
     if (changes.contains(QStringLiteral("m3UUrl"))) {
         profile.m3uUrl = changes.value(QStringLiteral("m3UUrl")).toString().trimmed();

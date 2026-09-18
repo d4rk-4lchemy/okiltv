@@ -133,6 +133,23 @@ void SettingsController::setOverlayAutoHide(const bool value)
     emitDirtyChangedIfNeeded(wasDirty);
 }
 
+int SettingsController::overlayInactivitySeconds() const
+{
+    return m_overlayInactivitySeconds;
+}
+
+void SettingsController::setOverlayInactivitySeconds(const int value)
+{
+    const auto normalized = std::clamp(value, 1, 3600);
+    if (m_overlayInactivitySeconds == normalized) {
+        return;
+    }
+    const auto wasDirty = dirty();
+    m_overlayInactivitySeconds = normalized;
+    emit settingsChanged();
+    emitDirtyChangedIfNeeded(wasDirty);
+}
+
 int SettingsController::overlayAutoHideSeconds() const
 {
     return m_overlayAutoHideSeconds;
@@ -243,6 +260,39 @@ void SettingsController::setDeinterlaceEnabled(const bool value)
         return;
     }
     m_deinterlaceEnabled = value;
+    emit settingsChanged();
+    emitDirtyChangedIfNeeded(wasDirty);
+}
+
+QString SettingsController::picturePreset() const
+{
+    return m_picturePreset;
+}
+
+void SettingsController::setPicturePreset(const QString &value)
+{
+    const auto normalized = Core::normalizePlayerPicturePreset(value);
+    if (m_picturePreset == normalized) {
+        return;
+    }
+    const auto wasDirty = dirty();
+    m_picturePreset = normalized;
+    emit settingsChanged();
+    emitDirtyChangedIfNeeded(wasDirty);
+}
+
+bool SettingsController::imageSmoothingEnabled() const
+{
+    return m_imageSmoothingEnabled;
+}
+
+void SettingsController::setImageSmoothingEnabled(const bool value)
+{
+    const auto wasDirty = dirty();
+    if (m_imageSmoothingEnabled == value) {
+        return;
+    }
+    m_imageSmoothingEnabled = value;
     emit settingsChanged();
     emitDirtyChangedIfNeeded(wasDirty);
 }
@@ -602,6 +652,7 @@ bool SettingsController::dirty() const
         || m_showOnTopModeIndicator != settings.showOnTopModeIndicator
         || m_preventDisplaySleep != settings.preventDisplaySleep
         || m_guidePreviewEnabled != settings.guidePreviewEnabled
+        || m_overlayInactivitySeconds != settings.overlayInactivitySeconds
         || m_overlayAutoHide != settings.overlayAutoHide
         || normalizedOverlayAutoHideSecondsDraft() != settings.overlayAutoHideSeconds
         || normalizedRefreshIntervalDraft() != settings.refreshIntervalMinutes
@@ -610,6 +661,8 @@ bool SettingsController::dirty() const
         || normalizedLookAheadDraft() != settings.epgLookAheadHours
         || differs(normalizedWaitForDataStreamDraft(), settings.playerWaitForStreamSeconds)
         || m_deinterlaceEnabled != settings.playerDeinterlaceEnabled
+        || m_picturePreset != settings.playerPicturePreset
+        || m_imageSmoothingEnabled != settings.playerImageSmoothingEnabled
         || differs(normalizedBufferSizeDraft(), settings.playerBufferSeconds)
         || m_playerUserAgent.trimmed() != settings.playerUserAgent.trimmed()
         || timeshiftEnabled() != effectiveSettingsTimeshiftEnabled
@@ -642,12 +695,15 @@ void SettingsController::reload()
     m_guidePreviewEnabled = settings.guidePreviewEnabled;
     m_overlayAutoHide = settings.overlayAutoHide;
     m_overlayAutoHideSeconds = settings.overlayAutoHideSeconds;
+    m_overlayInactivitySeconds = settings.overlayInactivitySeconds;
     m_refreshIntervalMinutes = settings.refreshIntervalMinutes;
     m_autoRefreshEpg = settings.autoRefreshEpg;
     m_guidePastHours = settings.guidePastHours;
     m_epgLookAheadHours = settings.epgLookAheadHours;
     m_waitForDataStreamSeconds = settings.playerWaitForStreamSeconds;
     m_deinterlaceEnabled = settings.playerDeinterlaceEnabled;
+    m_imageSmoothingEnabled = settings.playerImageSmoothingEnabled;
+    m_picturePreset = Core::normalizePlayerPicturePreset(settings.playerPicturePreset);
     m_bufferSizeSeconds = settings.playerBufferSeconds;
     m_playerUserAgent = settings.playerUserAgent.trimmed();
     m_timeshiftEnabled = settings.timeshiftEnabled;
@@ -682,6 +738,7 @@ void SettingsController::save()
     settings.showOnTopModeIndicator = m_showOnTopModeIndicator;
     settings.preventDisplaySleep = m_preventDisplaySleep;
     settings.guidePreviewEnabled = m_guidePreviewEnabled;
+    settings.overlayInactivitySeconds = m_overlayInactivitySeconds;
     settings.overlayAutoHide = m_overlayAutoHide;
     settings.overlayAutoHideSeconds = normalizedOverlayAutoHideSecondsDraft();
     settings.refreshIntervalMinutes = normalizedRefreshIntervalDraft();
@@ -690,6 +747,8 @@ void SettingsController::save()
     settings.epgLookAheadHours = normalizedLookAheadDraft();
     settings.playerWaitForStreamSeconds = normalizedWaitForDataStreamDraft();
     settings.playerDeinterlaceEnabled = m_deinterlaceEnabled;
+    settings.playerImageSmoothingEnabled = m_imageSmoothingEnabled;
+    settings.playerPicturePreset = m_picturePreset;
     settings.playerBufferSeconds = normalizedBufferSizeDraft();
     settings.playerUserAgent = m_playerUserAgent.trimmed();
     settings.timeshiftEnabled = timeshiftEnabled();
@@ -716,11 +775,14 @@ void SettingsController::save()
     m_showOnTopModeIndicator = settings.showOnTopModeIndicator;
     m_preventDisplaySleep = settings.preventDisplaySleep;
     m_overlayAutoHideSeconds = settings.overlayAutoHideSeconds;
+    m_overlayInactivitySeconds = settings.overlayInactivitySeconds;
     m_refreshIntervalMinutes = settings.refreshIntervalMinutes;
     m_guidePastHours = settings.guidePastHours;
     m_epgLookAheadHours = settings.epgLookAheadHours;
     m_waitForDataStreamSeconds = settings.playerWaitForStreamSeconds;
     m_deinterlaceEnabled = settings.playerDeinterlaceEnabled;
+    m_imageSmoothingEnabled = settings.playerImageSmoothingEnabled;
+    m_picturePreset = Core::normalizePlayerPicturePreset(settings.playerPicturePreset);
     m_bufferSizeSeconds = settings.playerBufferSeconds;
     m_playerUserAgent = settings.playerUserAgent.trimmed();
     m_timeshiftEnabled = settings.timeshiftEnabled;
@@ -752,7 +814,9 @@ void SettingsController::save()
         settings.playerDeinterlaceEnabled,
         settings.playerBufferSeconds,
         settings.playerUserAgent,
-        remuxRecordingsToMkv());
+        remuxRecordingsToMkv(),
+        settings.playerImageSmoothingEnabled,
+        settings.playerPicturePreset);
     m_multiViewController->applySettings();
     m_profilesModel->reload();
     emitDirtyChangedIfNeeded(wasDirty);

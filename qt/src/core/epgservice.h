@@ -22,6 +22,8 @@ public:
     {
         QHash<QString, QList<EpgEntry>> index;
         QHash<QString, QDateTime> maxStopByChannelId;
+        // Monotonic prefix maxima allow range lookup even with overlapping programmes.
+        QHash<QString, QList<QDateTime>> prefixMaxStopsByChannelId;
         QList<EpgEntry> allEntries;
         int totalEntries { 0 };
     };
@@ -38,7 +40,7 @@ public:
 
     std::optional<EpgEntry> currentProgram(const QString &tvgId) const;
     std::optional<EpgEntry> nextProgram(const QString &tvgId) const;
-    QList<EpgEntry> programsInRange(const QString &tvgId, const QDateTime &from, const QDateTime &to) const;
+    QList<EpgEntry> programsInRange(const QString &tvgId, const QDateTime &from, const QDateTime &to, int limit = -1) const;
     QDateTime channelMaxStop(const QString &tvgId) const;
     QList<EpgEntry> allEntries() const;
 

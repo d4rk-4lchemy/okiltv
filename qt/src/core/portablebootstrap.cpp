@@ -112,4 +112,13 @@ QString PortableBootstrap::dataRootOverrideError(const QString &path)
     return {};
 }
 
+QString PortableBootstrap::defaultDataRootForBootstrap(const QString &bootstrapPath)
+{
+    if (bootstrapPath.trimmed().isEmpty()) {
+        return {};
+    }
+
+    return QDir::cleanPath(QFileInfo(bootstrapPath).absoluteDir().filePath(QStringLiteral("data")));
+}
+
 } // namespace OKILTV::Core

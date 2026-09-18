@@ -223,6 +223,7 @@ QJsonObject toJson(const ServerProfile &profile)
     object.insert(QStringLiteral("xtreamUsername"), profile.xtreamUsername);
     object.insert(QStringLiteral("xtreamPassword"), profile.xtreamPassword);
     object.insert(QStringLiteral("xtreamServerTimezone"), profile.xtreamServerTimezone);
+    object.insert(QStringLiteral("catchupSafetyMinutes"), std::clamp(profile.catchupSafetyMinutes, 3, 30));
     object.insert(QStringLiteral("m3UUrl"), profile.m3uUrl);
     object.insert(QStringLiteral("m3UFilePath"), profile.m3uFilePath);
     object.insert(QStringLiteral("xmltvUrl"), profile.xmltvUrl);
@@ -248,6 +249,7 @@ ServerProfile serverProfileFromJson(const QJsonObject &object)
     profile.xtreamUsername = object.value(QStringLiteral("xtreamUsername")).toString();
     profile.xtreamPassword = object.value(QStringLiteral("xtreamPassword")).toString();
     profile.xtreamServerTimezone = object.value(QStringLiteral("xtreamServerTimezone")).toString().trimmed();
+    profile.catchupSafetyMinutes = std::clamp(object.value(QStringLiteral("catchupSafetyMinutes")).toInt(3), 3, 30);
     profile.m3uUrl = object.value(QStringLiteral("m3UUrl")).toString();
     profile.m3uFilePath = object.value(QStringLiteral("m3UFilePath")).toString();
     profile.xmltvUrl = object.value(QStringLiteral("xmltvUrl")).toString();
@@ -315,6 +317,7 @@ QJsonObject toJson(const AppSettings &settings)
     object.insert(QStringLiteral("guidePreviewEnabled"), settings.guidePreviewEnabled);
     object.insert(QStringLiteral("overlayAutoHide"), settings.overlayAutoHide);
     object.insert(QStringLiteral("overlayAutoHideSeconds"), settings.overlayAutoHideSeconds);
+    object.insert(QStringLiteral("overlayInactivitySeconds"), settings.overlayInactivitySeconds);
     object.insert(QStringLiteral("guidePastHours"), normalizeGuideHours(settings.guidePastHours));
     object.insert(QStringLiteral("epgLookAheadHours"), normalizeGuideHours(settings.epgLookAheadHours));
     object.insert(QStringLiteral("autoRefreshEpg"), settings.autoRefreshEpg);
@@ -323,6 +326,8 @@ QJsonObject toJson(const AppSettings &settings)
         QStringLiteral("playerWaitForStreamSeconds"),
         normalizePlayerWaitForStreamSeconds(settings.playerWaitForStreamSeconds));
     object.insert(QStringLiteral("playerDeinterlaceEnabled"), settings.playerDeinterlaceEnabled);
+    object.insert(QStringLiteral("playerImageSmoothingEnabled"), settings.playerImageSmoothingEnabled);
+    object.insert(QStringLiteral("playerPicturePreset"), normalizePlayerPicturePreset(settings.playerPicturePreset));
     object.insert(
         QStringLiteral("playerBufferSeconds"),
         normalizePlayerBufferSeconds(settings.playerBufferSeconds));
@@ -364,6 +369,7 @@ QJsonObject toJson(const AppSettings &settings)
         dvrSchedules.push_back(dvrScheduleEntryToJson(entry));
     }
     object.insert(QStringLiteral("dvrSchedules"), dvrSchedules);
+    object.insert(QStringLiteral("lastCatchupSession"), settings.lastCatchupSession);
     object.insert(QStringLiteral("lastWatchedChannelId"), intMapToJson(settings.lastWatchedChannelId));
     object.insert(
         QStringLiteral("favoriteChannelIdsByProfile"),
@@ -405,6 +411,8 @@ AppSettings appSettingsFromJson(const QJsonObject &object)
         object.value(QStringLiteral("overlayAutoHide")).toBool(settings.overlayAutoHide);
     settings.overlayAutoHideSeconds =
         std::max(1, object.value(QStringLiteral("overlayAutoHideSeconds")).toInt(settings.overlayAutoHideSeconds));
+    settings.overlayInactivitySeconds =
+        std::clamp(object.value(QStringLiteral("overlayInactivitySeconds")).toInt(settings.overlayInactivitySeconds), 1, 3600);
     settings.guidePastHours =
         normalizeGuideHours(object.value(QStringLiteral("guidePastHours")).toInt(settings.guidePastHours));
     settings.epgLookAheadHours =
@@ -415,6 +423,9 @@ AppSettings appSettingsFromJson(const QJsonObject &object)
         object.value(QStringLiteral("refreshIntervalMinutes")).toInt(settings.refreshIntervalMinutes);
     settings.playerWaitForStreamSeconds = normalizePlayerWaitForStreamSeconds(
         object.value(QStringLiteral("playerWaitForStreamSeconds")).toDouble(settings.playerWaitForStreamSeconds));
+    settings.playerPicturePreset = normalizePlayerPicturePreset(object.value(QStringLiteral("playerPicturePreset")).toString());
+    settings.playerImageSmoothingEnabled = object.value(QStringLiteral("playerImageSmoothingEnabled"))
+                                              .toBool(settings.playerImageSmoothingEnabled);
     settings.playerDeinterlaceEnabled = object.value(QStringLiteral("playerDeinterlaceEnabled"))
                                             .toBool(settings.playerDeinterlaceEnabled);
     settings.playerBufferSeconds = normalizePlayerBufferSeconds(
@@ -478,6 +489,7 @@ AppSettings appSettingsFromJson(const QJsonObject &object)
         }
         settings.dvrSchedules.push_back(entry);
     }
+    settings.lastCatchupSession = object.value(QStringLiteral("lastCatchupSession")).toObject();
     settings.lastWatchedChannelId =
         intMapFromJson(object.value(QStringLiteral("lastWatchedChannelId")).toObject());
     settings.favoriteChannelIdsByProfile = intListMapFromJson(

@@ -1,4 +1,5 @@
 #include "sourcegroupsmodel.h"
+#include "../core/sourcegrouppreferences.h"
 
 #include <QtConcurrent>
 
@@ -11,7 +12,6 @@ using namespace Core;
 
 namespace {
 
-constexpr int kNewSourceAutoSelectThreshold = 20;
 constexpr qint64 kFavouritesEligibleWatchSeconds = static_cast<qint64>(6) * 60 * 60;
 constexpr auto kFavouritesGroupId = "__favourites__";
 
@@ -27,7 +27,6 @@ struct ReloadGroup
     QString id;
     QString name;
     int count { 0 };
-    bool selected { false };
 };
 
 struct ReloadResult
@@ -35,8 +34,6 @@ struct ReloadResult
     QString profileId;
     QList<ReloadGroup> groups;
     bool hideUnchecked { false };
-    bool persistGeneratedDefaults { false };
-    ReloadState generatedState;
     QString errorText;
 };
 
@@ -87,47 +84,17 @@ ReloadState buildEffectiveState(
     const std::optional<ReloadState> &draftState,
     bool *settingsChanged)
 {
-    ReloadState effectiveState = persistedState;
+    const auto reconciled = reconcileSourceGroups(discoveredIds, { persistedState.hiddenGroups, persistedState.groupOrder });
+    ReloadState effectiveState { reconciled.hiddenGroups, reconciled.groupOrder, persistedState.hideUnchecked };
+    if (settingsChanged != nullptr) {
+        *settingsChanged = persistedState.hiddenGroups != effectiveState.hiddenGroups
+            || persistedState.groupOrder != effectiveState.groupOrder;
+    }
     if (draftState.has_value()) {
-        return draftState.value();
-    }
-
-    const auto favouritesGroupId = QString::fromUtf8(kFavouritesGroupId);
-    const auto hasExistingPreferences = !persistedState.hiddenGroups.isEmpty() || !persistedState.groupOrder.isEmpty();
-    if (!hasExistingPreferences && !discoveredIds.isEmpty()) {
-        effectiveState.groupOrder = discoveredIds;
-        effectiveState.hiddenGroups = discoveredIds.size() > kNewSourceAutoSelectThreshold ? discoveredIds : QStringList {};
-        effectiveState.hiddenGroups.removeAll(favouritesGroupId);
-        if (settingsChanged != nullptr) {
-            *settingsChanged = true;
-        }
-        return effectiveState;
-    }
-
-    for (const auto &groupId : discoveredIds) {
-        const auto knownGroup =
-            effectiveState.hiddenGroups.contains(groupId) || effectiveState.groupOrder.contains(groupId);
-        if (!knownGroup) {
-            if (groupId != favouritesGroupId) {
-                effectiveState.hiddenGroups.push_back(groupId);
-            }
-            if (settingsChanged != nullptr) {
-                *settingsChanged = true;
-            }
-        }
-        if (!effectiveState.groupOrder.contains(groupId) && groupId != favouritesGroupId) {
-            effectiveState.groupOrder.push_back(groupId);
-            if (settingsChanged != nullptr) {
-                *settingsChanged = true;
-            }
-        }
-    }
-
-    if (discoveredIds.contains(favouritesGroupId) && !effectiveState.groupOrder.contains(favouritesGroupId)) {
-        effectiveState.groupOrder.prepend(favouritesGroupId);
-        if (settingsChanged != nullptr) {
-            *settingsChanged = true;
-        }
+        const auto &draft = draftState.value();
+        effectiveState.hiddenGroups = mergeHiddenGroups({ draft.hiddenGroups, effectiveState.hiddenGroups, draft.groupOrder });
+        effectiveState.groupOrder = mergeOrder(draft.groupOrder, effectiveState.groupOrder);
+        effectiveState.hideUnchecked = draft.hideUnchecked;
     }
 
     return effectiveState;
@@ -325,34 +292,23 @@ void SourceGroupsModel::reload()
     }
 
     const auto profileId = m_profileId;
-    const auto hiddenGroupsByProfile = m_settings->current().hiddenGroupsByProfile;
-    const auto groupOrderByProfile = m_settings->current().groupOrderByProfile;
-    const auto hideUncheckedByProfile = m_settings->current().hideUncheckedGroupsByProfile;
-    const auto favouriteChannelIdsByProfile = m_settings->current().favoriteChannelIdsByProfile;
-    const auto draftState = m_draftsByProfile.contains(profileId)
-        ? std::optional<ReloadState>(ReloadState {
-              m_draftsByProfile.value(profileId).hiddenGroups,
-              m_draftsByProfile.value(profileId).groupOrder,
-              m_draftsByProfile.value(profileId).hideUnchecked })
-        : std::nullopt;
+    const auto favouriteChannelIds = m_settings->current().favoriteChannelIdsByProfile.value(profileId);
+    const auto favouritesId = QString::fromUtf8(kFavouritesGroupId);
+    const auto persisted = persistedDraftState(profileId);
+    const auto draft = m_draftsByProfile.value(profileId);
+    const auto retainFavourites = persisted.hiddenGroups.contains(favouritesId) || persisted.groupOrder.contains(favouritesId)
+        || draft.hiddenGroups.contains(favouritesId) || draft.groupOrder.contains(favouritesId);
 
     setLoading(true);
-    m_backgroundTasks.addFuture(QtConcurrent::run([this,
-                                                   generation,
-                                                   profileId,
-                                                   profileUuid,
-                                                   hiddenGroupsByProfile,
-                                                   groupOrderByProfile,
-                                                   hideUncheckedByProfile,
-                                                   favouriteChannelIdsByProfile,
-                                                   draftState]() {
+    m_backgroundTasks.addFuture(QtConcurrent::run([this, generation, profileId, profileUuid,
+                                                  favouriteChannelIds, retainFavourites]() {
         ReloadResult result;
         result.profileId = profileId;
         try {
             const auto channels = m_database->loadChannels(profileUuid);
             const auto watchSecondsByChannelId = m_database->loadWatchSecondsByProfile(profileUuid);
             QSet<int> manualFavouriteChannelIds;
-            for (const auto channelId : favouriteChannelIdsByProfile.value(profileId)) {
+            for (const auto channelId : favouriteChannelIds) {
                 manualFavouriteChannelIds.insert(channelId);
             }
 
@@ -379,29 +335,11 @@ void SourceGroupsModel::reload()
             }
 
             const auto favouritesGroupId = QString::fromUtf8(kFavouritesGroupId);
-            const auto persistedState = ReloadState {
-                hiddenGroupsByProfile.value(profileId),
-                groupOrderByProfile.value(profileId),
-                hideUncheckedByProfile.value(profileId, false)
-            };
-            const auto includeFavourites = !channels.isEmpty()
-                || persistedState.hiddenGroups.contains(favouritesGroupId)
-                || persistedState.groupOrder.contains(favouritesGroupId)
-                || (draftState.has_value()
-                    && (draftState->hiddenGroups.contains(favouritesGroupId)
-                        || draftState->groupOrder.contains(favouritesGroupId)));
-            if (includeFavourites && !discoveredIds.contains(favouritesGroupId)) {
+            if ((!channels.isEmpty() || retainFavourites) && !discoveredIds.contains(favouritesGroupId)) {
                 discoveredIds.prepend(favouritesGroupId);
             }
 
-            auto settingsChanged = false;
-            const auto effectiveState = buildEffectiveState(discoveredIds, persistedState, draftState, &settingsChanged);
-            result.hideUnchecked = effectiveState.hideUnchecked;
-            result.persistGeneratedDefaults = !draftState.has_value() && settingsChanged;
-            result.generatedState = effectiveState;
-
-            const auto orderedIds = mergeOrder(effectiveState.groupOrder, discoveredIds);
-            for (const auto &groupId : orderedIds) {
+            for (const auto &groupId : discoveredIds) {
                 const auto count =
                     groupId == favouritesGroupId ? favouritesCount : countsByGroupId.value(groupId, 0);
                 if (count <= 0 && groupId != favouritesGroupId) {
@@ -413,8 +351,7 @@ void SourceGroupsModel::reload()
                     groupId == favouritesGroupId
                         ? QStringLiteral("Favourites")
                         : categoryNameById.value(groupId, displayNameForCategoryId(groupId)),
-                    count,
-                    !effectiveState.hiddenGroups.contains(groupId)
+                    count
                 });
             }
         } catch (const std::exception &exception) {
@@ -436,19 +373,40 @@ void SourceGroupsModel::reload()
                     return;
                 }
 
-                if (result.persistGeneratedDefaults) {
+                QStringList discoveredIds;
+                QHash<QString, ReloadGroup> groupsById;
+                for (const auto &group : result.groups) {
+                    discoveredIds.push_back(group.id);
+                    groupsById.insert(group.id, group);
+                }
+                const auto persisted = persistedDraftState(result.profileId);
+                const auto draft = m_draftsByProfile.constFind(result.profileId);
+                const auto currentDraft = draft != m_draftsByProfile.cend()
+                    ? std::optional<ReloadState>({ draft->hiddenGroups, draft->groupOrder, draft->hideUnchecked })
+                    : std::nullopt;
+                auto settingsChanged = false;
+                const auto effective = buildEffectiveState(discoveredIds,
+                    { persisted.hiddenGroups, persisted.groupOrder, persisted.hideUnchecked }, currentDraft, &settingsChanged);
+                // Persist discovery independently of the user's unsaved edits.
+                if (settingsChanged) {
+                    const auto generated = reconcileSourceGroups(discoveredIds, { persisted.hiddenGroups, persisted.groupOrder });
                     auto &settings = m_settings->current();
-                    settings.hiddenGroupsByProfile[result.profileId] = result.generatedState.hiddenGroups;
-                    settings.groupOrderByProfile[result.profileId] = result.generatedState.groupOrder;
-                    settings.hideUncheckedGroupsByProfile[result.profileId] = result.generatedState.hideUnchecked;
+                    settings.hiddenGroupsByProfile[result.profileId] = generated.hiddenGroups;
+                    settings.groupOrderByProfile[result.profileId] = generated.groupOrder;
                     m_settings->save();
                 }
-
+                if (currentDraft.has_value()) {
+                    m_draftsByProfile[result.profileId] = { effective.hiddenGroups, effective.groupOrder, effective.hideUnchecked };
+                }
                 QList<GroupEntry> groups;
                 groups.reserve(result.groups.size());
-                for (const auto &group : result.groups) {
-                    groups.push_back(GroupEntry { group.id, group.name, group.count, group.selected });
+                for (const auto &id : effective.groupOrder) {
+                    const auto it = groupsById.constFind(id);
+                    if (it != groupsById.cend()) {
+                        groups.push_back(GroupEntry { id, it->name, it->count, !effective.hiddenGroups.contains(id) });
+                    }
                 }
+                result.hideUnchecked = effective.hideUnchecked;
 
                 const auto hideUncheckedStateChanged = m_hideUnchecked != result.hideUnchecked;
                 beginResetModel();
@@ -705,7 +663,10 @@ bool SourceGroupsModel::updateSelection(const QStringList &groupIds, const bool 
 
     const auto wasDirty = dirty();
     if (m_autoPersist) {
-        m_settings->current().hiddenGroupsByProfile[m_profileId] = currentDraftState().hiddenGroups;
+        auto &settings = m_settings->current();
+        const auto current = currentDraftState();
+        settings.hiddenGroupsByProfile[m_profileId] = mergeHiddenGroups({ current.hiddenGroups,
+            settings.hiddenGroupsByProfile.value(m_profileId), current.groupOrder });
         m_settings->save();
         m_draftsByProfile.remove(m_profileId);
     } else {
@@ -717,6 +678,7 @@ bool SourceGroupsModel::updateSelection(const QStringList &groupIds, const bool 
     }
     rebuildVisibleGroups();
     emit groupsChanged();
+    emit selectionEdited(m_profileId);
     if (wasDirty != dirty()) {
         emit dirtyChanged();
     }

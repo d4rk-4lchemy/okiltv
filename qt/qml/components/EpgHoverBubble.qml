@@ -6,6 +6,7 @@ Item {
     id: control
 
     property var programData: ({})
+    property string noticeText: ""
     property bool hovered: bubbleHover.hovered
     property real maxWidth: 360
 
@@ -84,6 +85,15 @@ Item {
             text: "Episode: " + control.episodeText
             color: Theme.textSecondary
             font.pixelSize: 12
+            wrapMode: Text.Wrap
+        }
+
+        Text {
+            Layout.fillWidth: true
+            visible: control.noticeText.length > 0
+            text: control.noticeText
+            color: Theme.textSecondary
+            font.pixelSize: 11
             wrapMode: Text.Wrap
         }
 

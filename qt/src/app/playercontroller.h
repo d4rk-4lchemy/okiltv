@@ -3,6 +3,7 @@
 #include "../core/models.h"
 #include "../player/catchupstreamsession.h"
 #include "../player/mpvplayer.h"
+#include "../player/livebuffertuner.h"
 
 #include <QObject>
 #include <QElapsedTimer>
@@ -20,6 +21,15 @@
 namespace OKILTV::App {
 
 class TimeshiftController;
+
+struct CatchupProgressSample
+{
+    Core::Channel channel;
+    QDateTime programStart;
+    QDateTime programStop;
+    QDateTime watchedTime;
+    bool endless { false };
+};
 
 class PlayerController final : public QObject
 {
@@ -39,10 +49,13 @@ class PlayerController final : public QObject
     Q_PROPERTY(bool seamlessStandbyPrewarmActive READ seamlessStandbyPrewarmActive NOTIFY seamlessStandbyPrewarmActiveChanged)
     Q_PROPERTY(QString playbackMode READ playbackMode NOTIFY playbackModeChanged)
     Q_PROPERTY(QString catchupProgramLabel READ catchupProgramLabel NOTIFY catchupProgramLabelChanged)
+    Q_PROPERTY(QVariantMap catchupCurrentProgram READ catchupCurrentProgram NOTIFY catchupTimelineChanged)
     Q_PROPERTY(bool catchupTimelineActive READ catchupTimelineActive NOTIFY catchupTimelineChanged)
     Q_PROPERTY(qint64 catchupTimelineStartEpochMs READ catchupTimelineStartEpochMs NOTIFY catchupTimelineChanged)
     Q_PROPERTY(qint64 catchupTimelineAvailableEdgeEpochMs READ catchupTimelineAvailableEdgeEpochMs NOTIFY catchupTimelineChanged)
     Q_PROPERTY(double catchupTimelineAvailableSeconds READ catchupTimelineAvailableSeconds NOTIFY catchupTimelineChanged)
+    Q_PROPERTY(qint64 catchupTimelineEndEpochMs READ catchupTimelineEndEpochMs NOTIFY catchupTimelineChanged)
+    Q_PROPERTY(double catchupTimelineDurationSeconds READ catchupTimelineDurationSeconds NOTIFY catchupTimelineChanged)
     Q_PROPERTY(double catchupTimelinePositionSeconds READ catchupTimelinePositionSeconds NOTIFY catchupTimelineChanged)
     Q_PROPERTY(bool catchupTimelineAtLiveEdge READ catchupTimelineAtLiveEdge NOTIFY catchupTimelineChanged)
     Q_PROPERTY(QString catchupTimelineNoticeText READ catchupTimelineNoticeText NOTIFY catchupTimelineChanged)
@@ -79,6 +92,7 @@ public:
     double volume() const;
     bool muted() const;
     void setVolume(double value);
+    void copyVolumeStateFrom(const PlayerController &other);
     QString positionText() const;
     QString nowPlayingName() const;
     QVariantMap currentChannel() const;
@@ -87,10 +101,13 @@ public:
     bool seamlessStandbyPrewarmActive() const;
     QString playbackMode() const;
     QString catchupProgramLabel() const;
+    QVariantMap catchupCurrentProgram() const;
     bool catchupTimelineActive() const;
     qint64 catchupTimelineStartEpochMs() const;
     qint64 catchupTimelineAvailableEdgeEpochMs() const;
     double catchupTimelineAvailableSeconds() const;
+    qint64 catchupTimelineEndEpochMs() const;
+    double catchupTimelineDurationSeconds() const;
     double catchupTimelinePositionSeconds() const;
     bool catchupTimelineAtLiveEdge() const;
     QString catchupTimelineNoticeText() const;
@@ -159,7 +176,9 @@ public:
         bool deinterlaceEnabled,
         double bufferSizeSeconds,
         const QString &playerUserAgent,
-        bool remuxRecordingsToMkv = true);
+        bool remuxRecordingsToMkv = true,
+        bool imageSmoothingEnabled = false,
+        const QString &picturePreset = QStringLiteral("standard"));
     void playChannel(const Core::Channel &channel);
     void playCatchupChannel(const Core::Channel &channel, const QString &catchupUrl, const QString &programLabel);
     void playCatchupChannel(
@@ -171,7 +190,12 @@ public:
         const QString &canonicalCatchupUrl = {},
         std::optional<double> initialProgramSeekSeconds = std::nullopt,
         std::optional<double> initialStreamBaseOffsetSeconds = std::nullopt,
-        std::optional<double> initialTimelinePositionSeconds = std::nullopt);
+        std::optional<double> initialTimelinePositionSeconds = std::nullopt,
+        int safetySeconds = 180,
+        bool endless = false,
+        std::optional<Core::EpgEntry> program = std::nullopt);
+    std::optional<Core::EpgEntry> validatedCatchupProgramme() const { return m_catchupValidatedProgram; }
+    void updateCatchupProgramme(const std::optional<Core::EpgEntry> &program);
     void playCurrentPlaybackUrl(const QString &url, bool pauseWhenReady = false, const QString &loadfileOptions = {});
     void refreshCurrentChannelMetadata(const Core::Channel &channel);
     void attachSharedPlayback(
@@ -187,6 +211,7 @@ public:
     QString currentPlaybackUrl() const;
     double playbackPositionSeconds() const;
     bool inCatchupMode() const;
+    void checkpointCatchupProgress();
     Q_INVOKABLE void returnToLiveFromCatchup();
 
     const std::optional<Core::Channel> &currentChannelValue() const;
@@ -202,6 +227,7 @@ public slots:
     Q_INVOKABLE void seekTimeshiftToFraction(double fraction);
 
 signals:
+    void catchupPlaybackTimeChanged(const QDateTime &time);
     void isRecordingChanged();
     void isRemuxingChanged();
     void screenshotTaken(const QString &path);
@@ -223,6 +249,8 @@ signals:
     void seamlessStandbyPrewarmActiveChanged();
     void playbackModeChanged();
     void catchupProgramLabelChanged();
+    void catchupProgressObserved(const OKILTV::App::CatchupProgressSample &sample);
+    void catchupProgressFlushRequested();
     void catchupTimelineChanged();
     void timeshiftStateChanged();
     void liveBufferStateChanged();
@@ -231,6 +259,13 @@ signals:
     void playbackError(const QString &message);
 
 private:
+    enum class StartupPolicy
+    {
+        StrictBuffered,
+        FastLive,
+        BestEffort,
+    };
+
     static int reconnectAttemptIntervalMs();
     void ensurePlaybackSignalConnections(Player::MpvPlayer *player);
     void beginDeferredLoadingIndicator();
@@ -242,6 +277,7 @@ private:
     void handleReconnectAttemptTick();
     void failReconnect(const QString &reason);
     void evaluateReconnectRecovery();
+    bool advanceReconnectReserve();
     void schedulePauseStateResync(int retries = 8);
     void stopPauseStateResync();
     void syncIsPlayingFromBackend();
@@ -252,7 +288,11 @@ private:
     void setIsLoading(bool value);
     void setIsBuffering(bool value);
     void setChannelSwitchInProgress(bool value);
+    StartupPolicy startupPolicyForPlaybackRequest(Player::MpvPlayer *activePlayer) const;
+    static QString startupPolicyLabel(StartupPolicy policy);
     void updatePosition();
+    bool evaluateCatchupRebuffering(std::optional<double> cacheSeconds, bool readerEof);
+    void resetCatchupRebuffering(bool resume);
     void setChannelLoadFailed(bool value);
     void startStartupBufferFallbackWatchdog();
     void stopStartupBufferFallbackWatchdog(bool resetTuneState);
@@ -264,6 +304,15 @@ private:
     void resetBitrateAverageWindow();
     void resetAdaptiveSteadyStateBufferingState();
     std::optional<double> updateBitrateAverageBitsPerSecond(std::optional<double> instantaneousBitsPerSecond);
+    void sampleLiveDelivery();
+    void observeLiveDelivery(const Player::MpvPlayer::CacheReadState &readState);
+    bool evaluateLiveReserve();
+    bool advanceLiveReserve(std::optional<double> cacheSeconds,
+                            const std::optional<Player::MpvPlayer::CacheReadState> &readState,
+                            qint64 elapsedMs);
+    bool beginLiveReserve(std::optional<double> cacheSeconds, bool readerIdle);
+    void resetLiveReserve(bool resumePlayback, bool preserveDeliveryObservation = false);
+    double effectiveLiveBufferTargetSeconds() const;
     void maybeRetuneSteadyStateBuffering(std::optional<double> cacheDurationSeconds, double bufferTargetSeconds);
     void maybeRetuneCatchupBuffering(std::optional<double> cacheDurationSeconds);
     void applyActiveCatchupBufferingPolicy(Player::MpvPlayer *player);
@@ -281,6 +330,10 @@ private:
     bool seekCatchupToTimelinePosition(double targetSeconds);
     bool shouldReloadCatchupForSeek(double targetSeconds) const;
     bool reloadCatchupForTimelineSeek(double targetSeconds);
+    bool advanceCatchupRecoveryAlignment();
+    bool recoverFailedContinuousCatchup();
+    bool advanceCatchupMediaPeriod();
+    bool recoverCatchupAtAutomaticEof(bool readerEof);
     bool shouldExtendCatchupRollingWindowPredictively(double currentStreamSeconds) const;
     bool extendCatchupRollingWindow(const QString &reason, bool fromPredictiveTrigger);
     bool seamlessCatchupRollingEnabled() const;
@@ -319,7 +372,8 @@ private:
         bool playbackAdvanced,
         std::optional<bool> framePtsAdvanced);
     bool hardRestoreCatchupAtCurrentTimelinePoint(const QString &reason);
-    QString regeneratedXtreamCatchupUrl(double targetSeconds, double *streamBaseOffsetSeconds = nullptr) const;
+    bool canRegenerateCatchupUrl() const;
+    QString regeneratedCatchupUrl(double targetSeconds, double *streamBaseOffsetSeconds = nullptr) const;
     void clearLiveBufferState();
     void syncLiveBufferState();
     bool seekLiveBufferToPosition(double targetSeconds);
@@ -334,6 +388,13 @@ private:
     QPointer<Player::MpvPlayer> m_sharedPlaybackPlayer;
     bool m_sharedPlaybackProtected { false };
     QTimer m_positionTimer;
+    QTimer m_liveDeliveryTimer;
+    QElapsedTimer m_liveDeliveryClock;
+    Player::LiveBufferTuner m_liveBufferTuner;
+    QElapsedTimer m_liveReserveTimer;
+    QElapsedTimer m_liveReserveRetryTimer;
+    bool m_liveReservePending { false };
+    double m_liveReserveTargetSeconds { 0.0 };
     QTimer m_pauseStateSyncTimer;
     QTimer m_loadingIndicatorDelayTimer;
     QTimer m_startupBufferFallbackTimer;
@@ -356,6 +417,8 @@ private:
     bool m_isPlaying { false };
     bool m_isLoading { false };
     bool m_loadingIndicatorPending { false };
+    bool m_loadingPlaybackFileLoaded { false };
+    bool m_loadingPlaybackReady { false };
     bool m_isBuffering { false };
     bool m_channelSwitchInProgress { false };
     bool m_channelLoadFailed { false };
@@ -368,6 +431,13 @@ private:
     double m_lastPlaybackPositionSeconds { -1.0 };
     int m_stalledPlaybackTickCount { 0 };
     int m_pauseStateSyncRetriesRemaining { 0 };
+    bool m_reconnectReservePending { false };
+    bool m_reconnectReserveReady { false };
+    bool m_reconnectFileLoaded { false };
+    double m_reconnectReserveTargetSeconds { 0.0 };
+    double m_reconnectReserveHighWaterSeconds { 0.0 };
+    QElapsedTimer m_reconnectReserveProgressTimer;
+    QElapsedTimer m_reconnectTotalAttemptTimer;
     bool m_reconnectActive { false };
     bool m_reconnectAttemptInFlight { false };
     bool m_reconnectStabilizing { false };
@@ -380,6 +450,8 @@ private:
     int m_videoFreezeConsecutiveCount { 0 };
     bool m_pauseToggleRequested { false };
     bool m_userPausedManually { false };
+    bool m_catchupRebuffering { false };
+    QElapsedTimer m_catchupRebufferTimer;
     bool m_startupBufferFallbackAppliedForTune { false };
     double m_startupBufferFallbackTargetSeconds { 0.0 };
     double m_waitForDataStreamSeconds { 5.0 };
@@ -402,6 +474,16 @@ private:
     QString m_currentLoadfileOptions;
     QString m_playbackMode { QStringLiteral("live") };
     QString m_catchupProgramLabel;
+    bool m_catchupEndless { false };
+    bool m_catchupPublicationWaiting { false };
+    QElapsedTimer m_catchupPublicationWaitTimer;
+    int m_catchupContinuationAttempts { 0 };
+    double m_catchupContinuationPosition { -1.0 };
+    void publishCatchupProgress(double streamSeconds);
+    bool m_catchupProgressTransportReady { false };
+    std::optional<double> m_catchupProgressSeekTargetSeconds;
+    std::optional<Core::EpgEntry> m_catchupDisplayProgram;
+    std::optional<Core::EpgEntry> m_catchupValidatedProgram;
     QString m_livePlaybackUrlBeforeCatchup;
     QString m_catchupCanonicalPlaybackUrl;
     QDateTime m_catchupProgramStartUtc;
@@ -409,6 +491,13 @@ private:
     bool m_catchupProgramBoundaryReached { false };
     bool m_catchupActiveEofObserved { false };
     double m_catchupStreamBaseOffsetSeconds { 0.0 };
+    int m_catchupSafetySeconds { 180 };
+    bool m_catchupContinuousFallback { false };
+    std::optional<double> m_catchupContinuousRecoveryTarget;
+    bool m_catchupStandbyAlignmentSeekIssued { false };
+    bool m_catchupRecoveryAlignmentActive { false };
+    bool m_catchupPeriodReload { false };
+    bool m_catchupRecoveryAlignmentSeekIssued { false };
     double m_catchupDesiredDelaySeconds { 0.0 };
     double m_catchupTransportEndTimelineSeconds { 0.0 };
     std::optional<double> m_catchupPendingStreamRelativeSeekSeconds;

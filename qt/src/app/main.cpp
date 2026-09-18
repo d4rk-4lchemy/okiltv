@@ -26,6 +26,8 @@
 #include "../core/settingsmanager.h"
 
 #include <QApplication>
+#include <QDir>
+#include <QFileInfo>
 #include <QIcon>
 #include <QLibraryInfo>
 #include <QQmlApplicationEngine>
@@ -144,8 +146,6 @@ StartupOptions parseStartupOptions(const int argc, char *argv[])
         if (argument == QStringLiteral("--portable-bootstrap") && index + 1 < argc) {
             options.runtimeContext.launchMode = OKILTV::Core::LaunchMode::Portable;
             options.runtimeContext.portableBootstrapPath = QString::fromLocal8Bit(argv[index + 1]);
-            options.runtimeContext.dataRootOverride =
-                OKILTV::Core::PortableBootstrap::load(options.runtimeContext.portableBootstrapPath).dataRootOverride;
             ++index;
             continue;
         }
@@ -154,6 +154,31 @@ StartupOptions parseStartupOptions(const int argc, char *argv[])
     }
 
     return options;
+}
+
+void resolvePortableRuntimeContext(StartupOptions *options)
+{
+    if (options == nullptr) {
+        return;
+    }
+
+    auto &context = options->runtimeContext;
+    if (context.launchMode != OKILTV::Core::LaunchMode::Portable) {
+        const auto markerPath = QDir(QCoreApplication::applicationDirPath())
+                                    .filePath(QStringLiteral("OKILTV-portable.json"));
+        if (!QFileInfo(markerPath).isFile()) {
+            return;
+        }
+        context.launchMode = OKILTV::Core::LaunchMode::Portable;
+        context.portableBootstrapPath = markerPath;
+    }
+
+    const auto config = OKILTV::Core::PortableBootstrap::load(context.portableBootstrapPath);
+    context.dataRootOverride = config.dataRootOverride;
+    if (context.dataRootOverride.isEmpty()) {
+        context.dataRootOverride =
+            OKILTV::Core::PortableBootstrap::defaultDataRootForBootstrap(context.portableBootstrapPath);
+    }
 }
 
 template <typename T, typename Factory>
@@ -249,14 +274,14 @@ AppServices constructAppServices(
     services.channelListModel = constructComponent<OKILTV::App::ChannelListModel>(startupStep, QStringLiteral("ChannelListModel"), [settings]() {
         return std::make_unique<OKILTV::App::ChannelListModel>(settings);
     });
-    services.nowNextModel = constructComponent<OKILTV::App::NowNextModel>(startupStep, QStringLiteral("NowNextModel"), [epgService]() {
-        return std::make_unique<OKILTV::App::NowNextModel>(epgService);
+    services.nowNextModel = constructComponent<OKILTV::App::NowNextModel>(startupStep, QStringLiteral("NowNextModel"), [epgService, settings]() {
+        return std::make_unique<OKILTV::App::NowNextModel>(epgService, settings);
     });
     services.playbackNowNextModel = constructComponent<OKILTV::App::NowNextModel>(
         startupStep,
         QStringLiteral("PlaybackNowNextModel"),
-        [epgService]() {
-            return std::make_unique<OKILTV::App::NowNextModel>(epgService);
+        [epgService, settings]() {
+            return std::make_unique<OKILTV::App::NowNextModel>(epgService, settings);
         });
     services.epgGridModel = constructComponent<OKILTV::App::EpgGridModel>(startupStep, QStringLiteral("EpgGridModel"), [epgService]() {
         return std::make_unique<OKILTV::App::EpgGridModel>(epgService);
@@ -355,22 +380,6 @@ void wireInterControllerSignals(const StartupLogFn &startupStep, AppServices &se
     startupStep(QStringLiteral("Wiring inter-controller signals."));
 
     QObject::connect(
-        services.playerController.get(),
-        &OKILTV::App::PlayerController::playbackChannelActivated,
-        services.playbackNowNextModel.get(),
-        [&services]() {
-            services.playbackNowNextModel->setChannel(services.playerController->currentChannelValue());
-        });
-    QObject::connect(
-        services.playerController.get(),
-        &OKILTV::App::PlayerController::currentChannelChanged,
-        services.playbackNowNextModel.get(),
-        [&services]() {
-            if (!services.playerController->currentChannelValue().has_value()) {
-                services.playbackNowNextModel->clear();
-            }
-        });
-    QObject::connect(
         services.settingsController.get(),
         &OKILTV::App::SettingsController::saved,
         services.timeshiftController.get(),
@@ -454,7 +463,6 @@ int main(int argc, char *argv[])
     QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
 
     const auto startupOptions = parseStartupOptions(argc, argv);
-    OKILTV::Core::AppDataPaths::initializeRuntime(startupOptions.runtimeContext);
 
     std::vector<char *> filteredArgv;
     filteredArgv.reserve(startupOptions.filteredArguments.size());
@@ -464,6 +472,9 @@ int main(int argc, char *argv[])
 
     auto filteredArgc = static_cast<int>(filteredArgv.size());
     QApplication application(filteredArgc, filteredArgv.data());
+    auto resolvedStartupOptions = startupOptions;
+    resolvePortableRuntimeContext(&resolvedStartupOptions);
+    OKILTV::Core::AppDataPaths::initializeRuntime(resolvedStartupOptions.runtimeContext);
     std::setlocale(LC_NUMERIC, "C");
     application.setOrganizationName(QStringLiteral("OKILTV"));
     application.setApplicationName(QStringLiteral("OKILTV"));
@@ -514,9 +525,18 @@ int main(int argc, char *argv[])
             appServices.settingsController.get(),
             appServices.uiTestCaptureController.get());
 
+        QObject::connect(appServices.multiViewController.get(), &OKILTV::App::MultiViewController::primaryControllerChanged,
+            appServices.uiTestBridge.get(), [&appServices]() {
+                appServices.uiTestBridge->setPlayerController(appServices.multiViewController->primaryController());
+            });
+
         startupStep(QStringLiteral("Creating QQmlApplicationEngine."));
         QQmlApplicationEngine engine;
         startupStep(QStringLiteral("Registering QML context properties."));
+        for (auto *groups : { appServices.settingsSourceGroupsModel.get(), appServices.liveSourceGroupsModel.get() }) {
+            QObject::connect(groups, &OKILTV::App::SourceGroupsModel::selectionEdited,
+                appController.get(), &OKILTV::App::AppController::dismissGroupAutoEnableNotice);
+        }
         registerQmlContextProperties(engine, appController.get(), appServices);
         startupStep(QStringLiteral("QML context properties registered."));
 
@@ -552,7 +572,7 @@ int main(int argc, char *argv[])
                     updateDisplaySleepBlockerForWindowState(
                         appServices.displaySleepBlocker.get(),
                         appServices.settingsController.get(),
-                        appServices.playerController.get(),
+                        appServices.multiViewController->primaryController(),
                         mainWindow);
                 });
             QObject::connect(
@@ -563,18 +583,18 @@ int main(int argc, char *argv[])
                     updateDisplaySleepBlockerForWindowState(
                         appServices.displaySleepBlocker.get(),
                         appServices.settingsController.get(),
-                        appServices.playerController.get(),
+                        appServices.multiViewController->primaryController(),
                         mainWindow);
                 });
             QObject::connect(
-                appServices.playerController.get(),
-                &OKILTV::App::PlayerController::isPlayingChanged,
+                appServices.multiViewController.get(),
+                &OKILTV::App::MultiViewController::primaryPlaybackChanged,
                 &application,
                 [&appServices, mainWindow]() {
                     updateDisplaySleepBlockerForWindowState(
                         appServices.displaySleepBlocker.get(),
                         appServices.settingsController.get(),
-                        appServices.playerController.get(),
+                        appServices.multiViewController->primaryController(),
                         mainWindow);
                 });
             QObject::connect(
@@ -585,13 +605,13 @@ int main(int argc, char *argv[])
                     updateDisplaySleepBlockerForWindowState(
                         appServices.displaySleepBlocker.get(),
                         appServices.settingsController.get(),
-                        appServices.playerController.get(),
+                        appServices.multiViewController->primaryController(),
                         mainWindow);
                 });
             updateDisplaySleepBlockerForWindowState(
                 appServices.displaySleepBlocker.get(),
                 appServices.settingsController.get(),
-                appServices.playerController.get(),
+                appServices.multiViewController->primaryController(),
                 mainWindow);
         }
         appServices.uiTestCaptureController->setWindow(engine.rootObjects().constFirst());
@@ -625,7 +645,8 @@ int main(int argc, char *argv[])
             OKILTV::Core::DebugLogger::instance().log(
                 QStringLiteral("shutdown"),
                 QStringLiteral("Shutting down PlayerController."));
-            appServices.playerController->shutdownForApplicationExit();
+            appController->savePlaybackForApplicationExit();
+            appServices.multiViewController->shutdownPlaybackSessions();
             OKILTV::Core::DebugLogger::instance().log(
                 QStringLiteral("shutdown"),
                 QStringLiteral("Shutting down TimeshiftController."));

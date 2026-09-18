@@ -134,11 +134,6 @@ int layoutRowsForModeValue(const QString &mode)
     return 1;
 }
 
-bool catchupMultiviewBlocked(PlayerController *playerController)
-{
-    return playerController != nullptr && playerController->playbackMode() == QStringLiteral("catchup");
-}
-
 } // namespace
 
 MultiViewController::MultiViewController(
@@ -150,6 +145,7 @@ MultiViewController::MultiViewController(
     , m_settings(settings)
     , m_channelListModel(channelListModel)
     , m_playerController(playerController)
+    , m_originalController(playerController)
 {
     m_decodePressureTimer.setInterval(kDecodePressurePollIntervalMs);
     connect(&m_decodePressureTimer, &QTimer::timeout, this, &MultiViewController::handleDecodePressureTick);
@@ -162,9 +158,7 @@ MultiViewController::MultiViewController(
         &MultiViewController::applyFocusedAudioOwnership);
     m_retiredPlayerCleanupTimer.setSingleShot(true);
     connect(&m_retiredPlayerCleanupTimer, &QTimer::timeout, this, &MultiViewController::flushRetiredPlayers);
-    connect(m_playerController, &PlayerController::volumeChanged, this, &MultiViewController::applyFocusedAudioOwnership);
-    connect(m_playerController, &PlayerController::mutedChanged, this, &MultiViewController::applyFocusedAudioOwnership);
-    connect(m_playerController, &PlayerController::currentChannelChanged, this, &MultiViewController::handlePrimaryChannelChanged);
+    connectPlaybackSession(m_playerController);
 }
 
 MultiViewController::~MultiViewController()
@@ -172,20 +166,145 @@ MultiViewController::~MultiViewController()
     m_decodePressureTimer.stop();
     m_audioOwnershipRefreshTimer.stop();
     m_retiredPlayerCleanupTimer.stop();
-    if (m_playerController != nullptr) {
-        disconnect(m_playerController, nullptr, this, nullptr);
+    disconnect(m_originalController, nullptr, this, nullptr);
+    if (m_pipController) {
+        disconnect(m_pipController.get(), nullptr, this, nullptr);
     }
-    if (m_playerController != nullptr
-        && m_adoptedPrimaryPlayer
-        && m_playerController->isSharedPlaybackPlayer(m_adoptedPrimaryPlayer.get())) {
-        m_playerController->detachSharedPlayback();
-    }
+    m_layoutMode = QStringLiteral("off");
     clearAllSecondarySlots();
-    if (m_adoptedPrimaryPlayer) {
-        m_adoptedPrimaryPlayer->stop();
-        m_adoptedPrimaryPlayer.reset();
+    if (m_pipController) {
+        m_pipController->shutdownForApplicationExit();
     }
+    if (m_adoptedPrimaryPlayer && m_originalController->isSharedPlaybackPlayer(m_adoptedPrimaryPlayer.get())) {
+        m_originalController->detachSharedPlayback();
+    }
+    m_pipController.reset();
     flushRetiredPlayers();
+}
+
+QObject *MultiViewController::pipControllerObject() const
+{
+    return m_layoutMode == QStringLiteral("pip") && !m_secondarySlots.empty()
+        ? m_secondarySlots.front().controller.data() : nullptr;
+}
+
+bool MultiViewController::hasCatchupSession() const
+{
+    if (m_playerController->inCatchupMode()) {
+        return true;
+    }
+    return std::any_of(m_secondarySlots.begin(), m_secondarySlots.end(), [](const SecondarySlot &slot) {
+        return slot.controller && slot.controller->inCatchupMode();
+    });
+}
+
+void MultiViewController::shutdownPlaybackSessions()
+{
+    m_swappingPrimaryAndSecondary = true;
+    m_originalController->shutdownForApplicationExit();
+    if (m_pipController) {
+        m_pipController->shutdownForApplicationExit();
+    }
+    m_swappingPrimaryAndSecondary = false;
+}
+
+void MultiViewController::connectPlaybackSession(PlayerController *controller)
+{
+    connect(controller, &PlayerController::volumeChanged, this, &MultiViewController::applyFocusedAudioOwnership);
+    connect(controller, &PlayerController::mutedChanged, this, &MultiViewController::applyFocusedAudioOwnership);
+    connect(controller, &PlayerController::playbackChannelActivated, this, [this]() { ++m_pipRevision; });
+    connect(controller, &PlayerController::currentChannelChanged, this, [this, controller]() {
+        if (!controller->currentChannelValue().has_value()) {
+            ++m_pipRevision;
+        }
+        if (controller == m_playerController) {
+            handlePrimaryChannelChanged();
+            emit primaryPlaybackChanged();
+        } else {
+            for (auto &slot : m_secondarySlots) {
+                if (slot.controller == controller) {
+                    slot.channel = controller->currentChannelValue();
+                }
+            }
+            emitTilesChanged();
+        }
+    });
+    const auto refresh = [this, controller]() {
+        for (auto &slot : m_secondarySlots) {
+            if (slot.controller == controller) {
+                slot.playerState = controller->isLoading() ? QStringLiteral("loading") : QStringLiteral("ready");
+                slot.hasError = controller->channelLoadFailed();
+            }
+        }
+        applyFocusedAudioOwnership();
+        emitTilesChanged();
+        if (controller == m_playerController) {
+            emit primaryPlaybackChanged();
+        }
+    };
+    connect(controller, &PlayerController::isPlayingChanged, this, refresh);
+    connect(controller, &PlayerController::isLoadingChanged, this, refresh);
+    connect(controller, &PlayerController::channelLoadFailedChanged, this, refresh);
+    connect(controller, &PlayerController::playbackError, this, [this, controller](const QString &message) {
+        for (auto &slot : m_secondarySlots) {
+            if (slot.controller == controller) {
+                slot.hasError = true;
+                slot.errorText = message;
+            }
+        }
+        emitTilesChanged();
+    });
+    connect(controller, &PlayerController::playbackPlayerObjectChanged, this, refresh);
+}
+
+void MultiViewController::enablePipSessions()
+{
+    if (m_layoutMode != QStringLiteral("pip") || m_secondarySlots.empty()
+        || m_secondarySlots.front().controller) {
+        return;
+    }
+    if (!m_pipController) {
+        m_pipController = std::make_unique<PlayerController>();
+        connectPlaybackSession(m_pipController.get());
+        const auto &settings = m_settings->current();
+        m_pipController->applySettings(settings.mpvDllPath, settings.mpvOptions,
+            settings.playerWaitForStreamSeconds, settings.playerDeinterlaceEnabled,
+            settings.playerBufferSeconds, settings.playerUserAgent, settings.remuxRecordingsToMkv,
+            settings.playerImageSmoothingEnabled, settings.playerPicturePreset);
+        emit playbackSessionCreated(m_pipController.get());
+    }
+    auto &slot = m_secondarySlots.front();
+    auto *controller = m_playerController == m_originalController ? m_pipController.get() : m_originalController;
+    const auto channel = slot.channel;
+    if (auto *existingPlayer = slot.playbackPlayer()) {
+        existingPlayer->stop();
+    }
+    if (slot.player) {
+        retireDetachedPlayer(std::move(slot.player));
+    }
+    slot.borrowedPlayer.clear();
+    slot.controller = controller;
+    if (channel.has_value()) {
+        // Upgrade legacy live PiP once; subsequent role swaps keep both sessions intact.
+        controller->playChannel(channel.value());
+    }
+    applyFocusedAudioOwnership();
+    emitTilesChanged();
+}
+
+PlayerController *MultiViewController::prepareCatchupPictureInPicture()
+{
+    if (!multiviewEnabled() || !m_playerController->currentChannelValue().has_value()) {
+        emit statusMessageRequested(QStringLiteral("Start playback and enable PiP before adding catch-up."));
+        return nullptr;
+    }
+    if (isGridLayout(m_layoutMode)) {
+        emit statusMessageRequested(QStringLiteral("Catch-up is available in PiP only."));
+        return nullptr;
+    }
+    setLayoutMode(QStringLiteral("pip"));
+    enablePipSessions();
+    return m_secondarySlots.front().controller;
 }
 
 QString MultiViewController::layoutMode() const
@@ -326,8 +445,8 @@ bool MultiViewController::assignResolvedChannel(const Channel &channel)
 
 void MultiViewController::cycleLayout()
 {
-    if (catchupMultiviewBlocked(m_playerController)) {
-        emit statusMessageRequested(QStringLiteral("Multiview is unavailable during catch-up playback."));
+    if (hasCatchupSession() && m_layoutMode != QStringLiteral("off")) {
+        setLayoutMode(QStringLiteral("off"));
         return;
     }
     if (!multiviewEnabled()) {
@@ -347,7 +466,7 @@ void MultiViewController::cycleLayout()
 
 void MultiViewController::setLayoutMode(const QString &mode)
 {
-    if (catchupMultiviewBlocked(m_playerController) && normalizedLayoutModeValue(mode) != QStringLiteral("off")) {
+    if (hasCatchupSession() && isGridLayout(normalizedLayoutModeValue(mode))) {
         emit statusMessageRequested(QStringLiteral("Multiview is unavailable during catch-up playback."));
         return;
     }
@@ -371,17 +490,13 @@ void MultiViewController::setLayoutMode(const QString &mode)
 
 bool MultiViewController::togglePictureInPicture(const int channelId)
 {
-    if (catchupMultiviewBlocked(m_playerController)) {
-        emit statusMessageRequested(QStringLiteral("Multiview is unavailable during catch-up playback."));
-        return false;
-    }
     if (!multiviewEnabled()) {
         emit statusMessageRequested(QStringLiteral("Multiview is disabled in Settings."));
         return false;
     }
 
     if (m_layoutMode == QStringLiteral("pip")) {
-        const auto selectedChannel = m_channelListModel->channelById(channelId);
+        const auto selectedChannel = m_channelListModel ? m_channelListModel->channelById(channelId) : std::nullopt;
         if (!selectedChannel.has_value()) {
             exitMultiView();
             return true;
@@ -402,7 +517,7 @@ bool MultiViewController::togglePictureInPicture(const int channelId)
         return false;
     }
 
-    const auto selectedChannel = m_channelListModel->channelById(channelId);
+    const auto selectedChannel = m_channelListModel ? m_channelListModel->channelById(channelId) : std::nullopt;
     if (!selectedChannel.has_value()) {
         setLayoutModeInternal(QStringLiteral("pip"));
         setFocusedTileIndexInternal(1, false);
@@ -426,7 +541,7 @@ bool MultiViewController::togglePictureInPicture(const int channelId)
 
 bool MultiViewController::toggleGrid()
 {
-    if (catchupMultiviewBlocked(m_playerController)) {
+    if (hasCatchupSession()) {
         emit statusMessageRequested(QStringLiteral("Multiview is unavailable during catch-up playback."));
         return false;
     }
@@ -678,6 +793,13 @@ void MultiViewController::declinePendingDegrade()
 
 void MultiViewController::applySettings()
 {
+    if (m_pipController) {
+        const auto &settings = m_settings->current();
+        m_pipController->applySettings(settings.mpvDllPath, settings.mpvOptions,
+            settings.playerWaitForStreamSeconds, settings.playerDeinterlaceEnabled,
+            settings.playerBufferSeconds, settings.playerUserAgent, settings.remuxRecordingsToMkv,
+            settings.playerImageSmoothingEnabled, settings.playerPicturePreset);
+    }
     if (!multiviewEnabled() && (isActive() || retainedSelectionActive())) {
         (void)exitMultiViewWithIntent(ExitIntent::ForcedOff);
         return;
@@ -777,7 +899,7 @@ bool MultiViewController::exitMultiViewWithIntent(const ExitIntent intent)
     }
 
     const auto primaryChannel = m_playerController->currentChannelValue();
-    const auto restorePrimaryToBasePlayer = m_playerController->usingSharedPlayback();
+    const auto restorePrimaryToBasePlayer = m_playerController->usingSharedPlayback() && !m_pipController;
     m_layoutMode = QStringLiteral("off");
     setFocusedTileIndexInternal(0, false);
 
@@ -1012,7 +1134,7 @@ bool MultiViewController::multiviewEnabled() const
 bool MultiViewController::slotHasDuplicateChannel(const Channel &channel, const int targetSlotIndex) const
 {
     const auto primaryChannel = m_playerController->currentChannelValue();
-    if (targetSlotIndex != 0
+    if (targetSlotIndex != 0 && !m_playerController->inCatchupMode()
         && primaryChannel.has_value()
         && primaryChannel->profileId == channel.profileId
         && primaryChannel->id == channel.id) {
@@ -1041,6 +1163,10 @@ bool MultiViewController::assignChannelToSecondarySlot(const int slotIndex, cons
     }
 
     auto &slot = m_secondarySlots[static_cast<std::size_t>(slotIndex - 1)];
+    if (slot.controller) {
+        slot.controller->playChannel(channel);
+        return true;
+    }
     if (slot.channel.has_value()
         && slot.channel->profileId == channel.profileId
         && slot.channel->id == channel.id) {
@@ -1095,6 +1221,13 @@ bool MultiViewController::promoteSecondarySlotToPrimary(const int slotIndex)
         return false;
     }
 
+    if (slot.controller) {
+        if (!swapPrimaryWithSecondarySlotNoReconnect(slotIndex)) {
+            return false;
+        }
+        clearSecondarySlot(slotIndex);
+        return true;
+    }
     m_promotingSecondaryToPrimary = true;
     const auto promotedChannel = slot.channel.value();
     auto *primaryBasePlayer = m_playerController->primaryBasePlayer();
@@ -1131,6 +1264,22 @@ bool MultiViewController::swapPrimaryWithSecondarySlotNoReconnect(const int slot
     auto &slot = m_secondarySlots[static_cast<std::size_t>(slotIndex - 1)];
     if (!slot.channel.has_value() || !slot.playbackPlayer()) {
         return false;
+    }
+
+    if (slot.controller) {
+        ++m_pipRevision;
+        auto *previous = m_playerController;
+        m_playerController = slot.controller;
+        slot.controller = previous;
+        m_playerController->copyVolumeStateFrom(*previous);
+        slot.channel = previous->currentChannelValue();
+        slot.playerState = previous->isLoading() ? QStringLiteral("loading") : QStringLiteral("ready");
+        slot.hasError = previous->channelLoadFailed();
+        emit primaryControllerChanged();
+        applyFocusedAudioOwnership();
+        emit primaryPlaybackChanged();
+        emitTilesChanged();
+        return true;
     }
 
     const auto primaryChannel = m_playerController->currentChannelValue();
@@ -1229,6 +1378,12 @@ void MultiViewController::setLayoutModeInternal(const QString &mode)
         normalized = gridLayoutModeForTileCount(configuredMaxTiles());
     }
 
+    if (m_layoutMode == QStringLiteral("pip") && isGridLayout(normalized)
+        && !m_secondarySlots.empty() && m_secondarySlots.front().controller) {
+        setFocusedTileIndexInternal(0, false);
+        exitMultiViewWithIntent(ExitIntent::ForcedOff);
+    }
+
     const auto openingRetainedGrid = m_retainedSelectionActive
         && normalized != QStringLiteral("off")
         && isGridLayout(normalized);
@@ -1238,6 +1393,9 @@ void MultiViewController::setLayoutModeInternal(const QString &mode)
 
     if (normalized == m_layoutMode) {
         ensureSecondarySlotsForCurrentLayout();
+        if (normalized == QStringLiteral("pip") && (hasCatchupSession() || m_pipController)) {
+            enablePipSessions();
+        }
         trimSecondarySlotsForCurrentLayout();
         applyFocusedAudioOwnership();
         emitTilesChanged();
@@ -1298,6 +1456,9 @@ void MultiViewController::setLayoutModeInternal(const QString &mode)
     if (openingRetainedGrid) {
         scheduleFocusedAudioOwnershipRefresh();
     }
+    if (m_layoutMode == QStringLiteral("pip") && (hasCatchupSession() || m_pipController)) {
+        enablePipSessions();
+    }
     logLayoutChange(previousMode, m_layoutMode);
     emit layoutModeChanged();
     emitTilesChanged();
@@ -1336,6 +1497,14 @@ void MultiViewController::clearSecondarySlot(const int slotIndex)
     }
 
     auto &slot = m_secondarySlots[static_cast<std::size_t>(slotIndex - 1)];
+    if (slot.controller) {
+        ++m_pipRevision;
+        auto *controller = slot.controller.data();
+        slot.controller.clear();
+        auto *backend = controller->player();
+        controller->stop();
+        backend->stop();
+    }
     if (slot.player) {
         disconnect(slot.player.get(), nullptr, this, nullptr);
         retireDetachedPlayer(std::move(slot.player));
@@ -1387,6 +1556,8 @@ void MultiViewController::configureSecondaryPlayer(MpvPlayer &player) const
         m_settings->current().playerDeinterlaceEnabled,
         m_settings->current().playerBufferSeconds);
     player.configureUserAgent(m_settings->current().playerUserAgent);
+    player.configureImageSmoothing(m_settings->current().playerImageSmoothingEnabled);
+    player.configurePicturePreset(m_settings->current().playerPicturePreset);
 }
 
 void MultiViewController::connectSecondaryPlayerSignals(MpvPlayer *player, const int slotIndex)
@@ -1533,7 +1704,9 @@ void MultiViewController::handlePrimaryChannelChanged()
         return;
     }
 
-    if (!m_playerController->usingSharedPlayback() && m_adoptedPrimaryPlayer) {
+    if (m_adoptedPrimaryPlayer
+        && !m_originalController->isSharedPlaybackPlayer(m_adoptedPrimaryPlayer.get())
+        && (!m_pipController || !m_pipController->isSharedPlaybackPlayer(m_adoptedPrimaryPlayer.get()))) {
         retireDetachedPlayer(std::move(m_adoptedPrimaryPlayer));
     }
 

@@ -12,6 +12,7 @@ Item {
     signal collapseRequested()
     signal playChannelRequested(int channelId)
     signal playCatchupRequested(var channel, var program)
+    signal playCatchupFromBeginningRequested(var channel, var program)
 
     property bool overlayMode: false
     // qmllint disable unqualified
@@ -20,7 +21,7 @@ Item {
     readonly property var guideState: guideStateModel
     readonly property var channelList: channelListModel
     readonly property var app: appController
-    readonly property var player: appPlayerController
+    readonly property var player: multiViewController.primaryController
     readonly property var dvr: dvrController
     // qmllint enable unqualified
     property real channelColumnWidth: root.shell.layoutBand === "compact" ? 246 : 284
@@ -30,7 +31,7 @@ Item {
     property real timelineBodyVisibleWidth: Math.max(0, timelineViewport.width)
     property real timelineContentWidth: Math.max(root.timelineBodyVisibleWidth, root.timelineVisibleWidth + root.timelineOverflowWidth)
     property real maxTimelineContentX: Math.max(0, root.timelineContentWidth - root.timelineBodyVisibleWidth)
-    property real maxTimelineHeaderX: Math.max(0, root.timelineVisibleWidth - timelineViewport.width)
+    property real maxTimelineHeaderX: root.maxTimelineContentX
     property real firstVisibleHourOffsetMinutes: {
         const slots = root.epgGrid.visibleTimeSlots
         return slots.length > 0 ? Number(slots[0].offsetMinutes || 0) : 0
@@ -56,6 +57,23 @@ Item {
     property int headerMarkerWidth: 1
     property int headerHalfHourMarkerHeight: root.shell.layoutBand === "compact" ? 8 : 10
     property int headerMarkerXOffset: -1
+    readonly property int dayHeaderHeight: 24
+    readonly property var timelineDays: {
+        const startMs = Number(root.epgGrid.windowStartEpochMs)
+        const endMs = startMs + root.epgGrid.windowSpanMinutes * 60000
+        const days = []
+        let current = new Date(startMs)
+        while (Number.isFinite(current.getTime()) && current.getTime() < endMs) {
+            const next = new Date(current.getFullYear(), current.getMonth(), current.getDate() + 1)
+            days.push({
+                label: current.toLocaleDateString(Qt.locale("en_GB"), "dddd, dd.MM"),
+                startMinutes: (current.getTime() - startMs) / 60000,
+                endMinutes: (Math.min(next.getTime(), endMs) - startMs) / 60000
+            })
+            current = next
+        }
+        return days
+    }
     property color currentTimeLineColor: "#b0bac4"
     property real currentTimeLineOpacity: 0.58
     property int pendingGuideRowIndex: -1
@@ -430,12 +448,14 @@ Item {
         return true
     }
 
-    function focusInitialChannel() {
+    function focusInitialChannel(preferredChannelId) {
         let targetChannelId = -1
         const currentPlaybackId = root.player.currentChannel.id !== undefined
             ? Number(root.player.currentChannel.id)
             : -1
-        if (currentPlaybackId >= 0 && root.epgGrid.rowIndexForChannelId(currentPlaybackId) >= 0) {
+        if (preferredChannelId >= 0 && root.epgGrid.rowIndexForChannelId(preferredChannelId) >= 0) {
+            targetChannelId = preferredChannelId
+        } else if (currentPlaybackId >= 0 && root.epgGrid.rowIndexForChannelId(currentPlaybackId) >= 0) {
             targetChannelId = currentPlaybackId
         } else if (root.guideState.selectedChannelId >= 0
             && root.epgGrid.rowIndexForChannelId(root.guideState.selectedChannelId) >= 0) {
@@ -447,12 +467,12 @@ Item {
         root.focusChannel(targetChannelId, true)
     }
 
-    function prepareForOpen() {
+    function prepareForOpen(preferredChannelId) {
         root.guideState.selectedGroupId = root.channelList.selectedCategoryId
         root.scheduleGuideRenderViewportSync()
         Qt.callLater(function() {
             root.applyGuideOpenAnchor()
-            root.focusInitialChannel()
+            root.focusInitialChannel(preferredChannelId)
             root.scheduleGuideRenderViewportSync()
         })
     }
@@ -518,6 +538,12 @@ Item {
         root.selectedCatchupState = root.app.catchupActionState(
             root.guideState.selectedChannel || ({}),
             root.selectedCatchupProgramData() || ({}))
+    }
+
+    function resumeTimeLabel() {
+        const seconds = Number(root.selectedCatchupState.resumeSeconds || 0)
+        const minutes = Math.floor(seconds / 60)
+        return String(minutes).padStart(2, "0") + ":00"
     }
 
     function clearHoveredProgram(channelId, startIso) {
@@ -592,6 +618,13 @@ Item {
             root.refreshSelectedCatchupState()
         }
     }
+    Connections {
+        target: root.app
+
+        function onCatchupProgressChanged() {
+            root.refreshSelectedCatchupState()
+        }
+    }
     Component.onCompleted: root.refreshSelectedCatchupState()
 
     Timer {
@@ -623,7 +656,7 @@ Item {
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top
-            height: root.shell.layoutBand === "compact" ? 30 : 34
+            height: root.dayHeaderHeight + (root.shell.layoutBand === "compact" ? 30 : 34)
 
             Rectangle {
                 id: leftHeaderPane
@@ -656,7 +689,8 @@ Item {
                 Flickable {
                     id: timeHeaderFlick
                     anchors.fill: parent
-                    contentWidth: root.timelineVisibleWidth
+                    anchors.topMargin: root.dayHeaderHeight
+                    contentWidth: root.timelineContentWidth
                     interactive: false
                     clip: true
 
@@ -674,7 +708,7 @@ Item {
 
                                 x: modelData.offsetMinutes * root.pixelsPerMinute
                                 width: 60 * root.pixelsPerMinute
-                                height: timelineViewport.height
+                                height: timeHeaderFlick.height
                                 color: headerFill
 
                                 Text {
@@ -715,6 +749,51 @@ Item {
                             height: root.headerHalfHourMarkerHeight
                             color: root.headerMarkerColor
                         }
+                    }
+                }
+
+                Rectangle {
+                    id: dayHeader
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    height: root.dayHeaderHeight
+                    color: root.hourShadeA
+                    clip: true
+
+                    Repeater {
+                        model: root.timelineDays
+
+                        delegate: Item {
+                            id: daySegment
+                            required property var modelData
+                            x: modelData.startMinutes * root.pixelsPerMinute - timelineFlick.contentX
+                            width: (modelData.endMinutes - modelData.startMinutes) * root.pixelsPerMinute
+                            height: root.dayHeaderHeight
+                            clip: true
+
+                            Text {
+                                x: Math.max(8, Math.min(-daySegment.x + 8, daySegment.width - implicitWidth - 8))
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: daySegment.modelData.label
+                                color: Theme.textPrimary
+                                font.pixelSize: 12
+                                font.bold: true
+                            }
+                        }
+                    }
+                }
+
+                Repeater {
+                    model: root.timelineDays
+
+                    delegate: Rectangle {
+                        required property var modelData
+                        visible: modelData.startMinutes > 0
+                        x: modelData.startMinutes * root.pixelsPerMinute - timelineFlick.contentX
+                        width: 2
+                        height: timelineViewport.height
+                        color: root.headerMarkerColor
                     }
                 }
             }
@@ -821,6 +900,7 @@ Item {
                             id: timelineRow
                             required property int index
                             required property int channelId
+                            required property bool channelCatchupSupported
                             required property string channelName
                             required property string channelIconPath
                             required property string channelProfileId
@@ -910,13 +990,33 @@ Item {
                                             Layout.fillWidth: true
                                             spacing: 2
 
-                                            Text {
+                                            Item {
                                                 Layout.fillWidth: true
-                                                text: timelineRow.channelName
-                                                color: Theme.textPrimary
-                                                font.pixelSize: root.channelNamePixelSize
-                                                font.bold: true
-                                                elide: Text.ElideRight
+                                                implicitHeight: Math.max(guideChannelName.implicitHeight, 16)
+
+                                                Text {
+                                                    id: guideChannelName
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    width: Math.min(implicitWidth, Math.max(0, parent.width - (timelineRow.channelCatchupSupported ? 22 : 0)))
+                                                    text: timelineRow.channelName
+                                                    color: Theme.textPrimary
+                                                    font.pixelSize: root.channelNamePixelSize
+                                                    font.bold: true
+                                                    elide: Text.ElideRight
+                                                }
+
+                                                Image {
+                                                    anchors.left: guideChannelName.right
+                                                    anchors.leftMargin: 6
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    width: 16
+                                                    height: 16
+                                                    visible: timelineRow.channelCatchupSupported
+                                                    source: "qrc:/resources/icons/catch-up-indicator.svg"
+                                                    sourceSize.width: 16
+                                                    sourceSize.height: 16
+                                                    fillMode: Image.PreserveAspectFit
+                                                }
                                             }
 
                                             Text {
@@ -1124,6 +1224,21 @@ Item {
                                     }
                                 }
                             }
+                            Repeater {
+                                model: root.timelineDays
+
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    visible: modelData.startMinutes > 0
+                                    x: root.channelColumnWidth + root.rowSpacing
+                                        + modelData.startMinutes * root.pixelsPerMinute
+                                    width: 2
+                                    height: root.collapsedRowHeight
+                                    z: 1.5
+                                    color: root.headerMarkerColor
+                                }
+                            }
+
                             Loader {
                                 active: root.rowExpanded(timelineRow.channelId)
                                 x: timelineFlick.contentX + root.channelColumnWidth + root.rowSpacing
@@ -1166,16 +1281,42 @@ Item {
                                                     implicitWidth: 30
                                                     implicitHeight: 30
                                                     iconInset: 0
-                                                    iconSource: "qrc:/resources/icons/start-from-beginning.svg"
+                                                    iconSource: root.selectedCatchupState.resumeAvailable
+                                                        ? "qrc:/resources/icons/play.svg"
+                                                        : "qrc:/resources/icons/start-from-beginning.svg"
                                                     visible: root.selectedCatchupState.visible
                                                     enabled: root.selectedCatchupState.enabled
                                                     caption: root.selectedCatchupState.enabled
-                                                        ? "Play Catch-up"
+                                                        ? (root.selectedCatchupState.resumeAvailable
+                                                            ? "Resume from " + root.resumeTimeLabel() : "Play Catch-up")
                                                         : "Catch-up not available"
                                                     onClicked: root.playCatchupRequested(
                                                         root.guideState.selectedChannel,
                                                         root.selectedCatchupProgramData())
                                                 }
+                                            }
+
+                                            Text {
+                                                visible: Boolean(root.selectedCatchupState.resumeAvailable)
+                                                text: "Resume from " + root.resumeTimeLabel()
+                                                color: Theme.textSecondary
+                                                font.pixelSize: 12
+                                            }
+
+                                            IconActionButton {
+                                                visible: Boolean(root.selectedCatchupState.resumeAvailable)
+                                                enabled: root.selectedCatchupState.enabled
+                                                compact: true
+                                                borderless: true
+                                                barMode: true
+                                                implicitWidth: 30
+                                                implicitHeight: 30
+                                                iconInset: 0
+                                                iconSource: "qrc:/resources/icons/start-from-beginning.svg"
+                                                caption: "Play from beginning"
+                                                onClicked: root.playCatchupFromBeginningRequested(
+                                                    root.guideState.selectedChannel,
+                                                    root.selectedCatchupProgramData())
                                             }
 
                                             Text {

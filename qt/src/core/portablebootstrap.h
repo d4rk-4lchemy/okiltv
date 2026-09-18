@@ -17,6 +17,7 @@ public:
     static bool save(const QString &bootstrapPath, const PortableBootstrapConfig &config, QString *errorText = nullptr);
     static QString normalizedDataRootOverride(const QString &path);
     static QString dataRootOverrideError(const QString &path);
+    static QString defaultDataRootForBootstrap(const QString &bootstrapPath);
 };
 
 } // namespace OKILTV::Core

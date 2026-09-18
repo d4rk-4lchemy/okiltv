@@ -13,8 +13,6 @@ namespace OKILTV::Core {
 
 namespace {
 
-constexpr qint64 kXtreamLiveOriginDurationBackoffSeconds = 65;
-
 QString trimmedBaseUrl(const QString &value)
 {
     auto base = value.trimmed();
@@ -205,6 +203,38 @@ CatchupUrlResolver::CatchupUrlResolver(std::optional<ServerProfile> profile)
 {
 }
 
+QDateTime CatchupUrlResolver::availableEdge(const QDateTime &stop, const int safetySeconds, const QDateTime &now)
+{
+    return std::min(stop.toUTC(), now.toUTC().addSecs(-std::clamp(safetySeconds, 180, 1800)));
+}
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) -- Named range endpoints are checked before URL construction.
+QString CatchupUrlResolver::xtreamWindowUrl(const QString &canonicalUrl, const qint64 offsetSeconds,
+                                          const qint64 availableSeconds, const bool withSeconds)
+{
+    static const QRegularExpression pattern(QStringLiteral(
+        R"(^(https?://[^?#]+/timeshift/[^/]+/[^/]+)/\d+/(\d{4}-\d{2}-\d{2}:\d{2}-\d{2})/([^?#]+)(\?[^#]*)?$)"));
+    const auto match = pattern.match(canonicalUrl);
+    if (!match.hasMatch()) {
+        return {};
+    }
+    auto stamp = QDateTime::fromString(match.captured(2), QStringLiteral("yyyy-MM-dd:HH-mm"));
+    stamp.setTimeZone(QTimeZone::UTC);
+    if (!stamp.isValid()) {
+        return {};
+    }
+    const auto offset = std::max<qint64>(0, withSeconds ? offsetSeconds : (offsetSeconds / 60) * 60);
+    if (availableSeconds < offset) {
+        return {};
+    }
+    const auto minutes = std::max<qint64>(1, (availableSeconds - offset) / 60);
+    return QStringLiteral("%1/%2/%3/%4")
+        .arg(match.captured(1)).arg(minutes)
+        .arg(stamp.addSecs(offset).toString(withSeconds ? QStringLiteral("yyyy-MM-dd:HH-mm-ss")
+                                                       : QStringLiteral("yyyy-MM-dd:HH-mm")))
+        .arg(match.captured(3) + match.captured(4));
+}
+
 std::optional<CatchupPlaybackTarget> CatchupUrlResolver::resolve(
     const Channel &channel,
     const EpgEntry &program,
@@ -220,6 +250,7 @@ std::optional<CatchupPlaybackTarget> CatchupUrlResolver::resolve(
     };
     target.programStartUtc = program.start.toUTC();
     target.programStopUtc = program.stop.toUTC();
+    target.safetySeconds = 60 * std::clamp(m_profile.has_value() ? m_profile->catchupSafetyMinutes : 3, 3, 30);
 
     if (!channel.catchupSupported) {
         return fail(QStringLiteral("Channel archive is unavailable."));
@@ -251,11 +282,12 @@ std::optional<CatchupPlaybackTarget> CatchupUrlResolver::resolve(
             profile.xtreamServerTimezone,
             &effectiveTimezoneId);
         const auto nowUtc = QDateTime::currentDateTimeUtc();
-        const auto programmeStillLive = nowUtc < target.programStopUtc;
+        const auto safeEdge = availableEdge(target.programStopUtc, target.safetySeconds, nowUtc);
+        const auto programmeStillLive = safeEdge < target.programStopUtc;
         qint64 durationMinutes = 0;
         if (programmeStillLive) {
             const auto adjustedNowMinuteEpoch = static_cast<qint64>(
-                std::floor(static_cast<double>(nowUtc.addSecs(-kXtreamLiveOriginDurationBackoffSeconds).toSecsSinceEpoch()) / 60.0));
+                std::floor(static_cast<double>(safeEdge.toSecsSinceEpoch()) / 60.0));
             const auto programStartMinuteEpoch = static_cast<qint64>(
                 std::floor(static_cast<double>(target.programStartUtc.toSecsSinceEpoch()) / 60.0));
             durationMinutes = std::max<qint64>(1, adjustedNowMinuteEpoch - programStartMinuteEpoch);
@@ -332,6 +364,36 @@ std::optional<CatchupPlaybackTarget> CatchupUrlResolver::resolve(
         return fail(QStringLiteral("Archive playback URL still contains unresolved placeholders."));
     }
 
+    return target;
+}
+
+std::optional<CatchupPlaybackTarget> CatchupUrlResolver::resolveWindow(
+    const Channel &channel, const QDateTime &startUtc, const QDateTime &endUtc,
+    QString *failureReason) const
+{
+    if (!startUtc.isValid() || !endUtc.isValid() || endUtc <= startUtc) {
+        if (failureReason) {
+            *failureReason = QStringLiteral("Archive range is invalid.");
+        }
+        return std::nullopt;
+    }
+    EpgEntry range;
+    range.start = startUtc.toUTC();
+    range.stop = endUtc.toUTC();
+    if (channel.source == ChannelSource::Xtream && range.start.isValid()) {
+        range.start = QDateTime::fromSecsSinceEpoch((range.start.toSecsSinceEpoch() / 60) * 60, QTimeZone::UTC);
+    }
+    auto target = resolve(channel, range, failureReason);
+    if (!target) {
+        return std::nullopt;
+    }
+    if (channel.source == ChannelSource::Xtream) {
+        // resolve() preserves the legacy finite-programme padding. A window
+        // instead ends at the published edge, rounded to the provider minute.
+        target->url = xtreamWindowUrl(target->url, 0, target->durationSeconds);
+        target->durationSeconds = std::max<qint64>(1, target->durationSeconds / 60) * 60;
+        target->programStopUtc = target->programStartUtc.addSecs(target->durationSeconds);
+    }
     return target;
 }
 

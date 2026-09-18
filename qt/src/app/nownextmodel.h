@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../core/epgservice.h"
+#include "../core/settingsmanager.h"
 
 #include <QFutureSynchronizer>
 #include <QHash>
@@ -14,6 +15,8 @@ namespace OKILTV::App {
 class NowNextModel final : public QObject
 {
     Q_OBJECT
+    Q_PROPERTY(QVariantMap channel READ channel NOTIFY channelChanged)
+    Q_PROPERTY(QVariantList pastPrograms READ pastPrograms NOTIFY dataChanged)
     Q_PROPERTY(QString channelName READ channelName NOTIFY channelChanged)
     Q_PROPERTY(bool loading READ loading NOTIFY dataChanged)
     Q_PROPERTY(QVariantMap currentProgram READ currentProgram NOTIFY dataChanged)
@@ -23,8 +26,10 @@ class NowNextModel final : public QObject
 public:
     ~NowNextModel() override;
 
-    explicit NowNextModel(Core::EpgService *epg, QObject *parent = nullptr);
+    NowNextModel(Core::EpgService *epg, Core::SettingsManager *settings, QObject *parent = nullptr);
 
+    QVariantMap channel() const;
+    QVariantList pastPrograms() const;
     QString channelName() const;
     bool loading() const;
     QVariantMap currentProgram() const;
@@ -50,6 +55,7 @@ private:
         QVariantMap currentProgramVariant;
         QVariantMap nextProgramVariant;
         QVariantList upcomingProgramsVariant;
+        QVariantList pastProgramsVariant;
     };
 
     struct CachedResult
@@ -57,12 +63,14 @@ private:
         QVariantMap currentProgramVariant;
         QVariantMap nextProgramVariant;
         QVariantList upcomingProgramsVariant;
+        QVariantList pastProgramsVariant;
     };
 
-    void startRefreshJob(quint64 generation, const Core::Channel &channel);
+    void startRefreshJob(quint64 generation, const Core::Channel &channel, int lookAheadHours);
     void applyRefreshResult(quint64 generation, RefreshResult result);
 
     Core::EpgService *m_epg;
+    Core::SettingsManager *m_settings;
     std::optional<Core::Channel> m_channel;
     std::optional<Core::EpgEntry> m_currentProgram;
     std::optional<Core::EpgEntry> m_nextProgram;
@@ -70,6 +78,7 @@ private:
     QVariantMap m_currentProgramVariant;
     QVariantMap m_nextProgramVariant;
     QVariantList m_upcomingProgramsVariant;
+    QVariantList m_pastProgramsVariant;
     bool m_loading { false };
     bool m_skipNextLoadingState { false };
     QHash<QString, CachedResult> m_resultCache;
@@ -79,6 +88,7 @@ private:
     bool m_refreshQueued { false };
     quint64 m_queuedGeneration { 0 };
     std::optional<Core::Channel> m_queuedChannel;
+    int m_queuedLookAheadHours { 24 };
 };
 
 } // namespace OKILTV::App

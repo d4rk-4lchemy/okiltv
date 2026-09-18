@@ -38,7 +38,8 @@ public:
         IsFavoriteRole,
         IsDvrRecordingRole,
         CurrentProgramTitleRole,
-        CurrentProgramTimeRangeRole
+        CurrentProgramTimeRangeRole,
+        CatchupSupportedRole
     };
     Q_ENUM(Roles)
 
@@ -102,6 +103,7 @@ private:
     static constexpr qint64 kFavouritesEligibilityMinutes = 360;
 
     void rebuildFilter();
+    void rebuildFilteredRows();
     void invalidateCategoriesCache();
     void rebuildCategoriesCache() const;
     int filteredRowForChannel(int channelId) const;

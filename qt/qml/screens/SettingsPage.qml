@@ -738,6 +738,57 @@ Item {
                             spacing: 4
 
                             Text {
+                                text: "Overlay inactivity timeout"
+                                color: Theme.textPrimary
+                                font.pixelSize: 14
+                                font.bold: true
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: "Idle time in seconds, including keyboard navigation."
+                                color: Theme.textSecondary
+                                font.pixelSize: 12
+                                wrapMode: Text.Wrap
+                            }
+                        }
+
+                        FormSpinBox {
+                            id: overlayInactivitySecondsField
+
+                            Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                            Layout.preferredWidth: root.numericFieldWidth
+                            from: 1
+                            to: 3600
+                            onValueChanged: root.settings.overlayInactivitySeconds = value
+
+                            Binding {
+                                target: overlayInactivitySecondsField
+                                property: "value"
+                                value: root.settings.overlayInactivitySeconds
+                                when: !overlayInactivitySecondsField.editing
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    radius: Theme.radiusM
+                    color: root.rowSurface
+                    border.width: 0
+                    implicitHeight: 76
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        spacing: Theme.spacingM
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+
+                            Text {
                                 text: "Guide preview"
                                 color: Theme.textPrimary
                                 font.pixelSize: 14
@@ -976,7 +1027,7 @@ Item {
                                 Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
                                 Layout.preferredWidth: root.numericFieldWidth
                                 from: 1
-                                to: 48
+                                to: 999
                                 onValueChanged: root.settings.guidePastHours = value
 
                                 Binding {
@@ -1018,7 +1069,7 @@ Item {
                                 Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
                                 Layout.preferredWidth: root.numericFieldWidth
                                 from: 1
-                                to: 48
+                                to: 999
                                 onValueChanged: root.settings.epgLookAheadHours = value
 
                                 Binding {
@@ -1204,6 +1255,87 @@ Item {
                     radius: Theme.radiusM
                     color: root.rowSurface
                     border.width: 0
+                    implicitHeight: 76
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        spacing: Theme.spacingM
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+
+                            Text {
+                                text: "Image smoothing"
+                                color: Theme.textPrimary
+                                font.pixelSize: 14
+                                font.bold: true
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: "Gently soften overly sharp edges and details."
+                                color: Theme.textSecondary
+                                font.pixelSize: 12
+                                wrapMode: Text.Wrap
+                            }
+                        }
+
+                        FormSwitch {
+                            Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                            checked: root.settings.imageSmoothingEnabled
+                            onToggled: root.settings.imageSmoothingEnabled = checked
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    radius: Theme.radiusM
+                    color: root.rowSurface
+                    border.width: 0
+                    implicitHeight: 96
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        spacing: Theme.spacingM
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+
+                            Text {
+                                text: "Picture preset"
+                                color: Theme.textPrimary
+                                font.pixelSize: 14
+                                font.bold: true
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: "Apply a picture style to all players after saving. Standard restores the original picture."
+                                color: Theme.textSecondary
+                                font.pixelSize: 12
+                                wrapMode: Text.Wrap
+                            }
+                        }
+                        FormComboBox {
+                            objectName: "picturePresetCombo"
+                            Layout.preferredWidth: 140
+                            model: ["Standard", "Warm", "Cold", "Movie", "Vivid", "Sport"]
+                            currentIndex: Math.max(0, model.indexOf(root.settings.picturePreset.charAt(0).toUpperCase()
+                                                                  + root.settings.picturePreset.slice(1)))
+                            onActivated: root.settings.picturePreset = model[currentIndex].toLowerCase()
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    radius: Theme.radiusM
+                    color: root.rowSurface
+                    border.width: 0
                     implicitHeight: 80
 
                     RowLayout {
@@ -1224,7 +1356,7 @@ Item {
 
                             Text {
                                 Layout.fillWidth: true
-                                text: "Seconds of playback buffer used to absorb short source stutters."
+                                text: "Seconds of live playback buffer used to absorb short source stutters after startup and during refill."
                                 color: Theme.textSecondary
                                 font.pixelSize: 12
                                 wrapMode: Text.Wrap
@@ -2142,7 +2274,7 @@ Item {
 
                         Text {
                             Layout.fillWidth: true
-                            text: "Portable builds still default to %APPDATA%\\OKILTV. Set an absolute override here to move settings, cache, and the database after restart."
+                            text: "Portable ZIP builds keep settings, cache, and the database in the local data directory. Set an absolute override here to move them after restart."
                             color: Theme.textSecondary
                             font.pixelSize: 12
                             wrapMode: Text.Wrap
