@@ -7,7 +7,7 @@
 <p align="center">
   A desktop <strong>IPTV player</strong> built with Qt and libmpv.<br/>
   <small><em>No VOD support is planned for this app.</em></small><br/><br/>
-  Current version: <strong>0.4.0</strong>
+  Current version: <strong>0.5.0</strong>
 </p>
 
 ## Features
