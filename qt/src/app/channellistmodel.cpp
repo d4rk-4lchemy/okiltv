@@ -67,7 +67,9 @@ QVariant ChannelListModel::data(const QModelIndex &index, const int role) const
     case CurrentProgramTitleRole:
         return m_currentProgramInfoByChannelId.value(channel.id).value(QStringLiteral("title")).toString();
     case CurrentProgramTimeRangeRole:
-        return m_currentProgramInfoByChannelId.value(channel.id).value(QStringLiteral("timeRange")).toString();
+        return Core::formatProgramTimes(m_currentProgramInfoByChannelId.value(channel.id),
+            Core::resolveDateTimeFormat(m_settings->current().dateOrder, m_settings->current().timeFormat))
+            .value(QStringLiteral("timeRange")).toString();
     case CatchupSupportedRole:
         return channel.catchupSupported;
     default:
@@ -137,6 +139,10 @@ void ChannelListModel::setSelectedCategoryId(const QString &value)
     }
 
     m_selectedCategoryId = normalized;
+    if (!m_activeProfileId.isEmpty()) {
+        m_settings->current().selectedGroupByProfile[m_activeProfileId] = normalized;
+        m_settings->save();
+    }
     emit selectedCategoryIdChanged();
     rebuildFilter();
 }
@@ -159,6 +165,7 @@ QString ChannelListModel::activeProfileId() const
 
 void ChannelListModel::setChannels(const QList<Channel> &channels, const QList<ChannelCategory> &categories)
 {
+    const auto previousCategoryId = m_selectedCategoryId;
     beginResetModel();
     m_allChannels = channels;
     for (auto &channel : m_allChannels) {
@@ -189,10 +196,21 @@ void ChannelListModel::setChannels(const QList<Channel> &channels, const QList<C
     m_watchSecondsByChannelId.clear();
     reloadManualFavourites();
     invalidateCategoriesCache();
+    if (!m_activeProfileId.isEmpty()) {
+        m_selectedCategoryId = m_settings->current().selectedGroupByProfile.value(m_activeProfileId);
+        if (!m_selectedCategoryId.isEmpty() && !orderedVisibleCategoryIds().contains(m_selectedCategoryId)) {
+            m_selectedCategoryId.clear();
+            m_settings->current().selectedGroupByProfile.remove(m_activeProfileId);
+            m_settings->save();
+        }
+    }
     // Reset/property observers can immediately read rows and look up selection.
     // Replace the old source's indices before publishing the new channel list.
     rebuildFilteredRows();
     endResetModel();
+    if (previousCategoryId != m_selectedCategoryId) {
+        emit selectedCategoryIdChanged();
+    }
     emit totalCountChanged();
     emit selectedChannelIdChanged();
     emit categoriesChanged();
@@ -297,10 +315,35 @@ void ChannelListModel::setWatchSeconds(const QHash<int, qint64> &watchSecondsByC
     m_watchSecondsByChannelId = watchSecondsByChannelId;
     const auto favouritesCategoryId = QString::fromUtf8(kFavouritesCategoryId);
     if (m_selectedCategoryId == favouritesCategoryId) {
-        invalidateCategoriesCache();
-        emit categoriesChanged();
-        rebuildFilter();
-        return;
+        // Preserve delegates, scroll position and persistent indices during
+        // periodic watch-time updates, including changes to favourite order.
+        const auto previousRows = m_filteredRows;
+        rebuildFilteredRows();
+        const auto nextRows = m_filteredRows;
+        m_filteredRows = previousRows;
+        for (auto row = static_cast<int>(m_filteredRows.size()) - 1; row >= 0; --row) {
+            if (!nextRows.contains(m_filteredRows.at(row))) {
+                beginRemoveRows({}, row, row);
+                m_filteredRows.removeAt(row);
+                endRemoveRows();
+            }
+        }
+        for (auto row = 0; row < static_cast<int>(nextRows.size()); ++row) {
+            const auto existingRow = static_cast<int>(m_filteredRows.indexOf(nextRows.at(row)));
+            if (existingRow < 0) {
+                beginInsertRows({}, row, row);
+                m_filteredRows.insert(row, nextRows.at(row));
+                endInsertRows();
+            } else if (existingRow != row) {
+                // Earlier rows already match nextRows, so this move is upward.
+                beginMoveRows({}, existingRow, existingRow, {}, row);
+                m_filteredRows.move(existingRow, row);
+                endMoveRows();
+            }
+        }
+        if (previousRows.size() != m_filteredRows.size()) {
+            emit filteredCountChanged();
+        }
     }
 
     if (favouritesEligibilityChanged) {
@@ -548,6 +591,7 @@ bool ChannelListModel::setCategoryHidden(const QString &categoryId, const bool h
     }
 
     if (m_selectedCategoryId == normalizedCategoryId && hidden) {
+        m_settings->current().selectedGroupByProfile.remove(m_activeProfileId);
         m_selectedCategoryId.clear();
         emit selectedCategoryIdChanged();
     }
@@ -587,6 +631,8 @@ void ChannelListModel::refreshFilter()
     if (!m_selectedCategoryId.isEmpty()) {
         const auto ids = orderedVisibleCategoryIds();
         if (!ids.contains(m_selectedCategoryId)) {
+            m_settings->current().selectedGroupByProfile.remove(m_activeProfileId);
+            m_settings->save();
             m_selectedCategoryId.clear();
             emit selectedCategoryIdChanged();
         }

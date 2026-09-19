@@ -114,10 +114,10 @@ QDateTime parseIsoUtc(const QString &value)
     return parsed.isValid() ? parsed.toUTC() : QDateTime {};
 }
 
-QString catchupProgramLabel(const EpgEntry &program)
+QString catchupProgramLabel(const EpgEntry &program, const DateTimeFormatOptions options)
 {
     const auto title = program.title.trimmed();
-    const auto timeRange = epgEntryTimeRange(program);
+    const auto timeRange = epgEntryTimeRange(program, options);
     if (title.isEmpty()) {
         return timeRange;
     }
@@ -341,6 +341,26 @@ AppController::AppController(
     , m_epgService(epgService)
     , m_iconCacheService(*database, m_network)
 {
+    const auto updateDateTimeFormat = [this]() {
+        const auto options = m_settingsController->dateTimeFormatter()->options();
+        m_epgGridModel->setDateTimeFormat(options);
+        emit m_nowNextModel->dataChanged();
+        emit m_playbackNowNextModel->dataChanged();
+        emit m_guideStateModel->selectedProgramChanged();
+        emit m_guideStateModel->channelProgramsChanged();
+        if (m_channelListModel->rowCount() > 0) {
+            emit m_channelListModel->dataChanged(m_channelListModel->index(0),
+                m_channelListModel->index(m_channelListModel->rowCount() - 1),
+                { ChannelListModel::CurrentProgramTimeRangeRole });
+        }
+        emit epgRefreshStateChanged();
+        if (m_statusText.startsWith(QStringLiteral("EPG refreshed at "))) {
+            setStatusText(QStringLiteral("EPG refreshed at %1.").arg(epgLastRefreshText()));
+        }
+    };
+    connect(m_settingsController->dateTimeFormatter(), &DateTimeFormatter::formatChanged,
+        this, updateDateTimeFormat);
+    updateDateTimeFormat();
     m_selectedNowNextRefreshTimer.setSingleShot(true);
     m_selectedNowNextRefreshTimer.setInterval(120);
     connect(&m_selectedNowNextRefreshTimer, &QTimer::timeout, this, [this]() {
@@ -355,6 +375,10 @@ AppController::AppController(
     connect(&m_selectedGuideRefreshTimer, &QTimer::timeout, this, [this]() {
         const auto selectedId = m_pendingSelectedGuideChannelId;
         const auto guideOverlayVisible = m_shellController->activeOverlay() == QStringLiteral("guide");
+        if (guideOverlayVisible && (m_epgGridModel->rebuildPending()
+            || m_epgGridModel->rowIndexForChannelId(selectedId) < 0)) {
+            return;
+        }
         if (selectedId >= 0) {
             m_guideStateModel->selectChannel(selectedId);
             if (guideOverlayVisible) {
@@ -394,6 +418,7 @@ AppController::AppController(
     });
     connect(m_channelListModel, &ChannelListModel::selectedCategoryIdChanged, this, [this]() {
         m_guideStateModel->setSelectedGroupId(m_channelListModel->selectedCategoryId());
+        rebuildGuideGridAsync();
     });
     connect(m_channelListModel, &ChannelListModel::categoriesChanged, this, [this]() {
         rebuildGuideGridAsync();
@@ -406,15 +431,20 @@ AppController::AppController(
         m_epgGridModel->setSelectedProgramStart(
             m_guideStateModel->selectedProgram().value(QStringLiteral("start")).toString());
     });
-    connect(m_guideStateModel, &GuideStateModel::selectedGroupIdChanged, this, [this]() {
-        rebuildGuideGridAsync();
-    });
     connect(m_settingsController, &SettingsController::saved, this, [this]() {
         updateRefreshTimer();
-        m_guideStateModel->setPreviewEnabled(m_settings->current().guidePreviewEnabled);
-        m_nowNextModel->refresh();
-        m_playbackNowNextModel->refresh();
-        rebuildGuideGridAsync();
+        const auto &settings = m_settings->current();
+        m_guideStateModel->setPreviewEnabled(settings.guidePreviewEnabled);
+        // A presentation-only save must not move the Guide's time window.
+        if (m_epgGridModel->lookAheadHours() != normalizeGuideHours(settings.epgLookAheadHours)) {
+            m_nowNextModel->refresh();
+            m_playbackNowNextModel->refresh();
+            m_guideStateModel->refresh();
+        }
+        if (m_epgGridModel->guidePastHours() != normalizeGuideHours(settings.guidePastHours)
+            || m_epgGridModel->lookAheadHours() != normalizeGuideHours(settings.epgLookAheadHours)) {
+            rebuildGuideGridAsync();
+        }
     });
     connect(&m_refreshTimer, &QTimer::timeout, this, &AppController::triggerScheduledEpgRefresh);
     connect(&m_guideRebuildTimer, &QTimer::timeout, this, [this]() {
@@ -494,6 +524,13 @@ AppController::AppController(
 
 void AppController::connectPlaybackSession(PlayerController *controller)
 {
+    auto *formatter = m_settingsController->dateTimeFormatter();
+    controller->setDateTimeFormat(formatter->options());
+    connect(formatter, &DateTimeFormatter::formatChanged,
+        controller, [formatter, controller]() {
+            controller->setDateTimeFormat(formatter->options());
+        });
+
     connect(controller, &PlayerController::playbackError, this, [this, controller](const QString &message) {
         if (controller != m_playerController) {
             return;
@@ -596,7 +633,7 @@ QString AppController::epgLastRefreshText() const
         return QStringLiteral("Never");
     }
 
-    return m_epgFetchedAt.toLocalTime().toString(QStringLiteral("dd-MM-yyyy HH:mm"));
+    return formatDisplayDateTime(m_epgFetchedAt, m_settingsController->dateTimeFormatter()->dateTimePattern());
 }
 
 bool AppController::epgRefreshInProgress() const
@@ -1239,10 +1276,7 @@ void AppController::updateChannelProgrammeMetadata()
 
             infoByChannelId.insert(
                 channel.id,
-                QVariantMap {
-                    { QStringLiteral("title"), currentProgram->title },
-                    { QStringLiteral("timeRange"), epgEntryTimeRange(currentProgram.value()) }
-                });
+                toVariantMap(currentProgram.value()));
         }
 
         QMetaObject::invokeMethod(
@@ -1273,7 +1307,7 @@ QList<Channel> AppController::guideChannels() const
 {
     QList<Channel> filteredChannels;
     filteredChannels.reserve(m_loadedChannels.size());
-    const auto groupId = m_guideStateModel->selectedGroupId().trimmed();
+    const auto groupId = m_channelListModel->selectedCategoryId();
     const auto hiddenGroups = m_settings->current().hiddenGroupsByProfile.value(activeProfileId());
     for (const auto &channel : m_loadedChannels) {
         const auto categoryId = normalizeChannelCategoryId(channel.categoryId);
@@ -1367,7 +1401,7 @@ void AppController::flushTrackedWatchSeconds()
         m_watchSecondsByChannelId[m_watchTrackingChannelId] =
             m_watchSecondsByChannelId.value(m_watchTrackingChannelId, 0) + elapsedSeconds;
         m_channelListModel->setWatchSeconds(m_watchSecondsByChannelId);
-        if (m_guideStateModel->selectedGroupId() == QString::fromUtf8(kFavouritesCategoryId)) {
+        if (m_channelListModel->selectedCategoryId() == QString::fromUtf8(kFavouritesCategoryId)) {
             rebuildGuideGridAsync();
         }
     }
@@ -1397,6 +1431,8 @@ void AppController::rebuildGuideGridAsync()
 
 void AppController::scheduleGuideGridRebuild(const bool asyncRequested)
 {
+    // Invalidate immediately, including the coalescing interval before the next worker starts.
+    m_epgGridModel->invalidateRebuild();
     m_guideRebuildAsyncRequested = m_guideRebuildAsyncRequested || asyncRequested;
     if (!m_guideRebuildTimer.isActive()) {
         m_guideRebuildTimer.start();
@@ -1777,7 +1813,7 @@ void AppController::playCatchupAtOffsetInternal(
         destination->playCatchupChannel(
             catchupChannel,
             resolvedInitialUrl,
-            catchupProgramLabel(catchupProgram),
+            catchupProgramLabel(catchupProgram, m_settingsController->dateTimeFormatter()->options()),
             playbackTarget.programStartUtc,
             catchupProgram.stop,
             resolvedCatchupUrl,

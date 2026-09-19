@@ -77,6 +77,7 @@ public:
     Q_INVOKABLE bool stopRetainedPromotedAndRestoreGrid();
     Q_INVOKABLE bool swapPrimaryWithPictureInPicture();
     Q_INVOKABLE void assignChannelToFocusedTile(int channelId);
+    Q_INVOKABLE void assignChannelToPictureInPicture(int channelId);
     Q_INVOKABLE void focusNextTile();
     Q_INVOKABLE void focusTile(int tileIndex);
     Q_INVOKABLE void closeFocusedTile();

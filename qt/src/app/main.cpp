@@ -408,6 +408,7 @@ void registerQmlContextProperties(
     engine.rootContext()->setContextProperty(QStringLiteral("dvrController"), services.dvrController.get());
     engine.rootContext()->setContextProperty(QStringLiteral("trayController"), services.trayController.get());
     engine.rootContext()->setContextProperty(QStringLiteral("settingsController"), services.settingsController.get());
+    engine.rootContext()->setContextProperty(QStringLiteral("dateTimeFormatter"), services.settingsController->dateTimeFormatter());
     engine.rootContext()->setContextProperty(QStringLiteral("portableRuntimeController"), services.portableRuntimeController.get());
     engine.rootContext()->setContextProperty(QStringLiteral("uiTestCaptureController"), services.uiTestCaptureController.get());
     engine.rootContext()->setContextProperty(QStringLiteral("uiTestBridge"), services.uiTestBridge.get());

@@ -2,7 +2,7 @@ Unicode true
 !include "nsDialogs.nsh"
 !include "LogicLib.nsh"
 
-!define MUI_FINISHPAGE_RUN_TEXT "Uruchom aplikację"
+!define MUI_FINISHPAGE_RUN_TEXT "Run application"
 Var OkiltvExistingDir
 Var OkiltvExistingUninstaller
 Var OkiltvNewDir

@@ -5,6 +5,10 @@ import "../theme/Theme.js" as Theme
 Button {
     id: control
 
+    // qmllint disable unqualified
+    property int uiTransparency: (typeof settingsController !== "undefined") ? settingsController.uiTransparency : 100
+    // qmllint enable unqualified
+
     property string iconName: ""
     property url iconSource: ""
     property string glyph: ""
@@ -202,16 +206,16 @@ Button {
                 return control.barMode ? "transparent" : Theme.surface
             if (control.glassMode) {
                 if (control.down)
-                    return "#7a1a2d40"
+                    return Theme.uiBackground("#7a1a2d40", control.uiTransparency)
                 if (control.hovered)
-                    return "#98162131"
-                return "#8f0a131d"
+                    return Theme.uiBackground("#98162131", control.uiTransparency)
+                return Theme.uiBackground("#8f0a131d", control.uiTransparency)
             }
             if (control.barMode) {
                 if (control.down)
-                    return "#5e2a3e57"
+                    return Theme.uiBackground("#5e2a3e57", control.uiTransparency)
                 if (control.hovered)
-                    return "#4b203246"
+                    return Theme.uiBackground("#4b203246", control.uiTransparency)
                 return "transparent"
             }
             if (control.accent)

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "datetimeformat.h"
+
 #include <QDateTime>
 #include <QHash>
 #include <QJsonObject>
@@ -120,6 +122,8 @@ struct AppSettings
     std::optional<QUuid> activeProfileId;
     QList<ServerProfile> profiles;
 
+    QString dateOrder { QStringLiteral("system") };
+    QString timeFormat { QStringLiteral("system") };
     QString theme { QStringLiteral("Dark") };
     QString lastSection { QStringLiteral("live") };
     bool showOnTopModeIndicator { true };
@@ -128,6 +132,7 @@ struct AppSettings
     bool overlayAutoHide { true };
     int overlayAutoHideSeconds { 3 };
     int overlayInactivitySeconds { 60 };
+    int uiTransparency { 100 };
     int guidePastHours { 6 };
     int epgLookAheadHours { 24 };
     bool autoRefreshEpg { true };
@@ -167,6 +172,7 @@ struct AppSettings
     QJsonObject lastCatchupSession;
     QMap<QString, int> lastWatchedChannelId;
     QMap<QString, QList<int>> favoriteChannelIdsByProfile;
+    QMap<QString, QString> selectedGroupByProfile;
     QMap<QString, QStringList> hiddenGroupsByProfile;
     QMap<QString, QStringList> groupOrderByProfile;
     QMap<QString, bool> hideUncheckedGroupsByProfile;
@@ -203,13 +209,13 @@ QVariantMap toVariantMap(const ServerProfile &profile);
 QVariantMap toVariantMap(const SourceSummary &summary);
 QVariantMap toVariantMap(const ChannelCategory &category);
 QVariantMap toVariantMap(const Channel &channel);
-QVariantMap toVariantMap(const EpgEntry &entry);
-QVariantList toVariantList(const QList<EpgEntry> &entries);
+QVariantMap toVariantMap(const EpgEntry &entry, DateTimeFormatOptions options = {});
+QVariantList toVariantList(const QList<EpgEntry> &entries, DateTimeFormatOptions options = {});
 
 bool epgEntryIsNow(const EpgEntry &entry);
 double epgEntryProgressPercent(const EpgEntry &entry);
-QString epgEntryTimeRange(const EpgEntry &entry);
-QString epgEntryStartTimeLabel(const EpgEntry &entry);
+QString epgEntryTimeRange(const EpgEntry &entry, DateTimeFormatOptions options = {});
+QString epgEntryStartTimeLabel(const EpgEntry &entry, DateTimeFormatOptions options = {});
 
 } // namespace OKILTV::Core
 

@@ -9,11 +9,16 @@ import "../theme/Theme.js" as Theme
 Item {
     id: root
 
+    // qmllint disable unqualified
+    property int uiTransparency: (typeof settingsController !== "undefined") ? settingsController.uiTransparency : 100
+    // qmllint enable unqualified
+
     property int selectedIndex: -1
     // qmllint disable unqualified
     readonly property var profiles: profilesModel
     readonly property var groups: settingsSourceGroupsModel
     readonly property var liveGroups: liveSourceGroupsModel
+    readonly property var dateTime: dateTimeFormatter
     readonly property var app: appController
     readonly property var channelList: channelListModel
     readonly property var shell: shellController
@@ -716,7 +721,7 @@ Item {
             Layout.preferredWidth: root.sidebarWidth
             Layout.minimumWidth: root.sidebarWidth
             Layout.fillHeight: true
-            color: root.sidebarSurface
+            color: Theme.uiBackground(root.sidebarSurface, root.uiTransparency)
             radius: Theme.radiusM
             border.width: 0
 
@@ -811,7 +816,7 @@ Item {
                         width: ListView.view.width
                         height: 88
                         radius: Theme.radiusM
-                        color: root.selectedIndex === index ? root.selectedRowSurface : "transparent"
+                        color: root.selectedIndex === index ? Theme.uiBackground(root.selectedRowSurface, root.uiTransparency) : "transparent"
                         border.width: 0
 
                         Column {
@@ -836,7 +841,7 @@ Item {
                                     implicitWidth: 58
                                     implicitHeight: 22
                                     radius: 11
-                                    color: root.rowSurface
+                                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                                     border.width: 0
 
                                     Text {
@@ -858,7 +863,7 @@ Item {
                             Text {
                                 width: parent.width
                                 text: profileRow.profileLastRefreshed
-                                    ? "Last refresh " + profileRow.profileLastRefreshed.replace("T", " ").replace("Z", " UTC")
+                                    ? "Last refresh " + Qt.locale("en_US").toString(new Date(profileRow.profileLastRefreshed), root.dateTime.dateTimePattern)
                                     : "Never refreshed"
                                 color: Theme.textMuted
                                 font.pixelSize: 11
@@ -949,7 +954,7 @@ Item {
                             Layout.fillWidth: true
                             Layout.preferredHeight: 78
                             radius: Theme.radiusM
-                            color: root.rowSurface
+                            color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                             border.width: 0
 
                             Column {
@@ -976,7 +981,7 @@ Item {
                             Layout.fillWidth: true
                             Layout.preferredHeight: 78
                             radius: Theme.radiusM
-                            color: root.rowSurface
+                            color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                             border.width: 0
 
                             Column {
@@ -1413,7 +1418,7 @@ Item {
         Rectangle {
             width: Math.min(500, parent.width - Theme.spacingXL * 2)
             anchors.centerIn: parent
-            color: root.sectionSurface
+            color: Theme.uiBackground(root.sectionSurface, root.uiTransparency)
             radius: Theme.radiusL
             border.width: 0
             implicitHeight: deleteDialogContent.implicitHeight + Theme.spacingL * 2

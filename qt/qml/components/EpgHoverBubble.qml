@@ -5,6 +5,7 @@ import "../theme/Theme.js" as Theme
 Item {
     id: control
 
+    property string timePattern: "HH:mm"
     property var programData: ({})
     property string noticeText: ""
     property bool hovered: bubbleHover.hovered
@@ -22,7 +23,14 @@ Item {
         return value.length > 0 ? value : "Programme details"
     }
     readonly property string subTitleText: textValue("subTitle").trim()
-    readonly property string timeRangeText: textValue("timeRange").trim()
+    readonly property string timeRangeText: {
+        const start = new Date(textValue("start"))
+        const stop = new Date(textValue("stop"))
+        if (!Number.isFinite(start.getTime()) || !Number.isFinite(stop.getTime()))
+            return textValue("timeRange").trim()
+        return Qt.locale("en_US").toString(start, control.timePattern)
+            + " - " + Qt.locale("en_US").toString(stop, control.timePattern)
+    }
     readonly property string episodeText: textValue("episodeNum").trim()
     readonly property string descriptionText: {
         const value = textValue("description").trim()

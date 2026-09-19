@@ -14,6 +14,8 @@ qt_add_executable(OKILTVQtCoreTests
     ../src/core/epgservice.h
     ../src/core/m3uservice.cpp
     ../src/core/m3uservice.h
+    ../src/core/datetimeformat.cpp
+    ../src/core/datetimeformat.h
     ../src/core/models.cpp
     ../src/core/models_json.cpp
     ../src/core/models_variant.cpp
@@ -74,6 +76,8 @@ qt_add_executable(OKILTVQtAppTests
     ../src/app/playercontroller.h
     ../src/app/profilesmodel.cpp
     ../src/app/profilesmodel.h
+    ../src/app/datetimeformatter.cpp
+    ../src/app/datetimeformatter.h
     ../src/app/settingscontroller.cpp
     ../src/app/settingscontroller.h
     ../src/app/shellcontroller.cpp
@@ -98,6 +102,8 @@ qt_add_executable(OKILTVQtAppTests
     ../src/core/iconcache_service.h
     ../src/core/m3uservice.cpp
     ../src/core/m3uservice.h
+    ../src/core/datetimeformat.cpp
+    ../src/core/datetimeformat.h
     ../src/core/models.cpp
     ../src/core/models_json.cpp
     ../src/core/models_variant.cpp
@@ -158,6 +164,8 @@ qt_add_executable(OKILTVQtCatchupTests
     ../src/player/catchuptsjoiner.cpp
     ../src/player/mpegtstimestampnormalizer.cpp
     ../src/core/catchupurlresolver.cpp
+    ../src/core/datetimeformat.cpp
+    ../src/core/datetimeformat.h
     ../src/core/models.cpp
     ../src/core/debuglogger.cpp
     ../src/core/redaction.cpp
@@ -172,6 +180,10 @@ add_test(NAME OKILTVQtCatchupTests COMMAND OKILTVQtCatchupTests)
 if (NOT CMAKE_CROSSCOMPILING)
     find_program(OKILTV_QMLTESTRUNNER qmltestrunner HINTS "${Qt6_DIR}/../../../bin")
     if (OKILTV_QMLTESTRUNNER)
+        add_test(NAME OKILTVQtUiTransparencyTests
+            COMMAND "${OKILTV_QMLTESTRUNNER}" -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_uitransparency.qml")
+        set_tests_properties(OKILTVQtUiTransparencyTests PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
         add_test(NAME OKILTVQtEpgTimelineTests
             COMMAND "${OKILTV_QMLTESTRUNNER}" -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_epgtimeline.qml")
         add_test(NAME OKILTVQtSourceGroupsListTests

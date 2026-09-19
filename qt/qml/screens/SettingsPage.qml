@@ -10,10 +10,15 @@ import "../theme/Theme.js" as Theme
 Item {
     id: root
 
+    // qmllint disable unqualified
+    property int uiTransparency: root.settings.uiTransparency
+    // qmllint enable unqualified
+
     property bool overlayMode: false
     // qmllint disable unqualified
     readonly property var shell: shellController
     readonly property var settings: settingsController
+    readonly property var dateTime: dateTimeFormatter
     readonly property var app: appController
     readonly property var groups: settingsSourceGroupsModel
     readonly property var guideState: guideStateModel
@@ -323,7 +328,7 @@ Item {
 
             Rectangle {
                 anchors.fill: parent
-                color: root.contentSurface
+                color: Theme.uiBackground(root.contentSurface, root.uiTransparency)
             }
 
             Loader {
@@ -338,7 +343,7 @@ Item {
 
             Layout.preferredWidth: Theme.railWidth
             Layout.fillHeight: true
-            color: root.railSurface
+            color: Theme.uiBackground(root.railSurface, root.uiTransparency)
 
             ColumnLayout {
                 anchors.fill: parent
@@ -392,7 +397,10 @@ Item {
                 }
 
                 SettingsRailButton {
+                    id: saveButton
+
                     Layout.alignment: Qt.AlignHCenter
+                    visible: root.saveEnabled
                     iconSource: root.iconPath("save.svg")
                     glyph: "SV"
                     caption: root.activeSection === "sources"
@@ -405,6 +413,33 @@ Item {
                     enabled: root.saveEnabled
                     activeFillColor: root.activeTabSurface
                     hoverFillColor: root.hoverTabSurface
+                    SequentialAnimation {
+                        running: saveButton.visible && !saveButton.hovered && !saveButton.down
+                        loops: Animation.Infinite
+                        onRunningChanged: {
+                            if (!running) {
+                                saveButton.opacity = 1.0
+                            }
+                        }
+
+                        NumberAnimation {
+                            target: saveButton
+                            property: "opacity"
+                            from: 1.0
+                            to: 0.78
+                            duration: 1100
+                            easing.type: Easing.InOutSine
+                        }
+                        NumberAnimation {
+                            target: saveButton
+                            property: "opacity"
+                            from: 0.78
+                            to: 1.0
+                            duration: 1100
+                            easing.type: Easing.InOutSine
+                        }
+                    }
+
                     onClicked: {
                         if (root.activeSection === "sources") {
                             if (root.sourcesPaneRef) {
@@ -542,6 +577,132 @@ Item {
                 panelSpacing: Theme.spacingS
 
                 Text {
+                    text: "Interface"
+                    color: Theme.textPrimary
+                    font.pixelSize: 18
+                    font.bold: true
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text {
+                        Layout.fillWidth: true
+                        text: "UI transparency"
+                        color: Theme.textPrimary
+                        font.pixelSize: 14
+                    }
+                    Text {
+                        objectName: "ui.settings.uiTransparencyValue"
+                        text: root.settings.uiTransparency + "%"
+                        color: Theme.textPrimary
+                        font.pixelSize: 14
+                    }
+                }
+
+                Slider {
+                    objectName: "ui.settings.uiTransparency"
+                    Layout.fillWidth: true
+                    from: 0
+                    to: 100
+                    stepSize: 1
+                    snapMode: Slider.SnapAlways
+                    live: true
+                    value: root.settings.uiTransparency
+                    Accessible.name: "UI transparency"
+                    onMoved: root.settings.uiTransparency = Math.round(value)
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text {
+                        Layout.fillWidth: true
+                        text: "Opaque"
+                        color: Theme.textSecondary
+                        font.pixelSize: 12
+                    }
+                    Text {
+                        text: "Default"
+                        color: Theme.textSecondary
+                        font.pixelSize: 12
+                    }
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "100% keeps the default transparency; 0% makes UI backgrounds opaque. Preview updates immediately. Save to keep changes."
+                    color: Theme.textSecondary
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                }
+            }
+
+            OverlaySectionPanel {
+                Layout.fillWidth: true
+                panelColor: root.sectionSurface
+                panelSpacing: Theme.spacingS
+
+                Text {
+                    text: "Date & time"
+                    color: Theme.textPrimary
+                    font.pixelSize: 18
+                    font.bold: true
+                }
+
+                Text {
+                    text: "Date order"
+                    color: Theme.textPrimary
+                    font.pixelSize: 14
+                }
+                FormComboBox {
+                    objectName: "ui.settings.dateOrder"
+                    Layout.fillWidth: true
+                    model: ["System (" + root.dateTime.systemDateOrderLabel + ")", "DD/MM", "MM/DD"]
+                    currentIndex: Math.max(0, ["system", "dmy", "mdy"].indexOf(root.settings.dateOrder))
+                    onActivated: root.settings.dateOrder = ["system", "dmy", "mdy"][currentIndex]
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: "Changes the day/month order while keeping each view's date style."
+                    color: Theme.textSecondary
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                Text {
+                    text: "Time format"
+                    color: Theme.textPrimary
+                    font.pixelSize: 14
+                }
+                FormComboBox {
+                    objectName: "ui.settings.timeFormat"
+                    Layout.fillWidth: true
+                    model: ["System (" + root.dateTime.systemTimeFormatLabel + ")", "24-hour", "12-hour"]
+                    currentIndex: Math.max(0, ["system", "24h", "12h"].indexOf(root.settings.timeFormat))
+                    onActivated: root.settings.timeFormat = ["system", "24h", "12h"][currentIndex]
+                }
+                Text {
+                    objectName: "ui.settings.dateTimePreview"
+                    Layout.fillWidth: true
+                    text: "Preview: " + root.dateTime.preview(root.settings.dateOrder, root.settings.timeFormat)
+                    color: Theme.textPrimary
+                    font.pixelSize: 14
+                    wrapMode: Text.Wrap
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: "Applies throughout the app after Save. Day and month names are in English. System preferences are read at startup."
+                    color: Theme.textSecondary
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                }
+            }
+
+            OverlaySectionPanel {
+                Layout.fillWidth: true
+                panelColor: root.sectionSurface
+                panelSpacing: Theme.spacingS
+
+                Text {
                     text: "Behavior"
                     color: Theme.textPrimary
                     font.pixelSize: 18
@@ -552,7 +713,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 76
 
@@ -592,7 +753,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 76
 
@@ -632,7 +793,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 76
 
@@ -672,7 +833,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 76
                     visible: root.settings.overlayAutoHide
@@ -724,7 +885,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 76
 
@@ -775,7 +936,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 76
 
@@ -815,7 +976,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 76
 
@@ -878,7 +1039,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 82
 
@@ -937,7 +1098,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 80
 
@@ -988,7 +1149,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 124
 
@@ -1086,7 +1247,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 76
 
@@ -1149,7 +1310,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 80
 
@@ -1213,7 +1374,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 76
 
@@ -1253,7 +1414,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 76
 
@@ -1293,7 +1454,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 96
 
@@ -1334,7 +1495,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 80
 
@@ -1398,7 +1559,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 80
 
@@ -1509,7 +1670,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 76
 
@@ -1582,7 +1743,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: statusTextBlock.implicitHeight + 28
 
@@ -1637,7 +1798,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 80
 
@@ -1680,7 +1841,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 80
 
@@ -1757,7 +1918,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 80
 
@@ -1834,7 +1995,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 80
 
@@ -1874,7 +2035,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 80
 
@@ -1932,7 +2093,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 80
 
@@ -1973,7 +2134,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 80
 
@@ -2060,7 +2221,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 76
 
@@ -2117,7 +2278,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 80
 
@@ -2168,7 +2329,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: Theme.radiusM
-                    color: root.rowSurface
+                    color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                     border.width: 0
                     implicitHeight: 80
 
@@ -2350,7 +2511,7 @@ Item {
                     color: Theme.textPrimary
                     background: Rectangle {
                         radius: Theme.radiusM
-                        color: root.rowSurface
+                        color: Theme.uiBackground(root.rowSurface, root.uiTransparency)
                         border.width: 0
                     }
                 }
@@ -2376,7 +2537,7 @@ Item {
         Rectangle {
             width: Math.min(460, parent.width - Theme.spacingXL * 2)
             anchors.centerIn: parent
-            color: root.sectionSurface
+            color: Theme.uiBackground(root.sectionSurface, root.uiTransparency)
             radius: Theme.radiusL
             border.width: 0
             implicitHeight: dialogContent.implicitHeight + Theme.spacingL * 2
@@ -2451,7 +2612,7 @@ Item {
         Rectangle {
             width: Math.min(500, parent.width - Theme.spacingXL * 2)
             anchors.centerIn: parent
-            color: root.sectionSurface
+            color: Theme.uiBackground(root.sectionSurface, root.uiTransparency)
             radius: Theme.radiusL
             border.width: 0
             implicitHeight: noGroupsDialogContent.implicitHeight + Theme.spacingL * 2

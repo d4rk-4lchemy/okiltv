@@ -7,6 +7,10 @@ import "../theme/Theme.js" as Theme
 ComboBox {
     id: control
 
+    // qmllint disable unqualified
+    property int uiTransparency: (typeof settingsController !== "undefined") ? settingsController.uiTransparency : 100
+    // qmllint enable unqualified
+
     implicitHeight: 44
     leftPadding: 14
     rightPadding: 36
@@ -37,12 +41,12 @@ ComboBox {
         radius: Theme.radiusM
         color: {
             if (!control.enabled)
-                return "#53232c34"
+                return Theme.uiBackground("#53232c34", control.uiTransparency)
             if (control.visualFocus)
-                return "#8a2b343d"
+                return Theme.uiBackground("#8a2b343d", control.uiTransparency)
             if (control.hovered)
-                return "#7d273039"
-            return "#71242d35"
+                return Theme.uiBackground("#7d273039", control.uiTransparency)
+            return Theme.uiBackground("#71242d35", control.uiTransparency)
         }
         border.width: control.visualFocus ? 1 : 0
         border.color: control.visualFocus ? "#96acbc" : "transparent"
@@ -55,7 +59,7 @@ ComboBox {
 
         background: Rectangle {
             radius: Theme.radiusM
-            color: "#de202931"
+            color: Theme.uiBackground("#de202931", control.uiTransparency)
             border.width: 0
         }
 
@@ -84,7 +88,7 @@ ComboBox {
 
                 background: Rectangle {
                     radius: Theme.radiusS
-                    color: optionDelegate.highlighted ? "#8c29343d" : (optionDelegate.hovered ? "#5f252e37" : "transparent")
+                    color: optionDelegate.highlighted ? Theme.uiBackground("#8c29343d", control.uiTransparency) : (optionDelegate.hovered ? Theme.uiBackground("#5f252e37", control.uiTransparency) : "transparent")
                     border.width: 0
                 }
 

@@ -5,7 +5,7 @@ Build with `scripts/package_qt_win64.sh`. Test in a disposable Windows VM
 
 1. With no installation, install to a path containing spaces. Check that
    `OKILTV.exe` and `Uninstall.exe` exist and Apps & Features points to this folder.
-   The finish-page **Uruchom aplikację** checkbox must be checked. Finish should
+   The finish-page **Run application** checkbox must be checked. Finish should
    launch OKILTV; repeating with the box unchecked should not launch it.
 2. Install an older release in a non-default folder, then run the new installer.
    No uninstall prompt should appear at startup. After the license page, the

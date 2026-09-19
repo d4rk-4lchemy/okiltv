@@ -911,6 +911,16 @@ QString PlayerController::playbackMode() const
     return m_playbackMode;
 }
 
+void PlayerController::setDateTimeFormat(const Core::DateTimeFormatOptions options)
+{
+    if (options == m_dateTimeFormat) {
+        return;
+    }
+    m_dateTimeFormat = options;
+    emit catchupTimelineChanged();
+    emit catchupProgramLabelChanged();
+}
+
 QString PlayerController::catchupProgramLabel() const
 {
     return m_catchupProgramLabel;
@@ -922,7 +932,7 @@ QVariantMap PlayerController::catchupCurrentProgram() const
     if (!inCatchupMode() || !program.has_value()) {
         return {};
     }
-    auto result = Core::toVariantMap(program.value());
+    auto result = Core::toVariantMap(program.value(), m_dateTimeFormat);
     const auto durationMs = program->start.msecsTo(program->stop);
     const auto watchedOffsetMs = static_cast<double>(program->start.msecsTo(m_catchupProgramStartUtc))
         + m_catchupTimelinePositionSeconds * 1000.0;
@@ -5264,9 +5274,8 @@ void PlayerController::stop()
 void PlayerController::togglePause()
 {
     checkpointCatchupProgress();
-    if (m_sharedPlaybackPlayer && m_sharedPlaybackProtected) {
-        return;
-    }
+    // Promoted PiP/grid players remain externally owned, but the primary
+    // transport still controls their pause state.
     if (m_reconnectActive && !inCatchupMode()) {
         stopReconnectLoop(QStringLiteral("manual-pause"));
         m_userPausedManually = true;

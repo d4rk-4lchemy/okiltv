@@ -433,6 +433,9 @@ bool MultiViewController::assignResolvedChannel(const Channel &channel)
             return true;
         }
         if (slotHasDuplicateChannel(channel, 0)) {
+            if (m_layoutMode == QStringLiteral("pip")) {
+                return swapPrimaryWithPictureInPicture();
+            }
             emit statusMessageRequested(QStringLiteral("Channel already open in another tile"));
             return false;
         }
@@ -708,6 +711,25 @@ void MultiViewController::assignChannelToFocusedTile(const int channelId)
     }
 
     assignResolvedChannel(channel.value());
+}
+
+void MultiViewController::assignChannelToPictureInPicture(const int channelId)
+{
+    if (!multiviewEnabled()) {
+        return;
+    }
+
+    const auto channel = m_channelListModel->channelById(channelId);
+    if (!channel.has_value()) {
+        return;
+    }
+
+    if (m_layoutMode != QStringLiteral("pip")) {
+        togglePictureInPicture(channelId);
+        return;
+    }
+
+    assignChannelToSecondarySlot(1, channel.value());
 }
 
 void MultiViewController::focusNextTile()

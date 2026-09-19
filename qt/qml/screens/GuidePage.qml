@@ -9,6 +9,10 @@ import "../theme/Theme.js" as Theme
 Item {
     id: root
 
+    // qmllint disable unqualified
+    property int uiTransparency: (typeof settingsController !== "undefined") ? settingsController.uiTransparency : 100
+    // qmllint enable unqualified
+
     signal collapseRequested()
     signal playChannelRequested(int channelId)
     signal playCatchupRequested(var channel, var program)
@@ -20,8 +24,10 @@ Item {
     readonly property var epgGrid: epgGridModel
     readonly property var guideState: guideStateModel
     readonly property var channelList: channelListModel
+    readonly property var dateTime: dateTimeFormatter
     readonly property var app: appController
     readonly property var player: multiViewController.primaryController
+    readonly property var multiView: multiViewController
     readonly property var dvr: dvrController
     // qmllint enable unqualified
     property real channelColumnWidth: root.shell.layoutBand === "compact" ? 246 : 284
@@ -66,7 +72,7 @@ Item {
         while (Number.isFinite(current.getTime()) && current.getTime() < endMs) {
             const next = new Date(current.getFullYear(), current.getMonth(), current.getDate() + 1)
             days.push({
-                label: current.toLocaleDateString(Qt.locale("en_GB"), "dddd, dd.MM"),
+                label: current.toLocaleDateString(Qt.locale("en_US"), root.dateTime.guideDatePattern),
                 startMinutes: (current.getTime() - startMs) / 60000,
                 endMinutes: (Math.min(next.getTime(), endMs) - startMs) / 60000
             })
@@ -83,6 +89,8 @@ Item {
     property bool pendingGuideSyncHorizontal: true
     property var hoveredProgram: ({})
     property var hoveredProgramChannel: ({})
+    property bool initialChannelPending: false
+    property int initialPreferredChannelId: -1
     property var selectedCatchupState: ({ "visible": false, "enabled": false, "reason": "" })
     property int selectedDetailRowIndex: {
         const _timeSlotsRevision = root.epgGrid.timeSlots.length
@@ -335,6 +343,9 @@ Item {
 
     function focusChannel(channelId, expandDetails) {
         if (channelId < 0) {
+            root.guideState.clear()
+            root.epgGrid.selectedChannelId = -1
+            root.epgGrid.selectedProgramStart = ""
             root.guideState.detailsExpanded = false
             return
         }
@@ -468,13 +479,26 @@ Item {
     }
 
     function prepareForOpen(preferredChannelId) {
-        root.guideState.selectedGroupId = root.channelList.selectedCategoryId
+        root.initialPreferredChannelId = preferredChannelId >= 0 ? preferredChannelId : -1
+        root.initialChannelPending = true
         root.scheduleGuideRenderViewportSync()
         Qt.callLater(function() {
             root.applyGuideOpenAnchor()
-            root.focusInitialChannel(preferredChannelId)
+            root.reconcileGridSelection()
             root.scheduleGuideRenderViewportSync()
         })
+    }
+
+    function reconcileGridSelection() {
+        if (root.shell.activeOverlay !== "guide" || root.epgGrid.rebuildPending) {
+            return
+        }
+        if (root.initialChannelPending) {
+            root.initialChannelPending = false
+            root.focusInitialChannel(root.initialPreferredChannelId)
+        } else if (root.epgGrid.rowIndexForChannelId(root.guideState.selectedChannelId) < 0) {
+            root.focusInitialChannel(-1)
+        }
     }
 
     function handleKeyboardEvent(event) {
@@ -483,12 +507,15 @@ Item {
         }
 
         const ctrlPressed = (event.modifiers & Qt.ControlModifier) !== 0
-        if (ctrlPressed && event.key === Qt.Key_R) {
-            return root.togglePreferredProgramDvrSchedule(true)
-        }
         if (ctrlPressed && event.key === Qt.Key_Down) {
             root.collapseRequested()
             return true
+        }
+        if (root.epgGrid.rebuildPending) {
+            return true
+        }
+        if (ctrlPressed && event.key === Qt.Key_R) {
+            return root.togglePreferredProgramDvrSchedule(true)
         }
         if (ctrlPressed && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) {
             const selectedProgram = root.selectedProgramData()
@@ -586,6 +613,9 @@ Item {
     }
 
     function togglePreferredProgramDvrSchedule(preferKeyboardSelection) {
+        if (root.epgGrid.rebuildPending) {
+            return true
+        }
         if (root.toggleSelectedProgramDvrSchedule()) {
             return true
         }
@@ -613,6 +643,19 @@ Item {
 
     Connections {
         target: root.epgGrid
+
+        function onRebuildPendingChanged() {
+            if (!root.epgGrid.rebuildPending) {
+                root.reconcileGridSelection()
+            }
+        }
+
+        function onModelReset() {
+            root.hoveredProgram = ({})
+            root.hoveredProgramChannel = ({})
+            guideViewportSyncTimer.stop()
+            root.pendingGuideRowIndex = -1
+        }
 
         function onSelectedProgramChanged() {
             root.refreshSelectedCatchupState()
@@ -863,6 +906,7 @@ Item {
                         boundsBehavior: Flickable.StopAtBounds
                         clip: true
                         model: root.epgGrid
+                        enabled: !root.epgGrid.rebuildPending
                         reuseItems: false
                         cacheBuffer: 1600
                         onContentYChanged: root.scheduleGuideRenderViewportSync()
@@ -1060,8 +1104,19 @@ Item {
 
                                 MouseArea {
                                     anchors.fill: parent
-                                    onClicked: root.focusChannel(timelineRow.channelId, true)
-                                    onDoubleClicked: root.playChannelRequested(timelineRow.channelId)
+                                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                    onClicked: function(mouse) {
+                                        if (mouse.button === Qt.RightButton) {
+                                            root.multiView.assignChannelToPictureInPicture(timelineRow.channelId)
+                                        } else if (mouse.button === Qt.LeftButton) {
+                                            root.focusChannel(timelineRow.channelId, true)
+                                        }
+                                    }
+                                    onDoubleClicked: function(mouse) {
+                                        if (mouse.button === Qt.LeftButton) {
+                                            root.playChannelRequested(timelineRow.channelId)
+                                        }
+                                    }
                                 }
 
                                 WheelHandler {
@@ -1248,7 +1303,7 @@ Item {
 
                                 sourceComponent: Rectangle {
                                     radius: 0
-                                    color: "#de142331"
+                                    color: Theme.uiBackground("#de142331", root.uiTransparency)
 
                                     Column {
                                         id: detailContentColumn

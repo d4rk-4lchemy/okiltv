@@ -8,6 +8,10 @@ import "../theme/Theme.js" as Theme
 Item {
     id: root
 
+    // qmllint disable unqualified
+    property int uiTransparency: (typeof settingsController !== "undefined") ? settingsController.uiTransparency : 100
+    // qmllint enable unqualified
+
     FontLoader {
         id: numericOsdFont
         source: "qrc:/resources/fonts/VCR_OSD_MONO_1.001.ttf"
@@ -17,6 +21,7 @@ Item {
     // qmllint disable unqualified
     readonly property var shell: shellController
     readonly property var settings: settingsController
+    readonly property var dateTime: dateTimeFormatter
     readonly property var app: appController
     readonly property var player: multiViewController.primaryController
     readonly property var channelList: channelListModel
@@ -28,7 +33,8 @@ Item {
     readonly property var multiView: multiViewController
     readonly property var dvr: dvrController
     // qmllint enable unqualified
-    property string currentClockText: Qt.formatDateTime(new Date(), "ddd dd MMM  hh:mm")
+    property date currentClockTime: new Date()
+    readonly property string currentClockText: Qt.locale("en_US").toString(root.currentClockTime, root.dateTime.clockPattern)
     property bool hasPlaybackChannel: root.player.currentChannel.id !== undefined
     property bool showPlaybackSpinner: (root.player.isLoading
             || root.player.isBuffering
@@ -75,6 +81,9 @@ Item {
     property bool groupPickerOpen: false
     property string groupPickerSearchText: ""
     property string groupPickerHighlightedId: ""
+    property bool groupPickerKeyboardNavigation: false
+    property point groupKeyboardPointerPosition: Qt.point(-1, -1)
+    readonly property int leftPaneViewSwitchWidth: 88
     property bool sourcePickerOpen: false
     property string sourcePickerSearchText: ""
     property string sourcePickerHighlightedId: ""
@@ -199,6 +208,9 @@ Item {
     property int committedChannelId: -1
     property bool hoverPreviewActive: false
     property bool previewPinned: false
+    property bool channelListKeyboardNavigation: false
+    property bool searchFocusPending: false
+    property point channelKeyboardPointerPosition: Qt.point(-1, -1)
     property int mousePinnedChannelId: -1
     property string mousePinnedProfileId: ""
     readonly property bool mouseSelectionPinned: root.mousePinnedChannelId >= 0
@@ -704,7 +716,7 @@ Item {
         if (!Number.isFinite(numeric) || numeric <= 0) {
             return "--:--"
         }
-        return Qt.formatTime(new Date(numeric), "hh:mm")
+        return Qt.locale("en_US").toString(new Date(numeric), root.dateTime.timePattern)
     }
 
     function formatTimeshiftLag(seconds) {
@@ -1211,6 +1223,9 @@ Item {
 
     function setPlayerKeyboardFocusArea(area) {
         const nextArea = area && area.length > 0 ? area : "none"
+        if (nextArea !== "search") {
+            root.searchFocusPending = false
+        }
         if (nextArea !== "rightPane" && root.keyboardProgramBubbleActive) {
             root.clearKeyboardProgramBubble()
         }
@@ -1227,7 +1242,7 @@ Item {
     }
 
     function previewChannel(channelId) {
-        if (channelId < 0 || (!root.showShellChrome && !root.pendingEmptyPipActive)
+        if (root.channelListKeyboardNavigation || channelId < 0 || (!root.showShellChrome && !root.pendingEmptyPipActive)
             || root.chromeAnimationsRunning || root.leftPickerOpen) {
             return
         }
@@ -1281,6 +1296,7 @@ Item {
         if (channelId < 0 || !root.channelList.selectById(channelId)) {
             return
         }
+        root.channelListKeyboardNavigation = false
         hoverPreviewActive = false
         previewPinned = true
         committedChannelId = channelId
@@ -1554,6 +1570,10 @@ Item {
             return false
         }
 
+        if (revealSource === "keyboard") {
+            root.channelKeyboardPointerPosition = playerPointerHover.point.scenePosition
+            root.channelListKeyboardNavigation = true
+        }
         let targetChannelId = channelId
         if (targetChannelId < 0) {
             targetChannelId = !Number.isNaN(root.playbackChannelId) && root.playbackChannelId >= 0
@@ -1595,6 +1615,10 @@ Item {
             return false
         }
 
+        if (revealSource === "keyboard") {
+            root.channelKeyboardPointerPosition = playerPointerHover.point.scenePosition
+            root.channelListKeyboardNavigation = true
+        }
         root.cancelPendingHoverPreview()
         hoverPreviewActive = false
         previewPinned = true
@@ -1616,6 +1640,8 @@ Item {
             return false
         }
 
+        root.channelKeyboardPointerPosition = playerPointerHover.point.scenePosition
+        root.channelListKeyboardNavigation = true
         root.cancelPendingHoverPreview()
         hoverPreviewActive = false
         previewPinned = true
@@ -1846,9 +1872,21 @@ Item {
             root.shell.clearOverlay()
         }
 
+        root.searchFocusPending = true
+        root.setPlayerKeyboardFocusArea("search")
         revealUi("keyboard")
-        searchField.forceActiveFocus()
+        Qt.callLater(root.focusSearchWhenReady)
         previewHoldTimer.restart()
+    }
+
+    function focusSearchWhenReady() {
+        if (!root.searchFocusPending || root.chromeAnimationsRunning
+            || !searchField.enabled || !root.showShellChrome
+            || root.shell.activeOverlay !== "none" || root.leftPickerOpen) {
+            return
+        }
+        root.searchFocusPending = false
+        searchField.forceActiveFocus()
     }
 
     function ensureSourcePickerHighlight() {
@@ -2064,6 +2102,8 @@ Item {
         root.liveGroups.reload()
         root.groupPickerSearchText = ""
         root.groupPickerHighlightedId = root.channelList.selectedCategoryId
+        root.groupKeyboardPointerPosition = playerPointerHover.point.scenePosition
+        root.groupPickerKeyboardNavigation = revealSource === "keyboard"
         root.groupPickerOpen = true
         interactionFocusTarget.forceActiveFocus()
         root.setPlayerKeyboardFocusArea(focusCurrentGroup ? "leftPane" : "groupSearch")
@@ -2098,6 +2138,7 @@ Item {
             root.beginLeftPaneHide("group")
         }
         root.groupPickerOpen = false
+        root.groupPickerKeyboardNavigation = false
         if (!hideOverlaysAfterClose) {
             root.groupPickerSearchText = ""
             root.groupPickerHighlightedId = ""
@@ -2264,6 +2305,8 @@ Item {
             return false
         }
 
+        root.groupKeyboardPointerPosition = playerPointerHover.point.scenePosition
+        root.groupPickerKeyboardNavigation = true
         interactionFocusTarget.forceActiveFocus()
         root.setPlayerKeyboardFocusArea("leftPane")
         revealUi(revealSource)
@@ -2276,6 +2319,8 @@ Item {
             return false
         }
 
+        root.groupKeyboardPointerPosition = playerPointerHover.point.scenePosition
+        root.groupPickerKeyboardNavigation = true
         let index = 0
         for (let row = 0; row < rows.length; ++row) {
             if (rows[row].id === root.groupPickerHighlightedId) {
@@ -2973,18 +3018,18 @@ Item {
         interval: 1000
         running: root.visible
         repeat: true
-        onTriggered: root.currentClockText = Qt.formatDateTime(new Date(), "ddd dd MMM  hh:mm")
+        onTriggered: root.currentClockTime = new Date()
     }
 
     Component.onCompleted: {
         root.liveGroups.profileId = root.app.activeProfileId
-        root.channelList.selectedCategoryId = ""
         committedChannelId = root.channelList.selectedChannelId
         root.scheduleSelectedChannelVisible(ListView.Contain)
         root.refreshLiveCatchupState()
     }
 
     onKeyboardModeLockedChanged: root.updateAutoHide()
+    onChromeAnimationsRunningChanged: Qt.callLater(root.focusSearchWhenReady)
     onHoverBubbleActiveChanged: root.updateAutoHide()
     onNumericEntryContextActiveChanged: {
         if (!root.numericEntryContextActive) {
@@ -2999,6 +3044,7 @@ Item {
             Qt.callLater(function() { epgTimeline.centerPlayback(true) })
         root.clearLeftPaneHideIfSettled()
         if (!root.showShellChrome) {
+            root.searchFocusPending = false
             root.hideProgramHoverBubble()
         }
     }
@@ -3451,7 +3497,7 @@ Item {
                     width: Math.min(parent.width - 16, tileChannelLabel.implicitWidth + 12)
                     height: tileChannelLabel.implicitHeight + 8
                     radius: 4
-                    color: "#8e09131c"
+                    color: Theme.uiBackground("#8e09131c", root.uiTransparency)
                     border.width: 0
                     clip: true
                     z: 6
@@ -4349,7 +4395,7 @@ Item {
 
         Rectangle {
             anchors.fill: parent
-            color: "#82070d12"
+            color: Theme.uiBackground("#82070d12", root.uiTransparency)
         }
 
         HoverHandler {
@@ -4371,107 +4417,175 @@ Item {
             anchors.bottomMargin: Theme.spacingM
             spacing: Theme.spacingS
 
-            Rectangle {
+            Item {
                 Layout.fillWidth: true
                 implicitHeight: 42
-                radius: 4
-                color: "#960d1822"
-                border.width: searchField.activeFocus ? 1 : 0
-                border.color: Theme.borderStrong
                 visible: root.leftPaneDisplayMode === "channels" && root.hasAnyChannels
 
-                TextField {
-                    id: searchField
+                RowLayout {
                     anchors.fill: parent
-                    anchors.margins: 1
-                    leftPadding: 12
-                    rightPadding: 12
-                    topPadding: 10
-                    bottomPadding: 10
-                    text: root.channelList.searchText
-                    placeholderText: "Search channels"
-                    placeholderTextColor: Theme.textMuted
-                    color: Theme.textPrimary
-                    font.pixelSize: 14
-                    hoverEnabled: true
-                    background: Item {}
-                    onTextEdited: root.channelList.searchText = text
-                    Keys.onPressed: function(event) {
-                        if (event.key === Qt.Key_Down
-                            || event.key === Qt.Key_Tab
-                            || event.key === Qt.Key_Return
-                            || event.key === Qt.Key_Enter) {
-                            event.accepted = true
-                            root.noteKeyboardNavigationKey()
-                            root.focusChannelFromSearch("keyboard")
+                    spacing: Theme.spacingS
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        radius: 4
+                        color: Theme.uiBackground("#960d1822", root.uiTransparency)
+                        border.width: searchField.activeFocus ? 1 : 0
+                        border.color: Theme.borderStrong
+
+                        TextField {
+                            id: searchField
+                            anchors.fill: parent
+                            anchors.margins: 1
+                            leftPadding: 12
+                            rightPadding: 12
+                            topPadding: 10
+                            bottomPadding: 10
+                            text: root.channelList.searchText
+                            placeholderText: "Search channels"
+                            placeholderTextColor: Theme.textMuted
+                            color: Theme.textPrimary
+                            font.pixelSize: 14
+                            hoverEnabled: true
+                            background: Item {}
+                            onTextEdited: root.channelList.searchText = text
+                            Keys.onPressed: function(event) {
+                                if (event.key === Qt.Key_Down
+                                    || event.key === Qt.Key_Tab
+                                    || event.key === Qt.Key_Return
+                                    || event.key === Qt.Key_Enter) {
+                                    event.accepted = true
+                                    root.noteKeyboardNavigationKey()
+                                    root.focusChannelFromSearch("keyboard")
+                                }
+                            }
+                            onActiveFocusChanged: {
+                                if (activeFocus) {
+                                    root.setPlayerKeyboardFocusArea("search")
+                                    root.noteBrowseInteraction()
+                                } else if (root.playerKeyboardFocusArea === "search") {
+                                    root.playerKeyboardFocusArea = "none"
+                                }
+                                if (!activeFocus && !channelListHover.hovered) {
+                                    previewHoldTimer.stop()
+                                } else if (!channelListHover.hovered) {
+                                    previewHoldTimer.restart()
+                                }
+                            }
                         }
                     }
-                    onActiveFocusChanged: {
-                        if (activeFocus) {
-                            root.setPlayerKeyboardFocusArea("search")
-                            root.noteBrowseInteraction()
-                        } else if (root.playerKeyboardFocusArea === "search") {
-                            root.playerKeyboardFocusArea = "none"
+
+                    Rectangle {
+                        Layout.preferredWidth: root.leftPaneViewSwitchWidth
+                        Layout.fillHeight: true
+                        radius: 4
+                        color: groupsSwitchArea.containsMouse
+                            ? Theme.uiBackground("#6d111a24", root.uiTransparency) : "transparent"
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "← Groups"
+                            color: groupsSwitchArea.containsMouse ? Theme.textPrimary : Theme.textSecondary
+                            font.pixelSize: 13
                         }
-                        if (!activeFocus && !channelListHover.hovered) {
-                            previewHoldTimer.stop()
-                        } else if (!channelListHover.hovered) {
-                            previewHoldTimer.restart()
+
+                        MouseArea {
+                            id: groupsSwitchArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onPositionChanged: root.revealUi("pointer")
+                            onClicked: root.openGroupPicker("pointer")
                         }
                     }
                 }
             }
 
-            Rectangle {
+            Item {
                 Layout.fillWidth: true
                 implicitHeight: 42
-                radius: 4
-                color: "#960d1822"
-                border.width: groupPickerSearchField.activeFocus ? 1 : 0
-                border.color: Theme.borderStrong
                 visible: root.leftPaneDisplayMode === "group"
 
-                TextField {
-                    id: groupPickerSearchField
+                RowLayout {
                     anchors.fill: parent
-                    anchors.margins: 1
-                    leftPadding: 12
-                    rightPadding: 12
-                    topPadding: 10
-                    bottomPadding: 10
-                    text: root.groupPickerSearchText
-                    placeholderText: "Search groups"
-                    placeholderTextColor: Theme.textMuted
-                    color: Theme.textPrimary
-                    font.pixelSize: 14
-                    hoverEnabled: true
-                    background: Item {}
-                    onTextEdited: {
-                        root.groupPickerSearchText = text
-                        root.ensureGroupPickerHighlight()
-                    }
-                    Keys.onPressed: function(event) {
-                        if (event.key === Qt.Key_Down
-                            || event.key === Qt.Key_Tab
-                            || event.key === Qt.Key_Return
-                            || event.key === Qt.Key_Enter) {
-                            event.accepted = true
-                            root.noteKeyboardNavigationKey()
-                            root.focusTopGroupRow("keyboard")
+                    spacing: Theme.spacingS
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        radius: 4
+                        color: Theme.uiBackground("#960d1822", root.uiTransparency)
+                        border.width: groupPickerSearchField.activeFocus ? 1 : 0
+                        border.color: Theme.borderStrong
+
+                        TextField {
+                            id: groupPickerSearchField
+                            anchors.fill: parent
+                            anchors.margins: 1
+                            leftPadding: 12
+                            rightPadding: 12
+                            topPadding: 10
+                            bottomPadding: 10
+                            text: root.groupPickerSearchText
+                            placeholderText: "Search groups"
+                            placeholderTextColor: Theme.textMuted
+                            color: Theme.textPrimary
+                            font.pixelSize: 14
+                            hoverEnabled: true
+                            background: Item {}
+                            onTextEdited: {
+                                root.groupPickerSearchText = text
+                                root.ensureGroupPickerHighlight()
+                            }
+                            Keys.onPressed: function(event) {
+                                if (event.key === Qt.Key_Down
+                                    || event.key === Qt.Key_Tab
+                                    || event.key === Qt.Key_Return
+                                    || event.key === Qt.Key_Enter) {
+                                    event.accepted = true
+                                    root.noteKeyboardNavigationKey()
+                                    root.focusTopGroupRow("keyboard")
+                                }
+                            }
+                            onActiveFocusChanged: {
+                                // A pointer focus restore can arrive after the picker closes.
+                                if (activeFocus && !root.groupPickerOpen) {
+                                    interactionFocusTarget.forceActiveFocus()
+                                    root.updateAutoHide()
+                                    return
+                                }
+                                if (activeFocus) {
+                                    root.setPlayerKeyboardFocusArea("groupSearch")
+                                    root.revealUi("keyboard")
+                                } else if (root.playerKeyboardFocusArea === "groupSearch") {
+                                    root.playerKeyboardFocusArea = "none"
+                                }
+                            }
                         }
                     }
-                    onActiveFocusChanged: {
-                        // A pointer focus restore can arrive after the picker closes.
-                        if (activeFocus && !root.groupPickerOpen) {
-                            interactionFocusTarget.forceActiveFocus()
-                            root.updateAutoHide()
-                            return
+
+                    Rectangle {
+                        Layout.preferredWidth: root.leftPaneViewSwitchWidth
+                        Layout.fillHeight: true
+                        radius: 4
+                        color: channelsSwitchArea.containsMouse
+                            ? Theme.uiBackground("#6d111a24", root.uiTransparency) : "transparent"
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "Channels →"
+                            color: channelsSwitchArea.containsMouse ? Theme.textPrimary : Theme.textSecondary
+                            font.pixelSize: 13
                         }
-                        if (activeFocus) {
-                            root.setPlayerKeyboardFocusArea("groupSearch")
-                            root.revealUi("keyboard")
-                        } else if (root.playerKeyboardFocusArea === "groupSearch") {
-                            root.playerKeyboardFocusArea = "none"
+
+                        MouseArea {
+                            id: channelsSwitchArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onPositionChanged: root.revealUi("pointer")
+                            onClicked: root.closeGroupPicker(false)
                         }
                     }
                 }
@@ -4481,7 +4595,7 @@ Item {
                 Layout.fillWidth: true
                 implicitHeight: 42
                 radius: 4
-                color: "#960d1822"
+                color: Theme.uiBackground("#960d1822", root.uiTransparency)
                 border.width: sourcePickerSearchField.activeFocus ? 1 : 0
                 border.color: Theme.borderStrong
                 visible: root.leftPaneDisplayMode === "source"
@@ -4544,6 +4658,28 @@ Item {
                     spacing: 2
                     model: root.groupPickerVisibleRows
                     visible: root.groupPickerVisibleRows.length > 0
+                    ScrollBar.vertical: ScrollBar {
+                        id: groupPickerScrollBar
+                        policy: groupPickerView.contentHeight > groupPickerView.height
+                            ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+                        interactive: true
+                        width: 6
+                        z: 3
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        padding: 0
+                        background: Rectangle {
+                            implicitWidth: 6
+                            radius: width / 2
+                            color: "#2a20364d"
+                        }
+                        contentItem: Rectangle {
+                            implicitWidth: 6
+                            radius: width / 2
+                            color: groupPickerScrollBar.pressed
+                                ? Theme.borderStrong : "#8c4e88b8"
+                        }
+                    }
 
                     delegate: Rectangle {
                         required property var modelData
@@ -4551,7 +4687,7 @@ Item {
                         width: ListView.view.width
                         height: 62
                         radius: 4
-                        color: root.groupPickerHighlightedId === modelData.id ? "#96182431" : "transparent"
+                        color: root.groupPickerHighlightedId === modelData.id ? Theme.uiBackground("#96182431", root.uiTransparency) : "transparent"
                         border.width: 0
                         border.color: "transparent"
 
@@ -4597,9 +4733,24 @@ Item {
                         MouseArea {
                             anchors.fill: parent
                             hoverEnabled: true
-                            onEntered: root.groupPickerHighlightedId = modelData.id
-                            onPositionChanged: root.revealUi("pointer")
+                            onEntered: {
+                                if (!root.groupPickerKeyboardNavigation) {
+                                    root.groupPickerHighlightedId = modelData.id
+                                }
+                            }
+                            onPositionChanged: function(mouse) {
+                                const position = mapToItem(null, mouse.x, mouse.y)
+                                if (root.groupPickerKeyboardNavigation
+                                    && Math.abs(position.x - root.groupKeyboardPointerPosition.x) < 1
+                                    && Math.abs(position.y - root.groupKeyboardPointerPosition.y) < 1) {
+                                    return
+                                }
+                                root.groupPickerKeyboardNavigation = false
+                                root.groupPickerHighlightedId = modelData.id
+                                root.revealUi("pointer")
+                            }
                             onClicked: {
+                                root.groupPickerKeyboardNavigation = false
                                 root.revealUi("pointer")
                                 root.groupPickerHighlightedId = modelData.id
                                 root.confirmGroupPickerSelection()
@@ -4675,7 +4826,7 @@ Item {
                         width: ListView.view.width
                         height: 62
                         radius: 4
-                        color: root.sourcePickerHighlightedId === modelData.id ? "#96182431" : "transparent"
+                        color: root.sourcePickerHighlightedId === modelData.id ? Theme.uiBackground("#96182431", root.uiTransparency) : "transparent"
                         border.width: 0
                         border.color: "transparent"
 
@@ -4787,7 +4938,7 @@ Item {
                         width: ListView.view.width
                         height: 62
                         radius: 4
-                        color: root.audioPickerHighlightedId === modelData.id ? "#96182431" : "transparent"
+                        color: root.audioPickerHighlightedId === modelData.id ? Theme.uiBackground("#96182431", root.uiTransparency) : "transparent"
 
                         RowLayout {
                             anchors.fill: parent
@@ -4860,7 +5011,7 @@ Item {
                         width: ListView.view.width
                         height: 62
                         radius: 4
-                        color: root.subtitlePickerHighlightedId === modelData.id ? "#96182431" : "transparent"
+                        color: root.subtitlePickerHighlightedId === modelData.id ? Theme.uiBackground("#96182431", root.uiTransparency) : "transparent"
 
                         RowLayout {
                             anchors.fill: parent
@@ -4989,7 +5140,9 @@ Item {
                         width: ListView.view.width
                         height: 62
                         radius: 4
-                        color: channelIsSelected ? "#96182431" : (rowHovered ? "#6d111a24" : "transparent")
+                        color: channelIsSelected ? Theme.uiBackground("#96182431", root.uiTransparency)
+                            : (rowHovered && !root.channelListKeyboardNavigation
+                                ? Theme.uiBackground("#6d111a24", root.uiTransparency) : "transparent")
                         border.width: 0
                         border.color: "transparent"
 
@@ -5105,11 +5258,14 @@ Item {
 
                         MouseArea {
                             anchors.fill: parent
-                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
                             hoverEnabled: true
                             onEntered: {
                                 rowHovered = true
                                 root.noteBrowseInteraction()
+                                if (root.channelListKeyboardNavigation) {
+                                    return
+                                }
                                 if (root.channelListScrollingActive) {
                                     root.queueHoverPreviewChannel(channelId)
                                 } else {
@@ -5117,11 +5273,31 @@ Item {
                                 }
                             }
                             onExited: rowHovered = false
-                            onPositionChanged: root.noteBrowseInteraction()
-                            onClicked: function(mouse) {
+                            onPositionChanged: function(mouse) {
+                                // Scrolling moves delegates beneath a stationary pointer and
+                                // can synthesize local position changes. Only real pointer
+                                // movement may take selection back from the keyboard.
+                                const position = mapToItem(null, mouse.x, mouse.y)
+                                if (root.channelListKeyboardNavigation
+                                    && Math.abs(position.x - root.channelKeyboardPointerPosition.x) < 1
+                                    && Math.abs(position.y - root.channelKeyboardPointerPosition.y) < 1) {
+                                    return
+                                }
+                                root.channelListKeyboardNavigation = false
                                 root.noteBrowseInteraction()
-                                if (mouse.button === Qt.RightButton) {
+                                if (root.channelListScrollingActive) {
+                                    root.queueHoverPreviewChannel(channelId)
+                                } else {
+                                    root.previewChannel(channelId)
+                                }
+                            }
+                            onClicked: function(mouse) {
+                                root.channelListKeyboardNavigation = false
+                                root.noteBrowseInteraction()
+                                if (mouse.button === Qt.MiddleButton) {
                                     root.channelList.toggleFavorite(channelId)
+                                } else if (mouse.button === Qt.RightButton) {
+                                    root.multiView.assignChannelToPictureInPicture(channelId)
                                 } else if (mouse.button === Qt.LeftButton) {
                                     root.commitChannelSelection(channelId)
                                 }
@@ -5307,7 +5483,7 @@ Item {
 
         Rectangle {
             anchors.fill: parent
-            color: "#78070d12"
+            color: Theme.uiBackground("#78070d12", root.uiTransparency)
         }
 
         HoverHandler {
@@ -5361,7 +5537,7 @@ Item {
                     Layout.preferredWidth: 46
                     Layout.preferredHeight: 46
                     radius: 8
-                    color: settingsButton.down ? "#ad1f2d3a" : (settingsButton.hovered ? "#a71c2936" : "#96182431")
+                    color: settingsButton.down ? Theme.uiBackground("#ad1f2d3a", root.uiTransparency) : (settingsButton.hovered ? Theme.uiBackground("#a71c2936", root.uiTransparency) : Theme.uiBackground("#96182431", root.uiTransparency))
 
                     IconActionButton {
                         id: settingsButton
@@ -5379,6 +5555,8 @@ Item {
 
             EpgTimeline {
                 id: epgTimeline
+                datePattern: root.dateTime.timelineDatePattern
+                timePattern: root.dateTime.timePattern
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 epgModel: root.sideNowNextModel
@@ -5412,6 +5590,7 @@ Item {
     }
 
     EpgHoverBubble {
+        timePattern: root.dateTime.timePattern
         id: epgHoverBubble
         visible: root.hoverBubbleVisible
             && root.showShellChrome
@@ -5583,7 +5762,7 @@ Item {
                 Rectangle {
                     anchors.fill: parent
                     radius: 6
-                    color: "#b51d5a7a"
+                    color: Theme.uiBackground("#b51d5a7a", root.uiTransparency)
                     border.width: 1
                     border.color: "#7fd4f3"
 
@@ -5829,7 +6008,7 @@ Item {
                                 anchors.bottomMargin: 6
                                 x: Math.max(0, Math.min(parent.width - width, parent.width * root.timeshiftTimelineHoverFraction - width * 0.5))
                                 radius: 6
-                                color: "#d9131a22"
+                                color: Theme.uiBackground("#d9131a22", root.uiTransparency)
                                 border.width: 1
                                 border.color: "#4dffffff"
                                 implicitWidth: hoverTimeText.implicitWidth + 12
@@ -6519,7 +6698,7 @@ Item {
             radiusSize: width / 2
             fillColor: "#8a121d2a"
             strokeColor: "transparent"
-            opacity: 0.5
+            fillOpacity: 0.5
         }
 
         Image {
@@ -6550,7 +6729,7 @@ Item {
             width: selectionModePillText.implicitWidth + 28
             height: selectionModePillText.implicitHeight + 14
             radius: height / 2
-            color: "#b3241a0c"
+            color: Theme.uiBackground("#b3241a0c", root.uiTransparency)
             border.width: 1
             border.color: "#f59e0b"
 

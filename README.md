@@ -7,7 +7,7 @@
 <p align="center">
   A desktop <strong>IPTV player</strong> built with Qt and libmpv.<br/>
   <small><em>No VOD support is planned for this app.</em></small><br/><br/>
-  Current version: <strong>0.5.0</strong>
+  Current version: <strong>0.5.1</strong>
 </p>
 
 ## Features
@@ -49,7 +49,7 @@ Expected Windows artifacts:
 
 _Windows SmartScreen may block the app on first run. Click **More info** → **Run anyway** to proceed._
 
-Default version comes from `qt/CMakeLists.txt` (currently `0.4.0`). Override by exporting `APP_VERSION` before packaging.
+Default version comes from `qt/CMakeLists.txt` (currently `0.5.1`). Override by exporting `APP_VERSION` before packaging.
 
 | Platform | Notes |
 |----------|-------|
@@ -176,6 +176,14 @@ Test binaries:
 | `Ctrl+Alt+O` | Fully exit multiview grid (if "Retain multiview" is enabled in Settings) |
 | `Ctrl+R` | DVR schedule toggle (programme) or manual recording fallback |
 | `Esc` | Stepwise close search/guide/overlay/fullscreen states |
+
+### Mouse Shortcuts
+
+| Button | Action |
+|--------|--------|
+| `LMB` | Select a channel; double-click to start playback |
+| `MMB` | Toggle the channel's favourite status |
+| `RMB` | Open or update the channel in PiP |
 
 <details>
 <summary>Full keyboard reference</summary>

@@ -20,6 +20,7 @@ class EpgGridModel final : public QAbstractListModel
     Q_PROPERTY(int selectedChannelId READ selectedChannelId WRITE setSelectedChannelId NOTIFY selectedChannelIdChanged)
     Q_PROPERTY(QString selectedProgramStart READ selectedProgramStart WRITE setSelectedProgramStart NOTIFY selectedProgramStartChanged)
     Q_PROPERTY(QVariantMap selectedProgram READ selectedProgram NOTIFY selectedProgramChanged)
+    Q_PROPERTY(bool rebuildPending READ rebuildPending NOTIFY rebuildPendingChanged)
     Q_PROPERTY(double currentTimeOffsetMinutes READ currentTimeOffsetMinutes NOTIFY timeSlotsChanged)
 
 public:
@@ -40,6 +41,8 @@ public:
 
     explicit EpgGridModel(Core::EpgService *epg, QObject *parent = nullptr);
 
+    void setDateTimeFormat(Core::DateTimeFormatOptions options);
+
     int rowCount(const QModelIndex &parent = {}) const override;
     QVariant data(const QModelIndex &index, int role) const override;
     QHash<int, QByteArray> roleNames() const override;
@@ -58,6 +61,8 @@ public:
     double currentTimeOffsetMinutes() const;
     int guidePastHours() const;
     int lookAheadHours() const;
+    bool rebuildPending() const { return m_rebuildPending; }
+    void invalidateRebuild();
 
     void rebuild(const QList<Core::Channel> &channels, int guidePastHours, int lookAheadHours);
     void rebuildAsync(const QList<Core::Channel> &channels, int guidePastHours, int lookAheadHours);
@@ -70,6 +75,7 @@ public:
     Q_INVOKABLE void setVisibleRowRange(int firstRow, int lastRow);
 
 signals:
+    void rebuildPendingChanged();
     void timeSlotsChanged();
     void visibleTimeSlotsChanged();
     void windowChanged();
@@ -111,6 +117,7 @@ private:
     QDateTime defaultWindowStart(int guidePastHours) const;
     QDateTime windowEnd() const;
 
+    Core::DateTimeFormatOptions m_dateTimeFormat;
     Core::EpgService *m_epg;
     QList<Core::Channel> m_channels;
     QList<Row> m_rows;
@@ -132,6 +139,7 @@ private:
     QHash<int, int> m_rowIndexByChannelId;
     QFutureSynchronizer<void> m_backgroundTasks;
     quint64 m_rebuildGeneration { 0 };
+    bool m_rebuildPending { false };
     quint64 m_rowWarmupGeneration { 0 };
 };
 

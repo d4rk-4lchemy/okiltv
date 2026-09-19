@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(OKILTVQt VERSION 0.5.0 LANGUAGES CXX)
+project(OKILTVQt VERSION 0.5.1 LANGUAGES CXX)
 
 option(OKILTV_BUILD_TESTS "Build Qt test targets" ON)
 
@@ -70,6 +70,8 @@ qt_add_executable(OKILTVQt
     src/app/profilesmodel.h
     src/app/playercontroller.cpp
     src/app/playercontroller.h
+    src/app/datetimeformatter.cpp
+    src/app/datetimeformatter.h
     src/app/settingscontroller.cpp
     src/app/settingscontroller.h
     src/app/shellcontroller.cpp
@@ -100,6 +102,8 @@ qt_add_executable(OKILTVQt
     src/core/iconcache_service.h
     src/core/m3uservice.cpp
     src/core/m3uservice.h
+    src/core/datetimeformat.cpp
+    src/core/datetimeformat.h
     src/core/models.cpp
     src/core/models_json.cpp
     src/core/models_variant.cpp

@@ -310,6 +310,8 @@ QJsonObject toJson(const AppSettings &settings)
     }
 
     object.insert(QStringLiteral("profiles"), profiles);
+    object.insert(QStringLiteral("dateOrder"), normalizeDateOrder(settings.dateOrder));
+    object.insert(QStringLiteral("timeFormat"), normalizeTimeFormat(settings.timeFormat));
     object.insert(QStringLiteral("theme"), settings.theme);
     object.insert(QStringLiteral("lastSection"), settings.lastSection);
     object.insert(QStringLiteral("showOnTopModeIndicator"), settings.showOnTopModeIndicator);
@@ -318,6 +320,7 @@ QJsonObject toJson(const AppSettings &settings)
     object.insert(QStringLiteral("overlayAutoHide"), settings.overlayAutoHide);
     object.insert(QStringLiteral("overlayAutoHideSeconds"), settings.overlayAutoHideSeconds);
     object.insert(QStringLiteral("overlayInactivitySeconds"), settings.overlayInactivitySeconds);
+    object.insert(QStringLiteral("uiTransparency"), std::clamp(settings.uiTransparency, 0, 100));
     object.insert(QStringLiteral("guidePastHours"), normalizeGuideHours(settings.guidePastHours));
     object.insert(QStringLiteral("epgLookAheadHours"), normalizeGuideHours(settings.epgLookAheadHours));
     object.insert(QStringLiteral("autoRefreshEpg"), settings.autoRefreshEpg);
@@ -374,6 +377,7 @@ QJsonObject toJson(const AppSettings &settings)
     object.insert(
         QStringLiteral("favoriteChannelIdsByProfile"),
         intListMapToJson(settings.favoriteChannelIdsByProfile));
+    object.insert(QStringLiteral("selectedGroupByProfile"), stringMapToJson(settings.selectedGroupByProfile));
     object.insert(QStringLiteral("hiddenGroupsByProfile"), stringListMapToJson(settings.hiddenGroupsByProfile));
     object.insert(QStringLiteral("groupOrderByProfile"), stringListMapToJson(settings.groupOrderByProfile));
     object.insert(
@@ -399,6 +403,8 @@ AppSettings appSettingsFromJson(const QJsonObject &object)
         settings.profiles.push_back(serverProfileFromJson(profileValue.toObject()));
     }
 
+    settings.dateOrder = normalizeDateOrder(object.value(QStringLiteral("dateOrder")).toString());
+    settings.timeFormat = normalizeTimeFormat(object.value(QStringLiteral("timeFormat")).toString());
     settings.theme = object.value(QStringLiteral("theme")).toString(settings.theme);
     settings.lastSection = object.value(QStringLiteral("lastSection")).toString(settings.lastSection);
     settings.showOnTopModeIndicator =
@@ -413,6 +419,8 @@ AppSettings appSettingsFromJson(const QJsonObject &object)
         std::max(1, object.value(QStringLiteral("overlayAutoHideSeconds")).toInt(settings.overlayAutoHideSeconds));
     settings.overlayInactivitySeconds =
         std::clamp(object.value(QStringLiteral("overlayInactivitySeconds")).toInt(settings.overlayInactivitySeconds), 1, 3600);
+    settings.uiTransparency =
+        std::clamp(object.value(QStringLiteral("uiTransparency")).toInt(settings.uiTransparency), 0, 100);
     settings.guidePastHours =
         normalizeGuideHours(object.value(QStringLiteral("guidePastHours")).toInt(settings.guidePastHours));
     settings.epgLookAheadHours =
@@ -494,6 +502,8 @@ AppSettings appSettingsFromJson(const QJsonObject &object)
         intMapFromJson(object.value(QStringLiteral("lastWatchedChannelId")).toObject());
     settings.favoriteChannelIdsByProfile = intListMapFromJson(
         object.value(QStringLiteral("favoriteChannelIdsByProfile")).toObject());
+    settings.selectedGroupByProfile = stringMapFromJson(
+        object.value(QStringLiteral("selectedGroupByProfile")).toObject());
     settings.hiddenGroupsByProfile = stringListMapFromJson(
         object.value(QStringLiteral("hiddenGroupsByProfile")).toObject());
     settings.groupOrderByProfile = stringListMapFromJson(

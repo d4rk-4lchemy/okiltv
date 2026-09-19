@@ -16,6 +16,8 @@
 #include <QJsonObject>
 #include <QMutex>
 #include <QTemporaryDir>
+#include <QScopeGuard>
+#include <ctime>
 #include <QtTest>
 
 #include <cmath>
@@ -124,6 +126,12 @@ class CoreTests final : public QObject
     Q_OBJECT
 
 private slots:
+    void uiTransparencySettingsCompatibility();
+    void dateTimeFormatDetection_data();
+    void dateTimeFormatDetection();
+    void dateTimeDisplayFormatting();
+    void dateTimeDisplayHonorsLocalDst();
+    void dateTimeSettingsCompatibility();
     void settingsCompatibilityRoundTrips();
     void settingsCompatibilityDefaultsNewPlayerTuningFields();
     void portableBootstrapRoundTripsIndependentOfSettings();
@@ -164,6 +172,128 @@ private slots:
     void settingsLoadInvalidJsonCreatesBackupAndReportsError();
     void settingsSaveReportsErrorAndCreatesParentDirectory();
 };
+
+void CoreTests::dateTimeFormatDetection_data()
+{
+    QTest::addColumn<QString>("datePattern");
+    QTest::addColumn<QString>("timePattern");
+    QTest::addColumn<bool>("monthFirst");
+    QTest::addColumn<bool>("twelveHour");
+    QTest::newRow("Poland") << "dd.MM.yyyy" << "HH:mm" << false << false;
+    QTest::newRow("UK") << "dd/MM/yyyy" << "HH:mm" << false << false;
+    QTest::newRow("US") << "M/d/yy" << "h:mm AP" << true << true;
+    QTest::newRow("year-first") << "yyyy-MM-dd" << "h:mm ap" << true << true;
+    QTest::newRow("weekday") << "ddd MMM d yyyy" << "HH:mm" << true << false;
+    QTest::newRow("quoted") << "'MM' dd/MM/yyyy" << "HH:mm 'AP'" << false << false;
+    QTest::newRow("escaped-quote") << "'it''s dd' MM/dd" << "h:mm 'o''clock' AP" << true << true;
+    QTest::newRow("fallback") << "yyyy" << "" << false << false;
+}
+
+void CoreTests::dateTimeFormatDetection()
+{
+    QFETCH(QString, datePattern);
+    QFETCH(QString, timePattern);
+    QFETCH(bool, monthFirst);
+    QFETCH(bool, twelveHour);
+    const auto options = detectDateTimeFormat(datePattern, timePattern);
+    QCOMPARE(options.monthFirst, monthFirst);
+    QCOMPARE(options.twelveHour, twelveHour);
+}
+
+void CoreTests::dateTimeDisplayFormatting()
+{
+    const DateTimeFormatOptions twelve { true, true };
+    const DateTimeFormatOptions twentyFour { false, false };
+    const QDateTime evening(QDate(2026, 9, 18), QTime(18, 5));
+    QCOMPARE(formatDisplayTime(evening, twelve), QStringLiteral("6:05 PM"));
+    QCOMPARE(formatDisplayTime(evening, twentyFour), QStringLiteral("18:05"));
+    QCOMPARE(formatDisplayDateTime(evening, twelve.guideDatePattern()), QStringLiteral("Friday, 09.18"));
+    QCOMPARE(formatDisplayDateTime(evening, twentyFour.guideDatePattern()), QStringLiteral("Friday, 18.09"));
+    QCOMPARE(formatDisplayDateTime(evening, twelve.clockPattern()), QStringLiteral("Fri Sep 18  6:05 PM"));
+    QCOMPARE(formatDisplayDateTime(evening, twentyFour.clockPattern()), QStringLiteral("Fri 18 Sep  18:05"));
+    QCOMPARE(formatDisplayDateTime(evening, twelve.dateTimePattern()), QStringLiteral("09-18-2026 6:05 PM"));
+    const QDateTime midnight(QDate(2027, 1, 1), QTime(0, 0));
+    const QDateTime noon(QDate(2027, 1, 1), QTime(12, 0));
+    QCOMPARE(formatDisplayTime(midnight, twelve), QStringLiteral("12:00 AM"));
+    QCOMPARE(formatDisplayTime(noon, twelve), QStringLiteral("12:00 PM"));
+    QCOMPARE(formatDisplayTimeRange(midnight.addSecs(-60), midnight, twelve), QStringLiteral("11:59 PM - 12:00 AM"));
+    QCOMPARE(formatDisplayTime({}, twelve), QString {});
+    QCOMPARE(formatDisplayTimeRange({}, noon, twelve), QString {});
+    QCOMPARE(formatDisplayDateTime(midnight, twentyFour.dateTimePattern()), QStringLiteral("01-01-2027 00:00"));
+    // UTC and local representations of an instant must have identical display text.
+    QCOMPARE(formatDisplayTime(evening.toUTC(), twelve), formatDisplayTime(evening, twelve));
+    EpgEntry entry;
+    entry.start = evening;
+    entry.stop = evening.addSecs(3600);
+    const auto raw = toVariantMap(entry);
+    const auto formatted = formatProgramTimes(raw, twelve);
+    QCOMPARE(formatted.value("timeRange").toString(), QStringLiteral("6:05 PM - 7:05 PM"));
+    QCOMPARE(formatted.value("start"), raw.value("start"));
+    QCOMPARE(formatted.value("stop"), raw.value("stop"));
+    QCOMPARE(raw.value("timeRange").toString(), QStringLiteral("18:05 - 19:05"));
+    QVERIFY(formatProgramTimes(QVariantMap {}, twelve).isEmpty());
+}
+
+void CoreTests::dateTimeDisplayHonorsLocalDst()
+{
+#ifdef Q_OS_UNIX
+    const bool wasSet = qEnvironmentVariableIsSet("TZ");
+    const auto previous = qgetenv("TZ");
+    const auto restore = qScopeGuard([previous, wasSet]() {
+        if (wasSet) qputenv("TZ", previous);
+        else qunsetenv("TZ");
+        tzset();
+    });
+    qputenv("TZ", "Europe/Warsaw");
+    tzset();
+    const DateTimeFormatOptions options { false, true };
+    const auto before = QDateTime::fromString("2026-03-29T00:30:00Z", Qt::ISODate);
+    const auto after = before.addSecs(3600);
+    QCOMPARE(formatDisplayTime(before, options), QStringLiteral("1:30 AM"));
+    QCOMPARE(formatDisplayTime(after, options), QStringLiteral("3:30 AM"));
+    const auto first = QDateTime::fromString("2026-10-25T00:30:00Z", Qt::ISODate);
+    QCOMPARE(formatDisplayTime(first, options), QStringLiteral("2:30 AM"));
+    QCOMPARE(formatDisplayTime(first.addSecs(3600), options), QStringLiteral("2:30 AM"));
+    QCOMPARE(before.toString(Qt::ISODate), QStringLiteral("2026-03-29T00:30:00Z"));
+#else
+    QSKIP("Local TZ environment override is tested on Unix; Windows regional settings require desktop validation.");
+#endif
+}
+
+void CoreTests::dateTimeSettingsCompatibility()
+{
+    const auto defaults = appSettingsFromJson({});
+    QCOMPARE(defaults.dateOrder, QStringLiteral("system"));
+    QCOMPARE(defaults.timeFormat, QStringLiteral("system"));
+    auto settings = defaults;
+    settings.dateOrder = QStringLiteral("mdy");
+    settings.timeFormat = QStringLiteral("12h");
+    const auto restored = appSettingsFromJson(toJson(settings));
+    QCOMPARE(restored.dateOrder, settings.dateOrder);
+    QCOMPARE(restored.timeFormat, settings.timeFormat);
+    const auto invalid = appSettingsFromJson({ { "dateOrder", "bad" }, { "timeFormat", 12 } });
+    QCOMPARE(invalid.dateOrder, QStringLiteral("system"));
+    QCOMPARE(invalid.timeFormat, QStringLiteral("system"));
+    const auto system = systemDateTimeFormat();
+    QCOMPARE(resolveDateTimeFormat("system", "system"), system);
+    QCOMPARE(resolveDateTimeFormat("dmy", "system").twelveHour, system.twelveHour);
+    QVERIFY(!resolveDateTimeFormat("dmy", "12h").monthFirst);
+    QVERIFY(resolveDateTimeFormat("system", "12h").twelveHour);
+    QCOMPARE(toJson(defaults).value("dateOrder").toString(), QStringLiteral("system"));
+}
+
+void CoreTests::uiTransparencySettingsCompatibility()
+{
+    QCOMPARE(appSettingsFromJson({}).uiTransparency, 100);
+    QCOMPARE(appSettingsFromJson({ { "uiTransparency", "invalid" } }).uiTransparency, 100);
+    QCOMPARE(appSettingsFromJson({ { "uiTransparency", -10 } }).uiTransparency, 0);
+    QCOMPARE(appSettingsFromJson({ { "uiTransparency", 110 } }).uiTransparency, 100);
+    for (const int value : { 0, 50, 100 }) {
+        AppSettings settings;
+        settings.uiTransparency = value;
+        QCOMPARE(appSettingsFromJson(toJson(settings)).uiTransparency, value);
+    }
+}
 
 void CoreTests::settingsCompatibilityRoundTrips()
 {

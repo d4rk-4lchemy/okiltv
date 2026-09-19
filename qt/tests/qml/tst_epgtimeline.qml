@@ -44,6 +44,7 @@ TestCase {
                 selectedKey = programKey(program)
         }
     }
+    EpgHoverBubble { id: bubble; visible: false }
     SignalSpy { id: selected; target: panel; signalName: "selectionRequested" }
     SignalSpy { id: activated; target: panel; signalName: "activationRequested" }
 
@@ -53,7 +54,47 @@ TestCase {
             stop: new Date(origin + (index + 1) * 3600000).toISOString(),
             startTimeLabel: "12:00", timeRange: "12:00 - 13:00", progressPercent: 50 }
     }
+    function test_date_order_change_preserves_scroll() {
+        panel.showIndex(10)
+        const key = panel.entries[10].key
+        const before = panel.itemAt(10).mapToItem(panel, 0, 0).y
+        panel.datePattern = "dddd MM.dd"
+        tryCompare(panel, "updating", false)
+        compare(panel.entries[10].key, key)
+        verify(Math.abs(panel.itemAt(10).mapToItem(panel, 0, 0).y - before) < 2)
+        const first = panel.entries[0]
+        compare(first.dateLabel, Qt.locale("en_US").toString(new Date(first.program.start), "dddd MM.dd"))
+    }
+    function test_keyboard_selection_suppresses_stationary_hover() {
+        panel.goToNow()
+        waitForRendering(panel)
+        const hoveredRow = panel.itemAt(panel.defaultIndex)
+        const keyboardRow = panel.itemAt(panel.defaultIndex + 1)
+        verify(hoveredRow !== null && keyboardRow !== null)
+        mouseMove(hoveredRow, hoveredRow.width / 2, hoveredRow.height - 20)
+        tryCompare(hoveredRow, "active", true)
+        panel.selectedKey = keyboardRow.modelData.key
+        panel.keyboardSelectionActive = true
+        tryCompare(keyboardRow, "active", true)
+        compare(hoveredRow.active, false)
+        mouseMove(hoveredRow, hoveredRow.width / 2 + 5, hoveredRow.height - 20)
+        tryCompare(hoveredRow, "active", true)
+    }
+
+    function test_hover_time_format_updates_snapshot() {
+        bubble.programData = {
+            start: new Date(2026, 8, 18, 18, 5).toISOString(),
+            stop: new Date(2026, 8, 18, 19, 5).toISOString(),
+            timeRange: "18:05 - 19:05"
+        }
+        compare(bubble.timeRangeText, "18:05 - 19:05")
+        bubble.timePattern = "h:mm AP"
+        compare(bubble.timeRangeText, "6:05 PM - 7:05 PM")
+    }
     function init() {
+        panel.datePattern = "dddd dd.MM"
+        panel.timePattern = "HH:mm"
+        bubble.timePattern = "HH:mm"
         mouseMove(testCase, -10, -10)
         panel.keyboardSelectionActive = false
         panel.selectedKey = ""

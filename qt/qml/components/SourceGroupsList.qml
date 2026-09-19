@@ -6,6 +6,10 @@ import "../theme/Theme.js" as Theme
 
 Item {
     id: root
+
+    // qmllint disable unqualified
+    property int uiTransparency: (typeof settingsController !== "undefined") ? settingsController.uiTransparency : 100
+    // qmllint enable unqualified
     property var rows: []
     property string profileId: ""
     property bool reorderEnabled: true
@@ -102,7 +106,7 @@ Item {
         id: card
         property var rowData: ({})
         radius: Theme.radiusM
-        color: "#5a0c141b"
+        color: Theme.uiBackground("#5a0c141b", root.uiTransparency)
         height: 54
         RowLayout {
             anchors.fill: parent

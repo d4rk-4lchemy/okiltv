@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../core/settingsmanager.h"
+#include "datetimeformatter.h"
 
 #include <QObject>
 
@@ -13,6 +14,9 @@ class MultiViewController;
 class SettingsController final : public QObject
 {
     Q_OBJECT
+    Q_PROPERTY(QString dateOrder READ dateOrder WRITE setDateOrder NOTIFY settingsChanged)
+    Q_PROPERTY(QString timeFormat READ timeFormat WRITE setTimeFormat NOTIFY settingsChanged)
+    Q_PROPERTY(QObject* dateTimeFormatter READ dateTimeFormatter CONSTANT)
     Q_PROPERTY(QString theme READ theme WRITE setTheme NOTIFY settingsChanged)
     Q_PROPERTY(bool showOnTopModeIndicator READ showOnTopModeIndicator WRITE setShowOnTopModeIndicator NOTIFY settingsChanged)
     Q_PROPERTY(bool preventDisplaySleep READ preventDisplaySleep WRITE setPreventDisplaySleep NOTIFY settingsChanged)
@@ -20,6 +24,7 @@ class SettingsController final : public QObject
     Q_PROPERTY(bool overlayAutoHide READ overlayAutoHide WRITE setOverlayAutoHide NOTIFY settingsChanged)
     Q_PROPERTY(int overlayAutoHideSeconds READ overlayAutoHideSeconds WRITE setOverlayAutoHideSeconds NOTIFY settingsChanged)
     Q_PROPERTY(int overlayInactivitySeconds READ overlayInactivitySeconds WRITE setOverlayInactivitySeconds NOTIFY settingsChanged)
+    Q_PROPERTY(int uiTransparency READ uiTransparency WRITE setUiTransparency NOTIFY uiTransparencyChanged)
     Q_PROPERTY(int refreshIntervalMinutes READ refreshIntervalMinutes WRITE setRefreshIntervalMinutes NOTIFY settingsChanged)
     Q_PROPERTY(bool autoRefreshEpg READ autoRefreshEpg WRITE setAutoRefreshEpg NOTIFY settingsChanged)
     Q_PROPERTY(int guidePastHours READ guidePastHours WRITE setGuidePastHours NOTIFY settingsChanged)
@@ -60,6 +65,12 @@ public:
         ProfilesModel *profilesModel,
         QObject *parent = nullptr);
 
+    QString dateOrder() const { return m_dateOrder; }
+    QString timeFormat() const { return m_timeFormat; }
+    void setDateOrder(const QString &value);
+    void setTimeFormat(const QString &value);
+    DateTimeFormatter *dateTimeFormatter() { return &m_dateTimeFormatter; }
+
     QString theme() const;
     void setTheme(const QString &value);
 
@@ -77,6 +88,9 @@ public:
 
     int overlayInactivitySeconds() const;
     void setOverlayInactivitySeconds(int value);
+
+    int uiTransparency() const { return m_uiTransparency; }
+    void setUiTransparency(int value);
 
     int overlayAutoHideSeconds() const;
     void setOverlayAutoHideSeconds(int value);
@@ -174,6 +188,7 @@ public:
     Q_INVOKABLE void validateMpvPath();
 
 signals:
+    void uiTransparencyChanged();
     void settingsChanged();
     void validationChanged();
     void dirtyChanged();
@@ -197,6 +212,9 @@ private:
     PlayerController *m_playerController;
     MultiViewController *m_multiViewController;
     ProfilesModel *m_profilesModel;
+    DateTimeFormatter m_dateTimeFormatter;
+    QString m_dateOrder;
+    QString m_timeFormat;
     QString m_theme { QStringLiteral("Dark") };
     bool m_showOnTopModeIndicator { true };
     bool m_preventDisplaySleep { true };
@@ -204,6 +222,7 @@ private:
     bool m_overlayAutoHide { true };
     int m_overlayAutoHideSeconds { 3 };
     int m_overlayInactivitySeconds { 60 };
+    int m_uiTransparency { 100 };
     int m_refreshIntervalMinutes { 360 };
     bool m_autoRefreshEpg { true };
     int m_guidePastHours { 6 };

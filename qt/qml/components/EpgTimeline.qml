@@ -6,9 +6,17 @@ import "../theme/Theme.js" as Theme
 Item {
     id: control
 
+    // qmllint disable unqualified
+    property int uiTransparency: (typeof settingsController !== "undefined") ? settingsController.uiTransparency : 100
+    // qmllint enable unqualified
+
     required property var epgModel
     required property var appController
     required property var dvrController
+    property string datePattern: "dddd dd.MM"
+    property string timePattern: "HH:mm"
+    onDatePatternChanged: rebuild()
+
     property url catchupIconSource: "qrc:/resources/icons/catch-up-indicator.svg"
     property url continueCatchupIconSource: "qrc:/resources/icons/continue-catch-up.svg"
     property int catchupProgressRevision: 0
@@ -160,7 +168,7 @@ Item {
             const date = new Date(program.start)
             const day = Qt.formatDateTime(date, "yyyy-MM-dd")
             rows.push({ key: key, program: program, kind: kind, listIndex: rows.length,
-                          dateLabel: day !== lastDay ? Qt.locale("en_US").toString(date, "dddd dd.MM") : "" })
+                          dateLabel: day !== lastDay ? Qt.locale("en_US").toString(date, control.datePattern) : "" })
             lastDay = day
         }
         const oldest = Date.now() - Number(channelData.catchupWindowHours || 0) * 3600000
@@ -222,14 +230,18 @@ Item {
     }
 
     onSelectedKeyChanged: {
-        if (catchupActive && keyboardSelectionActive) {
+        if (keyboardSelectionActive) {
             pointerSelectionActive = false
+        }
+        if (catchupActive && keyboardSelectionActive) {
             catchupSelectionKey = selectedKey
         }
     }
     onKeyboardSelectionActiveChanged: {
-        if (catchupActive && keyboardSelectionActive && selectedKey.length > 0) {
+        if (keyboardSelectionActive) {
             pointerSelectionActive = false
+        }
+        if (catchupActive && keyboardSelectionActive && selectedKey.length > 0) {
             catchupSelectionKey = selectedKey
         }
     }
@@ -276,12 +288,14 @@ Item {
             if (position.x === lastScenePosition.x && position.y === lastScenePosition.y)
                 return
             lastScenePosition = position
-            if (!control.catchupActive || !hovered || control.updating)
+            if (!hovered || control.updating)
+                return
+            control.pointerSelectionActive = true
+            if (!control.catchupActive)
                 return
             const local = control.mapToItem(timeline.contentItem, point.position.x, point.position.y)
             const item = timeline.itemAtIndex(timeline.indexAt(local.x, local.y))
             if (item) {
-                control.pointerSelectionActive = true
                 item.selectPointerProgram()
             }
         }
@@ -329,7 +343,8 @@ Item {
             readonly property string episodeTitle: String(program.subTitle || "").trim()
             readonly property bool active: control.catchupActive
                 ? control.catchupSelectionKey === modelData.key
-                : (rowHover.hovered || (control.keyboardSelectionActive && control.selectedKey === modelData.key))
+                : ((control.pointerSelectionActive && rowHover.hovered)
+                    || (control.keyboardSelectionActive && control.selectedKey === modelData.key))
             readonly property var catchupState: {
                 // Re-evaluate on minute refresh and bookmark updates, without duplicating eligibility rules.
                 const revision = control.revision
@@ -383,7 +398,7 @@ Item {
                 width: parent.width
                 height: row.card ? Math.max(row.primaryCard ? 94 : 86, cardContent.implicitHeight + 24) : 52
                 radius: row.card ? 6 : 4
-                color: row.active ? "#ad1f2d3a" : (row.card ? "#96182431" : "transparent")
+                color: row.active ? Theme.uiBackground("#ad1f2d3a", control.uiTransparency) : (row.card ? Theme.uiBackground("#96182431", control.uiTransparency) : "transparent")
 
                 ColumnLayout {
                     id: cardContent
@@ -479,7 +494,7 @@ Item {
                     anchors.rightMargin: 9
                     spacing: 2
                     Text {
-                        Layout.preferredWidth: 40
+                        Layout.preferredWidth: control.timePattern.indexOf("AP") >= 0 ? 65 : 40
                         text: row.program.startTimeLabel || ""
                         color: Theme.textSecondary
                         font.pixelSize: 10
@@ -556,8 +571,10 @@ Item {
                     acceptedDevices: PointerDevice.Mouse
                     onHoveredChanged: {
                         if (hovered) {
+                            if (!control.pointerSelectionActive)
+                                return
                             if (control.catchupActive) {
-                                if (control.pointerSelectionActive && !control.updating)
+                                if (!control.updating)
                                     row.selectPointerProgram()
                             } else {
                                 control.programHovered(row.program, body)
