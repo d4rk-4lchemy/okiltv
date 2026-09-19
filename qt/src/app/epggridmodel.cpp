@@ -88,7 +88,8 @@ QVariantMap buildProgramMap(
     const QDateTime &windowEnd,
     const std::optional<EpgEntry> &nextProgram,
     const QDateTime &nowUtc,
-    const bool isSelected)
+    const bool isSelected,
+    const DateTimeFormatOptions format)
 {
     const auto visibleStart = std::max(program.start, windowStart);
     const auto visibleStop = std::min(program.stop, windowEnd);
@@ -117,8 +118,8 @@ QVariantMap buildProgramMap(
         { QStringLiteral("stop"), program.stop.toUTC().toString(Qt::ISODateWithMs) },
         { QStringLiteral("isNow"), entryIsNowAt(program, nowUtc) },
         { QStringLiteral("progressPercent"), entryProgressPercentAt(program, nowUtc) },
-        { QStringLiteral("timeRange"), epgEntryTimeRange(program) },
-        { QStringLiteral("startTimeLabel"), epgEntryStartTimeLabel(program) },
+        { QStringLiteral("timeRange"), epgEntryTimeRange(program, format) },
+        { QStringLiteral("startTimeLabel"), epgEntryStartTimeLabel(program, format) },
         { QStringLiteral("offsetMinutes"), secondsToMinutes(windowStart.secsTo(visibleStart)) },
         { QStringLiteral("durationMinutes"), durationMinutes },
         { QStringLiteral("displayDurationMinutes"), displayDurationMinutes },
@@ -137,6 +138,22 @@ EpgGridModel::EpgGridModel(EpgService *epg, QObject *parent)
     , m_timeSlots(computeTimeSlots())
     , m_visibleTimeSlots(computeVisibleTimeSlots())
 {
+}
+
+void EpgGridModel::setDateTimeFormat(const Core::DateTimeFormatOptions options)
+{
+    if (options == m_dateTimeFormat) {
+        return;
+    }
+    m_dateTimeFormat = options;
+    invalidateProgramTilesCache();
+    m_timeSlots = computeTimeSlots();
+    m_visibleTimeSlots = computeVisibleTimeSlots();
+    emit timeSlotsChanged();
+    emit visibleTimeSlotsChanged();
+    emit windowChanged();
+    emitProgramsChangedForVisibleRows();
+    emit selectedProgramChanged();
 }
 
 EpgGridModel::~EpgGridModel()
@@ -205,12 +222,12 @@ QVariantList EpgGridModel::visibleTimeSlots() const
 
 QString EpgGridModel::windowStartLabel() const
 {
-    return m_windowStart.toLocalTime().toString(QStringLiteral("HH:mm"));
+    return formatDisplayTime(m_windowStart, m_dateTimeFormat);
 }
 
 QString EpgGridModel::windowEndLabel() const
 {
-    return windowEnd().toLocalTime().toString(QStringLiteral("HH:mm"));
+    return formatDisplayTime(windowEnd(), m_dateTimeFormat);
 }
 
 int EpgGridModel::windowSpanMinutes() const
@@ -286,12 +303,21 @@ int EpgGridModel::lookAheadHours() const
     return m_lookAheadHours;
 }
 
+void EpgGridModel::invalidateRebuild()
+{
+    ++m_rebuildGeneration;
+    if (!m_rebuildPending) {
+        m_rebuildPending = true;
+        emit rebuildPendingChanged();
+    }
+}
+
 void EpgGridModel::rebuild(
     const QList<Channel> &channels,
     const int guidePastHours,
     const int lookAheadHours)
 {
-    ++m_rebuildGeneration;
+    invalidateRebuild();
     const auto normalizedGuidePastHours = normalizeGuideHours(guidePastHours);
     const auto normalizedLookAheadHours = normalizeGuideHours(lookAheadHours);
     const auto windowStart = defaultWindowStart(normalizedGuidePastHours);
@@ -310,7 +336,8 @@ void EpgGridModel::rebuildAsync(
     const int guidePastHours,
     const int lookAheadHours)
 {
-    const auto generation = ++m_rebuildGeneration;
+    invalidateRebuild();
+    const auto generation = m_rebuildGeneration;
     const auto channelsCopy = std::make_shared<QList<Channel>>(channels);
     const auto normalizedGuidePastHours = normalizeGuideHours(guidePastHours);
     const auto normalizedLookAheadHours = normalizeGuideHours(lookAheadHours);
@@ -413,7 +440,7 @@ QVariantMap EpgGridModel::adjacentProgram(const int channelId, const QString &cu
         windowEnd(),
         nextProgram,
         QDateTime::currentDateTimeUtc(),
-        false);
+        false, m_dateTimeFormat);
 }
 
 QVariantMap EpgGridModel::programForChannelAtTimestamp(const int channelId, const QString &timestampIso) const
@@ -463,7 +490,7 @@ QVariantMap EpgGridModel::programForChannelAtTimestamp(const int channelId, cons
         windowEnd(),
         nextProgram,
         QDateTime::currentDateTimeUtc(),
-        false);
+        false, m_dateTimeFormat);
 }
 
 void EpgGridModel::setRenderViewport(const double startMinutes, const double durationMinutes)
@@ -756,6 +783,8 @@ void EpgGridModel::applyRows(
     emit windowChanged();
     emit selectedProgramChanged();
     scheduleOffscreenRowWarmup();
+    m_rebuildPending = false;
+    emit rebuildPendingChanged();
 }
 
 QList<EpgGridModel::Row> EpgGridModel::buildRows(
@@ -795,7 +824,7 @@ QVariantList EpgGridModel::computeTimeSlots() const
     const auto slotCount = std::max(1, windowSpanMinutes() / 60);
     for (auto index = 0; index <= slotCount; ++index) {
         timeSlots.push_back(QVariantMap {
-            { QStringLiteral("label"), current.toString(QStringLiteral("HH:mm")) },
+            { QStringLiteral("label"), formatDisplayTime(current, m_dateTimeFormat) },
             { QStringLiteral("isNow"), qAbs(index * 60.0 - currentTimeOffsetMinutes()) < 30.0 },
             { QStringLiteral("isHour"), true },
             { QStringLiteral("offsetMinutes"), index * 60 }
@@ -827,7 +856,7 @@ QVariantList EpgGridModel::computeVisibleTimeSlots() const
         auto value = m_windowStart.toLocalTime();
         value = value.addSecs(static_cast<qint64>(slot) * kSecondsPerHour);
         visibleSlots.push_back(QVariantMap {
-            { QStringLiteral("label"), value.toString(QStringLiteral("HH:mm")) },
+            { QStringLiteral("label"), formatDisplayTime(value, m_dateTimeFormat) },
             { QStringLiteral("isNow"), qAbs(slot * 60.0 - currentTimeOffsetMinutes()) < 30.0 },
             { QStringLiteral("isHour"), true },
             { QStringLiteral("offsetMinutes"), slot * 60 }
@@ -891,7 +920,7 @@ QVariantList EpgGridModel::buildPrograms(const int rowIndex, const Row &row) con
             fullWindowEnd,
             nextProgram,
             nowUtc,
-            isSelected));
+            isSelected, m_dateTimeFormat));
     }
 
     m_programTilesCacheByRow.insert(rowIndex, tiles);
@@ -951,7 +980,7 @@ QVariantMap EpgGridModel::findSelectedProgram() const
                 fullWindowEnd,
                 nextProgram,
                 nowUtc,
-                true);
+                true, m_dateTimeFormat);
         }
         return {};
     }
@@ -974,7 +1003,7 @@ QVariantMap EpgGridModel::findSelectedProgram() const
                 fullWindowEnd,
                 nextProgram,
                 nowUtc,
-                row.channel.id == m_selectedChannelId);
+                row.channel.id == m_selectedChannelId, m_dateTimeFormat);
         }
     }
 

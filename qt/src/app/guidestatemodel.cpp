@@ -39,12 +39,14 @@ QVariantMap GuideStateModel::selectedChannel() const
 
 QVariantMap GuideStateModel::selectedProgram() const
 {
-    return m_selectedProgramVariant;
+    return formatProgramTimes(m_selectedProgramVariant, resolveDateTimeFormat(
+        m_settings->current().dateOrder, m_settings->current().timeFormat));
 }
 
 QVariantList GuideStateModel::channelPrograms() const
 {
-    return m_channelProgramsVariant;
+    return formatProgramTimes(m_channelProgramsVariant, resolveDateTimeFormat(
+        m_settings->current().dateOrder, m_settings->current().timeFormat));
 }
 
 bool GuideStateModel::previewEnabled() const

@@ -101,6 +101,7 @@ public:
     bool seamlessStandbyPrewarmActive() const;
     QString playbackMode() const;
     QString catchupProgramLabel() const;
+    void setDateTimeFormat(Core::DateTimeFormatOptions options);
     QVariantMap catchupCurrentProgram() const;
     bool catchupTimelineActive() const;
     qint64 catchupTimelineStartEpochMs() const;
@@ -473,6 +474,7 @@ private:
     QString m_currentPlaybackUrl;
     QString m_currentLoadfileOptions;
     QString m_playbackMode { QStringLiteral("live") };
+    Core::DateTimeFormatOptions m_dateTimeFormat;
     QString m_catchupProgramLabel;
     bool m_catchupEndless { false };
     bool m_catchupPublicationWaiting { false };

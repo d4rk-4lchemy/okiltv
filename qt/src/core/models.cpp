@@ -183,16 +183,14 @@ double epgEntryProgressPercent(const EpgEntry &entry)
     return static_cast<double>(entry.start.msecsTo(now)) / static_cast<double>(total) * 100.0;
 }
 
-QString epgEntryTimeRange(const EpgEntry &entry)
+QString epgEntryTimeRange(const EpgEntry &entry, const DateTimeFormatOptions options)
 {
-    return QStringLiteral("%1 - %2")
-        .arg(entry.start.toLocalTime().toString(QStringLiteral("HH:mm")))
-        .arg(entry.stop.toLocalTime().toString(QStringLiteral("HH:mm")));
+    return formatDisplayTimeRange(entry.start, entry.stop, options);
 }
 
-QString epgEntryStartTimeLabel(const EpgEntry &entry)
+QString epgEntryStartTimeLabel(const EpgEntry &entry, const DateTimeFormatOptions options)
 {
-    return entry.start.toLocalTime().toString(QStringLiteral("HH:mm"));
+    return formatDisplayTime(entry.start, options);
 }
 
 } // namespace OKILTV::Core

@@ -50,7 +50,32 @@ SettingsController::SettingsController(
     , m_multiViewController(multiViewController)
     , m_profilesModel(profilesModel)
 {
+    m_dateTimeFormatter.apply(m_settings->current().dateOrder, m_settings->current().timeFormat);
     reload();
+}
+
+void SettingsController::setDateOrder(const QString &value)
+{
+    const auto normalized = Core::normalizeDateOrder(value);
+    if (m_dateOrder == normalized) {
+        return;
+    }
+    const auto wasDirty = dirty();
+    m_dateOrder = normalized;
+    emit settingsChanged();
+    emitDirtyChangedIfNeeded(wasDirty);
+}
+
+void SettingsController::setTimeFormat(const QString &value)
+{
+    const auto normalized = Core::normalizeTimeFormat(value);
+    if (m_timeFormat == normalized) {
+        return;
+    }
+    const auto wasDirty = dirty();
+    m_timeFormat = normalized;
+    emit settingsChanged();
+    emitDirtyChangedIfNeeded(wasDirty);
 }
 
 QString SettingsController::theme() const
@@ -130,6 +155,18 @@ void SettingsController::setOverlayAutoHide(const bool value)
     }
     m_overlayAutoHide = value;
     emit settingsChanged();
+    emitDirtyChangedIfNeeded(wasDirty);
+}
+
+void SettingsController::setUiTransparency(int value)
+{
+    const auto normalized = std::clamp(value, 0, 100);
+    if (m_uiTransparency == normalized) {
+        return;
+    }
+    const auto wasDirty = dirty();
+    m_uiTransparency = normalized;
+    emit uiTransparencyChanged();
     emitDirtyChangedIfNeeded(wasDirty);
 }
 
@@ -648,11 +685,14 @@ bool SettingsController::dirty() const
     const auto effectiveSettingsTimeshiftEnabled = ffmpegAvailable ? settings.timeshiftEnabled : false;
     const auto effectiveSettingsRemuxRecordings = ffmpegAvailable ? settings.remuxRecordingsToMkv : false;
     const auto effectiveSettingsDvrRemux = ffmpegAvailable ? settings.dvrRemuxToMkv : false;
-    return normalizedThemeDraft() != settings.theme
+    return m_dateOrder != settings.dateOrder
+        || m_timeFormat != settings.timeFormat
+        || normalizedThemeDraft() != settings.theme
         || m_showOnTopModeIndicator != settings.showOnTopModeIndicator
         || m_preventDisplaySleep != settings.preventDisplaySleep
         || m_guidePreviewEnabled != settings.guidePreviewEnabled
         || m_overlayInactivitySeconds != settings.overlayInactivitySeconds
+        || m_uiTransparency != settings.uiTransparency
         || m_overlayAutoHide != settings.overlayAutoHide
         || normalizedOverlayAutoHideSecondsDraft() != settings.overlayAutoHideSeconds
         || normalizedRefreshIntervalDraft() != settings.refreshIntervalMinutes
@@ -688,7 +728,10 @@ bool SettingsController::dirty() const
 void SettingsController::reload()
 {
     const auto wasDirty = dirty();
+    const auto previousTransparency = m_uiTransparency;
     const auto &settings = m_settings->current();
+    m_dateOrder = settings.dateOrder;
+    m_timeFormat = settings.timeFormat;
     m_theme = settings.theme;
     m_showOnTopModeIndicator = settings.showOnTopModeIndicator;
     m_preventDisplaySleep = settings.preventDisplaySleep;
@@ -696,6 +739,7 @@ void SettingsController::reload()
     m_overlayAutoHide = settings.overlayAutoHide;
     m_overlayAutoHideSeconds = settings.overlayAutoHideSeconds;
     m_overlayInactivitySeconds = settings.overlayInactivitySeconds;
+    m_uiTransparency = std::clamp(settings.uiTransparency, 0, 100);
     m_refreshIntervalMinutes = settings.refreshIntervalMinutes;
     m_autoRefreshEpg = settings.autoRefreshEpg;
     m_guidePastHours = settings.guidePastHours;
@@ -727,6 +771,9 @@ void SettingsController::reload()
     m_dvrEndOffsetMinutes = settings.dvrEndOffsetMinutes;
     emit validationChanged();
     emit settingsChanged();
+    if (previousTransparency != m_uiTransparency) {
+        emit uiTransparencyChanged();
+    }
     emitDirtyChangedIfNeeded(wasDirty);
 }
 
@@ -734,11 +781,14 @@ void SettingsController::save()
 {
     const auto wasDirty = dirty();
     auto &settings = m_settings->current();
+    settings.dateOrder = m_dateOrder;
+    settings.timeFormat = m_timeFormat;
     settings.theme = normalizedThemeDraft();
     settings.showOnTopModeIndicator = m_showOnTopModeIndicator;
     settings.preventDisplaySleep = m_preventDisplaySleep;
     settings.guidePreviewEnabled = m_guidePreviewEnabled;
     settings.overlayInactivitySeconds = m_overlayInactivitySeconds;
+    settings.uiTransparency = m_uiTransparency;
     settings.overlayAutoHide = m_overlayAutoHide;
     settings.overlayAutoHideSeconds = normalizedOverlayAutoHideSecondsDraft();
     settings.refreshIntervalMinutes = normalizedRefreshIntervalDraft();
@@ -771,6 +821,8 @@ void SettingsController::save()
     settings.dvrEndOffsetMinutes = m_dvrEndOffsetMinutes;
     m_settings->save();
 
+    m_dateOrder = settings.dateOrder;
+    m_timeFormat = settings.timeFormat;
     m_theme = settings.theme;
     m_showOnTopModeIndicator = settings.showOnTopModeIndicator;
     m_preventDisplaySleep = settings.preventDisplaySleep;
@@ -820,6 +872,7 @@ void SettingsController::save()
     m_multiViewController->applySettings();
     m_profilesModel->reload();
     emitDirtyChangedIfNeeded(wasDirty);
+    m_dateTimeFormatter.apply(settings.dateOrder, settings.timeFormat);
     emit saved();
 }
 

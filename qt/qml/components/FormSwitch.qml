@@ -5,6 +5,10 @@ import "../theme/Theme.js" as Theme
 Switch {
     id: control
 
+    // qmllint disable unqualified
+    property int uiTransparency: (typeof settingsController !== "undefined") ? settingsController.uiTransparency : 100
+    // qmllint enable unqualified
+
     implicitWidth: 52
     implicitHeight: 30
     hoverEnabled: true
@@ -16,12 +20,12 @@ Switch {
         radius: height / 2
         color: {
             if (!control.enabled)
-                return "#48303942"
+                return Theme.uiBackground("#48303942", control.uiTransparency)
             if (control.checked)
                 return "#7f94a3"
             if (control.hovered)
-                return "#5b4a5763"
-            return "#4c424e59"
+                return Theme.uiBackground("#5b4a5763", control.uiTransparency)
+            return Theme.uiBackground("#4c424e59", control.uiTransparency)
         }
         border.width: control.visualFocus ? 1 : 0
         border.color: control.visualFocus ? "#96acbc" : "transparent"

@@ -5,6 +5,10 @@ import "../theme/Theme.js" as Theme
 Button {
     id: control
 
+    // qmllint disable unqualified
+    property int uiTransparency: (typeof settingsController !== "undefined") ? settingsController.uiTransparency : 100
+    // qmllint enable unqualified
+
     property string glyph: ""
     property url iconSource: ""
     property string caption: ""
@@ -61,11 +65,11 @@ Button {
         radius: Theme.radiusM
         color: {
             if (control.active)
-                return control.activeFillColor
+                return Theme.uiBackground(control.activeFillColor, control.uiTransparency)
             if (control.down)
-                return control.pressedFillColor
+                return Theme.uiBackground(control.pressedFillColor, control.uiTransparency)
             if (control.hovered)
-                return control.hoverFillColor
+                return Theme.uiBackground(control.hoverFillColor, control.uiTransparency)
             return "transparent"
         }
         border.width: 0

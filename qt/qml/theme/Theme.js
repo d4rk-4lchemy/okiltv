@@ -19,6 +19,17 @@ var shadow = "#66000000"
 var glass = "#b3121d2a"
 var glassStrong = "#d2192434"
 
+// The percentage scales the original transparency; 100 preserves the design.
+// Pass original colors here, exactly once at the rendered background.
+function uiBackground(baseColor, transparency, baseOpacity) {
+    var color = Qt.tint(baseColor, "transparent")
+    var alpha = color.a * (baseOpacity === undefined ? 1 : baseOpacity)
+    if (alpha === 0)
+        return Qt.rgba(color.r, color.g, color.b, 0)
+    var fraction = Math.max(0, Math.min(100, transparency)) / 100
+    return Qt.rgba(color.r, color.g, color.b, 1 - (1 - alpha) * fraction)
+}
+
 var radiusS = 8
 var radiusM = 10
 var radiusL = 12

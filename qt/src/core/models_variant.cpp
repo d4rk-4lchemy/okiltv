@@ -79,7 +79,7 @@ QVariantMap toVariantMap(const Channel &channel)
     };
 }
 
-QVariantMap toVariantMap(const EpgEntry &entry)
+QVariantMap toVariantMap(const EpgEntry &entry, const DateTimeFormatOptions options)
 {
     return {
         { QStringLiteral("channelId"), entry.channelId },
@@ -91,17 +91,17 @@ QVariantMap toVariantMap(const EpgEntry &entry)
         { QStringLiteral("stop"), entry.stop.toUTC().toString(Qt::ISODateWithMs) },
         { QStringLiteral("isNow"), epgEntryIsNow(entry) },
         { QStringLiteral("progressPercent"), epgEntryProgressPercent(entry) },
-        { QStringLiteral("timeRange"), epgEntryTimeRange(entry) },
-        { QStringLiteral("startTimeLabel"), epgEntryStartTimeLabel(entry) }
+        { QStringLiteral("timeRange"), epgEntryTimeRange(entry, options) },
+        { QStringLiteral("startTimeLabel"), epgEntryStartTimeLabel(entry, options) }
     };
 }
 
-QVariantList toVariantList(const QList<EpgEntry> &entries)
+QVariantList toVariantList(const QList<EpgEntry> &entries, const DateTimeFormatOptions options)
 {
     QVariantList list;
     list.reserve(entries.size());
     for (const auto &entry : entries) {
-        list.push_back(toVariantMap(entry));
+        list.push_back(toVariantMap(entry, options));
     }
     return list;
 }

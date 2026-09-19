@@ -47,7 +47,8 @@ QVariantMap NowNextModel::channel() const
 
 QVariantList NowNextModel::pastPrograms() const
 {
-    return m_pastProgramsVariant;
+    return formatProgramTimes(m_pastProgramsVariant, resolveDateTimeFormat(
+        m_settings->current().dateOrder, m_settings->current().timeFormat));
 }
 
 QString NowNextModel::channelName() const
@@ -62,17 +63,20 @@ bool NowNextModel::loading() const
 
 QVariantMap NowNextModel::currentProgram() const
 {
-    return m_currentProgramVariant;
+    return formatProgramTimes(m_currentProgramVariant, resolveDateTimeFormat(
+        m_settings->current().dateOrder, m_settings->current().timeFormat));
 }
 
 QVariantMap NowNextModel::nextProgram() const
 {
-    return m_nextProgramVariant;
+    return formatProgramTimes(m_nextProgramVariant, resolveDateTimeFormat(
+        m_settings->current().dateOrder, m_settings->current().timeFormat));
 }
 
 QVariantList NowNextModel::upcomingPrograms() const
 {
-    return m_upcomingProgramsVariant;
+    return formatProgramTimes(m_upcomingProgramsVariant, resolveDateTimeFormat(
+        m_settings->current().dateOrder, m_settings->current().timeFormat));
 }
 
 void NowNextModel::setChannel(const std::optional<Channel> &channel)

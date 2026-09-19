@@ -46,6 +46,7 @@
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QCoreApplication>
+#include <QThreadPool>
 #include <QDataStream>
 #include <QDir>
 #include <QElapsedTimer>
@@ -507,7 +508,9 @@ private slots:
     void playerControllerDebugTimestampFormat();
     void appControllerTracksWatchTimeAndFlushesOnPlaybackBoundaries();
     void appControllerFlushTrackedWatchSecondsAllowsChannelIdZero();
+    void dateTimeFormatsApplyOnlyOnSaveAndRefreshCachedPrograms();
     void settingsControllerTracksDirtyStateForRegularSettings();
+    void settingsControllerPreviewsUiTransparency();
     void settingsControllerDisablesFfmpegDependentOptionsWhenToolsUnavailable();
     void settingsControllerAllowsFfmpegDependentOptionsWhenToolsAvailable();
     void timeshiftControllerServesPlaybackOverLocalHttp();
@@ -522,9 +525,11 @@ private slots:
     void catchupPipPendingRedirectIsCancelledWhenClosed();
     void multiviewControllerAllowsCatchupPipButBlocksGrid();
     void multiviewControllerOpensPictureInPictureGridAndSwapsChannels();
+    void multiviewPromotedPipCanPauseAfterRepeatedSwaps();
     void multiviewPrimaryTileReflectsPlaybackPlayerObjectChanges();
     void mpvVideoItemSharedPlayerDetachDoesNotClearOtherRenderTarget();
     void appControllerRoutesActivationToFocusedMultiviewTile();
+    void appControllerActivatingPipChannelSwapsWithoutRetune();
     void appControllerSameChannelActivationSkipsRetuneWhileActiveOrInFlight();
     void appControllerSameChannelActivationRetunesLiveWhenCatchupActive();
     void appControllerSourceActivationStopsCatchupBeforeCrossProfileLoad();
@@ -571,7 +576,9 @@ private slots:
     void dvrControllerRemuxDeletesTempWhenDurationMatchesRegardlessOfExitCode();
     void dvrControllerRemuxKeepsTempWhenDurationMismatched();
     void portableRuntimeControllerTracksPortableOverrideWithoutDirtyingSettings();
+    void channelListModelRestoresSavedGroup();
     void channelListModelSupportsAutoFavouritesAndGroupPrefs();
+    void channelListModelWatchUpdatesPreserveFavouriteRows();
     void channelListModelReplacementIsConsistentDuringNotifications_data();
     void channelListModelReplacementIsConsistentDuringNotifications();
     void channelListModelHidesDeselectedGroupsUntilExplicitGroupIsChosen();
@@ -596,6 +603,7 @@ private slots:
     void epgGridModelStreamsProgramsForViewport();
     void appControllerGuideRebuildUsesConfiguredPastAndFutureRanges();
     void guideGridFilteringStaysIndependentFromLiveSearch();
+    void guideGridInvalidatesQueuedResultsBeforeReplacement();
     void startupResumeLastWatchedChannel();
     void startupRestoresCatchup_data();
     void startupRestoresCatchup();
@@ -5556,6 +5564,143 @@ void AppModelTests::appControllerFlushTrackedWatchSecondsAllowsChannelIdZero()
         "Watch stats flush should persist elapsed time for channel id 0.");
 }
 
+void AppModelTests::dateTimeFormatsApplyOnlyOnSaveAndRefreshCachedPrograms()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    auto &settings = harness.settings->current();
+    settings.dateOrder = QStringLiteral("dmy");
+    settings.timeFormat = QStringLiteral("24h");
+    auto *controller = harness.settingsController.get();
+    controller->reload();
+    auto *formatter = controller->dateTimeFormatter();
+    formatter->apply(settings.dateOrder, settings.timeFormat);
+    QSignalSpy formatSpy(formatter, &DateTimeFormatter::formatChanged);
+    Channel channel;
+    channel.id = 7;
+    channel.profileId = harness.activeProfileId();
+    channel.tvgId = QStringLiteral("format.channel");
+    channel.name = QStringLiteral("Format channel");
+    EpgEntry program;
+    program.channelId = channel.tvgId;
+    program.title = QStringLiteral("Format programme");
+    program.start = QDateTime::currentDateTimeUtc().addSecs(-600);
+    program.stop = program.start.addSecs(7200);
+    harness.epgService->loadFromEntries({program});
+    harness.appController->m_loadedChannels = {channel};
+    harness.channelListModel->setChannels({channel}, {});
+    QVERIFY(harness.channelListModel->selectById(channel.id));
+    const auto oldMap = toVariantMap(program);
+    harness.channelListModel->setCurrentProgramInfo({{channel.id, oldMap}});
+    harness.guideStateModel->setChannels({channel});
+    harness.guideStateModel->selectChannel(channel.id);
+    harness.guideStateModel->selectProgram(oldMap);
+    harness.epgGridModel->rebuild({channel}, 6, 24);
+    harness.epgGridModel->setSelectedChannelId(channel.id);
+    harness.epgGridModel->setSelectedProgramStart(oldMap.value("start").toString());
+    harness.nowNextModel->setChannel(channel);
+    harness.playbackNowNextModel->setChannel(channel);
+    QTRY_VERIFY(!harness.nowNextModel->loading());
+    QTRY_VERIFY(!harness.playbackNowNextModel->loading());
+    const auto startEpoch = harness.epgGridModel->windowStartEpochMs();
+    QSignalSpy resetSpy(harness.epgGridModel.get(), &QAbstractItemModel::modelReset);
+    QSignalSpy tuneSpy(harness.playerController.get(), &PlayerController::playbackChannelActivated);
+    const auto playerObject = harness.playerController->playbackPlayerObject();
+    harness.playerController->m_playbackMode = QStringLiteral("catchup");
+    harness.playerController->m_catchupDisplayProgram = program;
+
+    controller->setDateOrder(QStringLiteral("mdy"));
+    controller->setTimeFormat(QStringLiteral("12h"));
+    QVERIFY(controller->dirty());
+    QCOMPARE(formatSpy.count(), 0);
+    QCOMPARE(formatter->timePattern(), QStringLiteral("HH:mm"));
+    QVERIFY(formatter->preview(controller->dateOrder(), controller->timeFormat()).contains("Friday, 09.18  6:05 PM"));
+    QCOMPARE(harness.nowNextModel->currentProgram().value("timeRange"), oldMap.value("timeRange"));
+    controller->cancel();
+    QVERIFY(!controller->dirty());
+    QCOMPARE(controller->timeFormat(), QStringLiteral("24h"));
+    controller->setDateOrder(QStringLiteral("mdy"));
+    controller->setTimeFormat(QStringLiteral("12h"));
+    // A pre-save worker or cache can still carry 24-hour labels. Readers must reformat them.
+    harness.nowNextModel->refresh();
+    controller->save();
+    QCOMPARE(formatSpy.count(), 1);
+    QVERIFY(!controller->dirty());
+    QCOMPARE(formatter->timePattern(), QStringLiteral("h:mm AP"));
+    const auto expected = program.start.toLocalTime().toString("h:mm AP")
+        + " - " + program.stop.toLocalTime().toString("h:mm AP");
+    QCOMPARE(harness.nowNextModel->currentProgram().value("timeRange").toString(), expected);
+    QCOMPARE(harness.playbackNowNextModel->currentProgram().value("timeRange").toString(), expected);
+    QCOMPARE(harness.guideStateModel->selectedProgram().value("timeRange").toString(), expected);
+    QCOMPARE(harness.playerController->catchupCurrentProgram().value("timeRange").toString(), expected);
+    QCOMPARE(harness.epgGridModel->selectedProgram().value("timeRange").toString(), expected);
+    harness.channelListModel->setCurrentProgramInfo({{channel.id, oldMap}});
+    QCOMPARE(harness.channelListModel->data(harness.channelListModel->index(0),
+        ChannelListModel::CurrentProgramTimeRangeRole).toString(), expected);
+    QTRY_VERIFY(!harness.nowNextModel->loading());
+    harness.nowNextModel->setChannel(channel); // Cache hit after the in-flight result.
+    QCOMPARE(harness.nowNextModel->currentProgram().value("timeRange").toString(), expected);
+    QTRY_VERIFY(!harness.nowNextModel->loading());
+    QCOMPARE(harness.epgGridModel->windowStartEpochMs(), startEpoch);
+    QCOMPARE(harness.epgGridModel->selectedChannelId(), channel.id);
+    QCOMPARE(harness.guideStateModel->selectedProgram().value("start"), oldMap.value("start"));
+    QCOMPARE(resetSpy.count(), 0);
+    QCOMPARE(tuneSpy.count(), 0);
+    QCOMPARE(harness.playerController->playbackPlayerObject(), playerObject);
+    harness.settings->load();
+    QCOMPARE(harness.settings->current().dateOrder, QStringLiteral("mdy"));
+    QCOMPARE(harness.settings->current().timeFormat, QStringLiteral("12h"));
+    controller->setTimeFormat(QStringLiteral("invalid"));
+    QCOMPARE(controller->timeFormat(), QStringLiteral("system"));
+    controller->cancel();
+}
+
+void AppModelTests::settingsControllerPreviewsUiTransparency()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    SettingsManager settings(tempDir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    PlayerController player;
+    MultiViewController multiView(&settings, nullptr, &player);
+    ProfilesModel profiles(&settings);
+    SettingsController controller(&settings, &player, &multiView, &profiles);
+    QSignalSpy previewSpy(&controller, &SettingsController::uiTransparencyChanged);
+    QSignalSpy settingsSpy(&controller, &SettingsController::settingsChanged);
+    QSignalSpy dirtySpy(&controller, &SettingsController::dirtyChanged);
+
+    QCOMPARE(controller.uiTransparency(), 100);
+    controller.setUiTransparency(50);
+    QCOMPARE(controller.uiTransparency(), 50);
+    QCOMPARE(settings.current().uiTransparency, 100);
+    QVERIFY(controller.dirty());
+    QCOMPARE(previewSpy.count(), 1);
+    QCOMPARE(dirtySpy.count(), 1);
+    QCOMPARE(settingsSpy.count(), 0); // Dragging must not trigger unrelated settings work.
+    controller.setUiTransparency(50);
+    QCOMPARE(previewSpy.count(), 1);
+    controller.cancel();
+    QCOMPARE(controller.uiTransparency(), 100);
+    QCOMPARE(previewSpy.count(), 2);
+    QVERIFY(!controller.dirty());
+
+    controller.setUiTransparency(-1);
+    QCOMPARE(controller.uiTransparency(), 0);
+    controller.setUiTransparency(101);
+    QCOMPARE(controller.uiTransparency(), 100);
+    QVERIFY(!controller.dirty());
+    controller.setUiTransparency(35);
+    controller.save();
+    QVERIFY(!controller.dirty());
+    SettingsManager restarted(tempDir.filePath(QStringLiteral("settings.json")));
+    restarted.load();
+    QCOMPARE(restarted.current().uiTransparency, 35);
+    controller.setUiTransparency(0);
+    controller.reload();
+    QCOMPARE(controller.uiTransparency(), 35);
+    QVERIFY(!controller.dirty());
+}
+
 void AppModelTests::settingsControllerTracksDirtyStateForRegularSettings()
 {
     QTemporaryDir tempDir;
@@ -6530,6 +6675,57 @@ void AppModelTests::multiviewControllerOpensPictureInPictureGridAndSwapsChannels
     QCOMPARE(harness.multiViewController->layoutMode(), QStringLiteral("off"));
 }
 
+void AppModelTests::multiviewPromotedPipCanPauseAfterRepeatedSwaps()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    harness.appController->initialize();
+    QTRY_VERIFY_WITH_TIMEOUT(!harness.appController->isBusy(), 5000);
+    const auto channels = harness.channelListModel->allChannels();
+    QVERIFY(channels.size() >= 2);
+    QVERIFY(harness.channelListModel->activateById(channels.first().id));
+    auto *multi = harness.multiViewController.get();
+    QVERIFY(multi->togglePictureInPicture(channels.last().id));
+    auto *original = multi->primaryController()->player();
+    auto *secondary = qobject_cast<OKILTV::Player::MpvPlayer *>(
+        multi->tiles().at(1).toMap().value(QStringLiteral("playerObject")).value<QObject *>());
+    QVERIFY(secondary);
+    QSignalSpy originalLoads(original, &OKILTV::Player::MpvPlayer::fileLoaded);
+    QSignalSpy secondaryLoads(secondary, &OKILTV::Player::MpvPlayer::fileLoaded);
+
+    for (int swapIndex = 0; swapIndex < 4; ++swapIndex) {
+        QVERIFY(multi->swapPrimaryWithPictureInPicture());
+        auto *controller = multi->primaryController();
+        auto *active = controller->player();
+        auto *inactive = active == original ? secondary : original;
+        QCOMPARE(active, swapIndex % 2 == 0 ? secondary : original);
+        // Supply observed backend state without requiring a provider connection.
+        active->m_cachedTelemetry.pauseState = false;
+        emit active->pauseStateChanged(false);
+        QVERIFY(controller->isPlaying());
+
+        controller->togglePause();
+        QVERIFY(controller->m_pauseToggleRequested);
+        QVERIFY(controller->m_userPausedManually);
+        QVERIFY(controller->isPlaying()); // Wait for backend acknowledgement.
+        active->m_cachedTelemetry.pauseState = true;
+        emit active->pauseStateChanged(true);
+        QVERIFY(!controller->isPlaying());
+        emit inactive->pauseStateChanged(false);
+        QVERIFY(!controller->isPlaying());
+
+        controller->togglePause();
+        QVERIFY(controller->m_pauseToggleRequested);
+        QVERIFY(!controller->m_userPausedManually);
+        QVERIFY(!controller->isPlaying());
+        active->m_cachedTelemetry.pauseState = false;
+        emit active->pauseStateChanged(false);
+        QVERIFY(controller->isPlaying());
+    }
+    QCOMPARE(originalLoads.count(), 0);
+    QCOMPARE(secondaryLoads.count(), 0);
+}
+
 void AppModelTests::multiviewPrimaryTileReflectsPlaybackPlayerObjectChanges()
 {
     StartupHarness harness;
@@ -6602,6 +6798,47 @@ void AppModelTests::appControllerRoutesActivationToFocusedMultiviewTile()
     QCOMPARE(harness.playerController->currentChannel().value(QStringLiteral("id")).toInt(), channels.first().id);
     const auto tiles = harness.multiViewController->tiles();
     QCOMPARE(tiles.at(1).toMap().value(QStringLiteral("channelId")).toInt(), channels.last().id);
+}
+
+void AppModelTests::appControllerActivatingPipChannelSwapsWithoutRetune()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    harness.appController->initialize();
+    QTRY_VERIFY_WITH_TIMEOUT(!harness.appController->isBusy(), 5000);
+    const auto channels = harness.channelListModel->allChannels();
+    QVERIFY(channels.size() >= 2);
+
+    QVERIFY(harness.channelListModel->activateById(channels.first().id));
+    auto *multi = harness.multiViewController.get();
+    QVERIFY(multi->togglePictureInPicture(channels.last().id));
+    multi->focusTile(0);
+    const auto initialTiles = multi->tiles();
+    auto *primaryPlayer = initialTiles.at(0).toMap().value(QStringLiteral("playerObject")).value<QObject *>();
+    auto *pipPlayer = initialTiles.at(1).toMap().value(QStringLiteral("playerObject")).value<QObject *>();
+    QVERIFY(primaryPlayer);
+    QVERIFY(pipPlayer);
+    QVERIFY(primaryPlayer != pipPlayer);
+    QSignalSpy assignment(multi, &MultiViewController::primaryTileAssignmentRequested);
+
+    QVERIFY(harness.channelListModel->activateById(channels.last().id));
+    QCOMPARE(multi->layoutMode(), QStringLiteral("pip"));
+    QCOMPARE(multi->primaryController()->currentChannelValue()->id, channels.last().id);
+    const auto swappedTiles = multi->tiles();
+    QCOMPARE(swappedTiles.at(1).toMap().value(QStringLiteral("channelId")).toInt(), channels.first().id);
+    QCOMPARE(swappedTiles.at(0).toMap().value(QStringLiteral("playerObject")).value<QObject *>(), pipPlayer);
+    QCOMPARE(swappedTiles.at(1).toMap().value(QStringLiteral("playerObject")).value<QObject *>(), primaryPlayer);
+    QCOMPARE(assignment.count(), 0);
+    QCOMPARE(multi->focusedTileIndex(), 0);
+
+    // Selecting the other channel swaps the same two sessions back.
+    QVERIFY(harness.channelListModel->activateById(channels.first().id));
+    const auto restoredTiles = multi->tiles();
+    QCOMPARE(multi->primaryController()->currentChannelValue()->id, channels.first().id);
+    QCOMPARE(restoredTiles.at(1).toMap().value(QStringLiteral("channelId")).toInt(), channels.last().id);
+    QCOMPARE(restoredTiles.at(0).toMap().value(QStringLiteral("playerObject")).value<QObject *>(), primaryPlayer);
+    QCOMPARE(restoredTiles.at(1).toMap().value(QStringLiteral("playerObject")).value<QObject *>(), pipPlayer);
+    QCOMPARE(assignment.count(), 0);
 }
 
 void AppModelTests::appControllerSameChannelActivationSkipsRetuneWhileActiveOrInFlight()
@@ -9040,6 +9277,71 @@ void AppModelTests::portableRuntimeControllerTracksPortableOverrideWithoutDirtyi
     qunsetenv("OKILTV_SKIP_PORTABLE_RESTART");
 }
 
+void AppModelTests::channelListModelRestoresSavedGroup()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const auto path = directory.filePath(QStringLiteral("settings.json"));
+    const auto sourceA = QStringLiteral("source-a");
+    const auto sourceB = QStringLiteral("source-b");
+    const auto newsId = QStringLiteral("News");
+    const auto sportsId = QStringLiteral("Sports");
+    Channel news;
+    news.id = 1;
+    news.categoryId = newsId;
+    Channel sports;
+    sports.id = 2;
+    sports.categoryId = sportsId;
+    const QList<Channel> channels { news, sports };
+    const QList<ChannelCategory> categories {
+        { newsId, newsId, 0 }, { sportsId, sportsId, 0 }
+    };
+    {
+        SettingsManager settings(path);
+        ChannelListModel model(&settings);
+        model.setActiveProfileId(sourceA);
+        model.setChannels(channels, categories);
+        model.setSelectedCategoryId(sportsId);
+        model.clear(); // Source loading must not erase the saved selection.
+        model.setActiveProfileId(sourceB);
+        model.setChannels(channels, categories);
+        QCOMPARE(model.selectedCategoryId(), QString {});
+        model.setSelectedCategoryId(newsId);
+    }
+    SettingsManager settings(path);
+    settings.load();
+    ChannelListModel model(&settings);
+    model.setActiveProfileId(sourceA);
+    model.setChannels(channels, categories);
+    QCOMPARE(model.selectedCategoryId(), sportsId);
+    QCOMPARE(model.rowCount(), 1);
+    QCOMPARE(model.index(0).data(ChannelListModel::IdRole).toInt(), sports.id);
+    model.setActiveProfileId(sourceB);
+    model.setChannels(channels, categories);
+    QCOMPARE(model.selectedCategoryId(), newsId);
+    model.setSelectedCategoryId(QStringLiteral("__favourites__"));
+    settings.load();
+    model.clear();
+    model.setChannels(channels, categories);
+    QCOMPARE(model.selectedCategoryId(), QStringLiteral("__favourites__"));
+    model.setSelectedCategoryId(QString {});
+    settings.load();
+    model.setChannels(channels, categories);
+    QCOMPARE(model.selectedCategoryId(), QString {});
+    model.setActiveProfileId(sourceA);
+    model.setChannels({ news }, { categories.first() });
+    QCOMPARE(model.selectedCategoryId(), QString {}); // Saved group was removed.
+    model.setChannels(channels, categories);
+    model.setSelectedCategoryId(sportsId);
+    settings.current().hiddenGroupsByProfile[sourceA] = { sportsId };
+    settings.save();
+    settings.load();
+    model.clear();
+    model.setChannels(channels, categories);
+    QCOMPARE(model.selectedCategoryId(), QString {});
+    QVERIFY(settings.lastSaveError().isEmpty());
+}
+
 void AppModelTests::channelListModelSupportsAutoFavouritesAndGroupPrefs()
 {
     QTemporaryDir tempDir;
@@ -9108,6 +9410,53 @@ void AppModelTests::channelListModelSupportsAutoFavouritesAndGroupPrefs()
     QVERIFY(model.moveCategory(QStringLiteral("Sports"), 0));
     const auto orderedCategories = model.categories();
     QCOMPARE(orderedCategories.at(0).toMap().value(QStringLiteral("id")).toString(), QStringLiteral("Sports"));
+}
+
+void AppModelTests::channelListModelWatchUpdatesPreserveFavouriteRows()
+{
+    QTemporaryDir tempDir;
+    SettingsManager settings(tempDir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    ChannelListModel model(&settings);
+    QList<Channel> channels;
+    for (int id = 1; id <= 3; ++id) {
+        Channel channel;
+        channel.id = id;
+        channel.name = QString::number(id);
+        channel.sortOrder = id;
+        channels.append(channel);
+    }
+    model.setChannels(channels, {});
+    model.setWatchSeconds({ { 1, 30000 }, { 2, 25000 } });
+    model.setSelectedCategoryId(QStringLiteral("__favourites__"));
+    QVERIFY(model.selectById(2));
+    QPersistentModelIndex selectedIndex(model.index(1, 0));
+    QSignalSpy resets(&model, &QAbstractItemModel::modelReset);
+    QSignalSpy moves(&model, &QAbstractItemModel::rowsMoved);
+    QSignalSpy inserted(&model, &QAbstractItemModel::rowsInserted);
+    QSignalSpy removed(&model, &QAbstractItemModel::rowsRemoved);
+    QSignalSpy selection(&model, &ChannelListModel::selectedChannelIdChanged);
+
+    model.setWatchSeconds({ { 1, 30001 }, { 2, 25000 } });
+    QCOMPARE(resets.count(), 0);
+    QCOMPARE(moves.count(), 0);
+    QCOMPARE(selectedIndex.row(), 1);
+
+    model.setWatchSeconds({ { 1, 30001 }, { 2, 31000 }, { 3, 22000 } });
+    QCOMPARE(resets.count(), 0);
+    QCOMPARE(moves.count(), 1);
+    QCOMPARE(inserted.count(), 1);
+    QCOMPARE(model.filteredCount(), 3);
+    QCOMPARE(selectedIndex.row(), 0);
+    QCOMPARE(selectedIndex.data(ChannelListModel::IdRole).toInt(), 2);
+
+    model.setWatchSeconds({ { 2, 31001 }, { 3, 22000 } });
+    QCOMPARE(resets.count(), 0);
+    QCOMPARE(removed.count(), 1);
+    QCOMPARE(model.filteredCount(), 2);
+    QCOMPARE(model.selectedChannelId(), 2);
+    QCOMPARE(selectedIndex.data(ChannelListModel::IdRole).toInt(), 2);
+    QCOMPARE(selection.count(), 0);
 }
 
 void AppModelTests::channelListModelReplacementIsConsistentDuringNotifications_data()
@@ -10324,24 +10673,78 @@ void AppModelTests::guideGridFilteringStaysIndependentFromLiveSearch()
     harness.channelListModel->refreshFilter();
     QCOMPARE(harness.channelListModel->filteredCount(), 2);
 
-    harness.guideStateModel->setSelectedGroupId(QStringLiteral("Sports"));
+    harness.channelListModel->setSelectedCategoryId(QStringLiteral("Sports"));
+    QCOMPARE(harness.guideStateModel->selectedGroupId(), QStringLiteral("Sports"));
+    QVERIFY(harness.epgGridModel->rebuildPending());
+    QTRY_VERIFY_WITH_TIMEOUT(!harness.epgGridModel->rebuildPending(), 2000);
     QTRY_COMPARE_WITH_TIMEOUT(harness.epgGridModel->rowCount(), 1, 2000);
     QCOMPARE(harness.epgGridModel->channelIdAt(0), sportsChannel->id);
 
-    harness.guideStateModel->setSelectedGroupId(QStringLiteral("News"));
+    harness.channelListModel->setSelectedCategoryId(QStringLiteral("News"));
     QTRY_COMPARE_WITH_TIMEOUT(harness.epgGridModel->rowCount(), 1, 2000);
     QTRY_COMPARE_WITH_TIMEOUT(harness.epgGridModel->channelIdAt(0), newsChannel->id, 2000);
 
     harness.channelListModel->setSearchText(QStringLiteral("Channel Two"));
-    QCOMPARE(harness.channelListModel->filteredCount(), 1);
+    QCOMPARE(harness.channelListModel->filteredCount(), 0);
     QCOMPARE(harness.epgGridModel->rowCount(), 1);
     QTRY_COMPARE_WITH_TIMEOUT(harness.epgGridModel->channelIdAt(0), newsChannel->id, 2000);
 
     harness.channelListModel->setWatchSeconds({
         { sportsChannel->id, 6 * 60 * 60 }
     });
-    harness.guideStateModel->setSelectedGroupId(QStringLiteral("__favourites__"));
+    harness.channelListModel->setSelectedCategoryId(QStringLiteral("__favourites__"));
     QTRY_COMPARE_WITH_TIMEOUT(harness.epgGridModel->channelIdAt(0), sportsChannel->id, 2000);
+
+    harness.channelListModel->setSelectedCategoryId(QString {});
+    QTRY_COMPARE_WITH_TIMEOUT(harness.epgGridModel->rowCount(), 2, 2000);
+    QVERIFY(harness.epgGridModel->rowIndexForChannelId(newsChannel->id) >= 0);
+    QVERIFY(harness.epgGridModel->rowIndexForChannelId(sportsChannel->id) >= 0);
+    QCOMPARE(harness.channelListModel->filteredCount(), 1);
+
+    QVERIFY(harness.channelListModel->setCategoryHidden(QStringLiteral("News"), true));
+    QTRY_COMPARE_WITH_TIMEOUT(harness.epgGridModel->rowCount(), 1, 2000);
+    QCOMPARE(harness.epgGridModel->channelIdAt(0), sportsChannel->id);
+
+    harness.channelListModel->setSelectedCategoryId(QStringLiteral("Missing"));
+    QTRY_COMPARE_WITH_TIMEOUT(harness.epgGridModel->rowCount(), 0, 2000);
+    QVERIFY(!harness.epgGridModel->rebuildPending());
+
+    harness.channelListModel->setSelectedCategoryId(QStringLiteral("Sports"));
+    harness.channelListModel->setSelectedCategoryId(QStringLiteral("News"));
+    harness.channelListModel->setSelectedCategoryId(QStringLiteral("Sports"));
+    QTRY_VERIFY_WITH_TIMEOUT(!harness.epgGridModel->rebuildPending(), 2000);
+    QCOMPARE(harness.epgGridModel->rowCount(), 1);
+    QCOMPARE(harness.epgGridModel->channelIdAt(0), sportsChannel->id);
+    QVERIFY(harness.playerController->currentChannel().isEmpty());
+}
+
+void AppModelTests::guideGridInvalidatesQueuedResultsBeforeReplacement()
+{
+    EpgService epg;
+    EpgGridModel model(&epg);
+    Channel first;
+    first.id = 1;
+    first.tvgId = QStringLiteral("first");
+    Channel second;
+    second.id = 2;
+    second.tvgId = QStringLiteral("second");
+    const auto now = QDateTime::currentDateTimeUtc();
+    epg.loadFromEntries({
+        EpgEntry { first.tvgId, QStringLiteral("First"), {}, {}, now.addSecs(-60), now.addSecs(3600) },
+        EpgEntry { second.tvgId, QStringLiteral("Second"), {}, {}, now.addSecs(-60), now.addSecs(3600) }
+    });
+    model.rebuild({ first }, 6, 24);
+    model.rebuildAsync({ second }, 6, 24);
+    model.invalidateRebuild();
+    // Let the old worker finish before submitting its replacement: its queued
+    // result must not become visible during the controller's coalescing delay.
+    QVERIFY(QThreadPool::globalInstance()->waitForDone(2000));
+    QCoreApplication::processEvents();
+    QVERIFY(model.rebuildPending());
+    QCOMPARE(model.channelIdAt(0), first.id);
+    model.rebuildAsync({}, 6, 24);
+    QTRY_VERIFY_WITH_TIMEOUT(!model.rebuildPending(), 2000);
+    QCOMPARE(model.rowCount(), 0);
 }
 
 void AppModelTests::startupResumeLastWatchedChannel()

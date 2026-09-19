@@ -6,6 +6,10 @@ import "../theme/Theme.js" as Theme
 Control {
     id: control
 
+    // qmllint disable unqualified
+    property int uiTransparency: (typeof settingsController !== "undefined") ? settingsController.uiTransparency : 100
+    // qmllint enable unqualified
+
     property int from: 0
     property int to: 99
     property int value: 0
@@ -81,12 +85,12 @@ Control {
         radius: Theme.radiusM
         color: {
             if (!control.enabled)
-                return "#53232c34"
+                return Theme.uiBackground("#53232c34", control.uiTransparency)
             if (editor.activeFocus || control.visualFocus)
-                return "#8a2b343d"
+                return Theme.uiBackground("#8a2b343d", control.uiTransparency)
             if (control.hovered)
-                return "#7d273039"
-            return "#71242d35"
+                return Theme.uiBackground("#7d273039", control.uiTransparency)
+            return Theme.uiBackground("#71242d35", control.uiTransparency)
         }
         border.width: editor.activeFocus || control.visualFocus ? 1 : 0
         border.color: editor.activeFocus || control.visualFocus ? "#96acbc" : "transparent"
@@ -118,7 +122,7 @@ Control {
 
                 background: Rectangle {
                     radius: Theme.radiusS
-                    color: decrementButton.down ? "#7c2f3943" : (decrementButton.hovered ? "#632c3640" : "#4d28323b")
+                    color: decrementButton.down ? Theme.uiBackground("#7c2f3943", control.uiTransparency) : (decrementButton.hovered ? Theme.uiBackground("#632c3640", control.uiTransparency) : Theme.uiBackground("#4d28323b", control.uiTransparency))
                     border.width: 0
                 }
             }
@@ -188,7 +192,7 @@ Control {
 
                 background: Rectangle {
                     radius: Theme.radiusS
-                    color: incrementButton.down ? "#7c2f3943" : (incrementButton.hovered ? "#632c3640" : "#4d28323b")
+                    color: incrementButton.down ? Theme.uiBackground("#7c2f3943", control.uiTransparency) : (incrementButton.hovered ? Theme.uiBackground("#632c3640", control.uiTransparency) : Theme.uiBackground("#4d28323b", control.uiTransparency))
                     border.width: 0
                 }
             }

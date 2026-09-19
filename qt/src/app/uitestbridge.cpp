@@ -1049,17 +1049,23 @@ QJsonArray UiTestBridge::buildVisibleTextInventory() const
         return inventory;
     }
 
-    QSet<QString> seen;
+    QSet<QObject *> visited;
     QList<QObject *> queue { m_rootObject.data() };
     while (!queue.isEmpty()) {
         QObject *object = queue.takeFirst();
-        if (object == nullptr) {
+        if (object == nullptr || visited.contains(object)) {
             continue;
         }
+        visited.insert(object);
         queue.append(object->children());
 
         auto visible = true;
         if (auto *item = qobject_cast<QQuickItem *>(object)) {
+            // ListView delegates belong to the visual tree but need not be
+            // QObject children of the view. Visit both trees exactly once.
+            for (auto *child : item->childItems()) {
+                queue.append(child);
+            }
             visible = item->isVisible() && item->width() > 0.0 && item->height() > 0.0;
         } else if (object->metaObject()->indexOfProperty("visible") >= 0) {
             visible = object->property("visible").toBool();
@@ -1075,6 +1081,9 @@ QJsonArray UiTestBridge::buildVisibleTextInventory() const
             QStringLiteral("caption")
         };
 
+        // Equal text in different regions is significant (e.g. playback and
+        // browse EPG). Deduplicate properties only within the same object.
+        QSet<QString> seen;
         for (const auto &propertyName : propertyNames) {
             if (object->metaObject()->indexOfProperty(propertyName.toUtf8().constData()) < 0) {
                 continue;
