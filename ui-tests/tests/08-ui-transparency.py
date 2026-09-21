@@ -45,7 +45,7 @@ def main():
 
     def text_item(state, text):
         return next(i for i in state["inventory"] if i["text"] == text and "bounds" in i
-                    and (text != "Settings" or i["property"] == "caption"))
+                    and (text != "Settings" or i["objectName"] == "ui.live.settingsButton"))
 
     def preview(state):
         return next((i["text"] for i in state["inventory"]
@@ -71,11 +71,22 @@ def main():
                  for r in s["regions"]))
         move(700, 450)
         key("Right")  # Reveal/focus the rail after the previous overlay unmounts.
-        wait("live chrome visible", lambda s: any(
-            i["text"] == "Settings" and i["property"] == "caption" and i.get("bounds", {}).get("x", s["window"]["width"]) < s["window"]["width"] - 48
+        # Chrome is visible before its slide/opacity animations finish. The
+        # ancestor disables the button throughout that interval; wait for the
+        # effective enabled state rather than elapsed time or text geometry.
+        state = wait("Settings button accepts input", lambda s: any(
+            i["objectName"] == "ui.live.settingsButton" and i.get("enabled", False)
+            and 0 <= i["bounds"]["x"] <= s["window"]["width"] - i["bounds"]["width"]
             for i in s["inventory"]))
-        time.sleep(.3)  # Wait for the sliding rail to settle before pointer input.
-        click_text("Settings")
+        bounds = text_item(state, "Settings")["bounds"]
+        move(bounds["x"] + bounds["width"] / 2, bounds["y"] + bounds["height"] / 2)
+        wait("pointer reaches Settings button", lambda s: any(
+            i["objectName"] == "ui.live.settingsButton"
+            and i.get("enabled", False) and i.get("hovered", False)
+            for i in s["inventory"]))
+        runner.save_state_snapshot("before-settings-click", runner.read_state())
+        runner.xdotool("click", "1")
+        wait("Settings overlay opens", lambda s: s["window"]["visibleOverlay"] == "settings")
         wait("settings value " + expected, lambda s: preview(s) == expected)
 
     def slider_point(fraction):

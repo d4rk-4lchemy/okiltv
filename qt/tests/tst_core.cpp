@@ -26,12 +26,10 @@
 
 #include <cmath>
 #include <stdexcept>
-#if __has_include(<zlib.h>)
-#include <zlib.h>
-#elif __has_include(<QtZlib/zlib.h>)
+#if defined(OKILTV_USE_QT_ZLIB)
 #include <QtZlib/zlib.h>
 #else
-#error "zlib headers are required for XMLTV gzip/zlib tests."
+#include <zlib.h>
 #endif
 
 using namespace OKILTV::Core;

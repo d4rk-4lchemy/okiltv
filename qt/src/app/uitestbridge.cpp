@@ -1101,6 +1101,10 @@ QJsonArray UiTestBridge::buildVisibleTextInventory() const
                 { QStringLiteral("objectName"), object->objectName() }
             };
             if (auto *item = qobject_cast<QQuickItem *>(object)) {
+                record.insert(QStringLiteral("enabled"), item->isEnabled());
+                if (object->metaObject()->indexOfProperty("hovered") >= 0) {
+                    record.insert(QStringLiteral("hovered"), object->property("hovered").toBool());
+                }
                 const auto scenePosition = item->mapToScene(QPointF(0.0, 0.0));
                 record.insert(
                     QStringLiteral("bounds"),

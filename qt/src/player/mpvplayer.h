@@ -144,6 +144,7 @@ signals:
 private:
     void beginTrackLoad(const QString &url);
     QString trackLoadOptions(const QString &options) const;
+    int loadFileLocked(const QString &url, const QString &options);
     void acceptTrackSnapshot(quint64 generation, const QString &path, const QVariantList &tracks);
     bool prepareRememberedTrack(const QString &type, int id);
     void updateTrackPreference(const QString &type, const QJsonObject &preference);

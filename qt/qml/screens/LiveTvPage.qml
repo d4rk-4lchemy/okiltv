@@ -5608,6 +5608,7 @@ Item {
 
                     IconActionButton {
                         id: settingsButton
+                        objectName: "ui.live.settingsButton"
                         anchors.fill: parent
                         compact: true
                         borderless: true

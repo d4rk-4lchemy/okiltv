@@ -53,6 +53,7 @@
 #include <QThreadPool>
 #include <QDataStream>
 #include <QDir>
+#include <QImage>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QHash>
@@ -401,6 +402,7 @@ private slots:
     void appControllerRestoresVolumeAfterExit();
     void multiviewVolumeChangesPreserveSelectedAudioTrack();
     void mpvPlayerEmitsObservedPauseChanges();
+    void mpvPlayerLoadsPerFileOptions();
     void mpvPlayerReopensAudioOutputOnStreamReplacement_data();
     void mpvPlayerReopensAudioOutputOnStreamReplacement();
     void playerControllerPlaysAudioOnly_data();
@@ -963,6 +965,37 @@ void AppModelTests::mpvPlayerEmitsObservedPauseChanges()
         QCOMPARE(pauseSpy.last().first().toBool(), paused);
         QCOMPARE(player.pauseState(), std::optional<bool>(paused));
     }
+}
+
+void AppModelTests::mpvPlayerLoadsPerFileOptions()
+{
+    const auto previousHeadless = qgetenv("OKILTV_HEADLESS_TEST");
+    const auto restore = qScopeGuard([&]() {
+        if (previousHeadless.isNull()) { qunsetenv("OKILTV_HEADLESS_TEST"); }
+        else { qputenv("OKILTV_HEADLESS_TEST", previousHeadless); }
+    });
+    qputenv("OKILTV_HEADLESS_TEST", "0");
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const auto path = directory.filePath(QStringLiteral("frame with spaces,comma.png"));
+    QImage frame(16, 16, QImage::Format_RGB32);
+    frame.fill(Qt::red);
+    QVERIFY(frame.save(path));
+
+    OKILTV::Player::MpvPlayer player;
+    player.configureOptions({ {QStringLiteral("vo"), QStringLiteral("null")},
+                              {QStringLiteral("ao"), QStringLiteral("null")} });
+    QSignalSpy loaded(&player, &OKILTV::Player::MpvPlayer::fileLoaded);
+    QSignalSpy errors(&player, &OKILTV::Player::MpvPlayer::errorOccurred);
+    // mpv 0.37 rejects the positional '-1' introduced in 0.38 as an options
+    // string. Verify actual loading and per-file options on either version.
+    player.play(path, QStringLiteral("pause=yes,image-display-duration=30"));
+    QVERIFY2(errors.isEmpty(), qPrintable(player.diagnostics()));
+    QTRY_VERIFY_WITH_TIMEOUT(!loaded.isEmpty() || !errors.isEmpty(), 5000);
+    QVERIFY2(errors.isEmpty(), qPrintable(player.diagnostics()));
+    QVERIFY(!loaded.isEmpty());
+    QCOMPARE(player.pauseState(), std::optional<bool>(true));
+    QCOMPARE(player.propertyDouble("image-display-duration"), std::optional<double>(30.0));
 }
 
 void AppModelTests::mpvPlayerReopensAudioOutputOnStreamReplacement_data()

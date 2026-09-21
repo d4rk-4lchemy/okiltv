@@ -14,7 +14,8 @@ same PR; a failed group does not cancel other groups.
 | `ui` | Five local-media scenarios on Xvfb/Openbox |
 | `windows` | Native Windows process ownership, cleanup and DVR reconciliation |
 
-Linux jobs use CTest labels and build only their required targets. The UI job
+Linux jobs use CTest labels and build only their required targets. CTest verbose
+output shows individual Qt Test results while the group is running. The UI job
 uses FFmpeg-generated media and a separate unlocked disposable Secret Service
 keyring for each scenario. No IPTV account or private recording is needed.
 Windows runs process ownership tests and the two Windows-only DVR controller

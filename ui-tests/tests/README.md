@@ -36,6 +36,8 @@ CTest writes scenario logs, snapshots and screenshots under
 `qt/out/build/qt-linux-debug/ui-artifacts/`. CI retains reports and selected
 UI diagnostics for seven days, excluding generated media and application data.
 
-Wait for overlay visibility/geometry before pointer input. The application
+Wait for overlay visibility/geometry and the effective `enabled` state before
+pointer input; the Settings test also waits for `hovered` to confirm pointer
+delivery to `ui.live.settingsButton`. The application
 intentionally ignores input during slide animations; fixed sleeps alone do not
 establish that a control is ready.

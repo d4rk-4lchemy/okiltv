@@ -49,7 +49,7 @@ Endpoints:
 - `regions`: named regions with absolute + normalized geometry
 - `elements`: semantic UI elements/state
 - `playback`: current channel/playback/timeshift/debug overlay snapshot
-- `inventory`: visible text-bearing controls/labels
+- `inventory`: visible text-bearing controls/labels; visual items include effective `enabled`, and controls with a `hovered` property include that state. Wait for enabled/hovered before clicking an animated control.
 - `networkMap`: layered network observations
 
 Core region names:

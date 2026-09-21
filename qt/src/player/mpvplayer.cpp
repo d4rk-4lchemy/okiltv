@@ -282,6 +282,7 @@ struct MpvPlayer::Api
     using TerminateDestroyFn = void (*)(mpv_handle *);
     using SetOptionStringFn = int (*)(mpv_handle *, const char *, const char *);
     using CommandFn = int (*)(mpv_handle *, const char *const[]);
+    using CommandNodeFn = int (*)(mpv_handle *, mpv_node *, mpv_node *);
     using CommandAsyncFn = int (*)(mpv_handle *, quint64, const char *const[]);
     using WaitAsyncRequestsFn = void (*)(mpv_handle *);
     using CommandStringFn = int (*)(mpv_handle *, const char *);
@@ -308,6 +309,7 @@ struct MpvPlayer::Api
     TerminateDestroyFn terminateDestroy = nullptr;
     SetOptionStringFn setOptionString = nullptr;
     CommandFn command = nullptr;
+    CommandNodeFn commandNode = nullptr;
     CommandAsyncFn commandAsync = nullptr;
     WaitAsyncRequestsFn waitAsyncRequests = nullptr;
     CommandStringFn commandString = nullptr;
@@ -942,6 +944,26 @@ bool MpvPlayer::registerCatchupStreamProtocol()
     return true;
 }
 
+int MpvPlayer::loadFileLocked(const QString &url, const QString &options)
+{
+    // Named arguments work before and after mpv 0.38 added a positional index
+    // before options. Keep the option string intact (including escaped commas).
+    QByteArray keys[] = { "name", "url", "flags", "options" };
+    QByteArray strings[] = { "loadfile", url.toUtf8(), "replace", options.toUtf8() };
+    mpv_node values[4] {};
+    char *keyPointers[4] {};
+    for (int i = 0; i < 4; ++i) {
+        keyPointers[i] = keys[i].data();
+        values[i].format = kMpvFormatString;
+        values[i].u.string = strings[i].data();
+    }
+    mpv_node_list list { options.isEmpty() ? 3 : 4, values, keyPointers };
+    mpv_node command {};
+    command.format = kMpvFormatNodeMap;
+    command.u.list = &list;
+    return m_api->commandNode(m_state->handle, &command, nullptr);
+}
+
 void MpvPlayer::play(const QString &url, const QString &loadfileOptions)
 {
     beginTrackLoad({});
@@ -1028,31 +1050,7 @@ void MpvPlayer::play(const QString &url, const QString &loadfileOptions)
 
     m_trackExpectedPath = transportUrl;
     const auto effectiveLoadfileOptions = trackLoadOptions(loadfileOptions);
-    int commandCode = 0;
-    if (m_api->command != nullptr) {
-        const auto urlUtf8 = transportUrl.toUtf8();
-        const auto optionsUtf8 = effectiveLoadfileOptions.toUtf8();
-        if (optionsUtf8.isEmpty()) {
-            const char *arguments[] = { "loadfile", urlUtf8.constData(), "replace", nullptr };
-            commandCode = m_api->command(m_state->handle, arguments);
-        } else {
-            const char *arguments[] = {
-                "loadfile",
-                urlUtf8.constData(),
-                "replace",
-                "-1",
-                optionsUtf8.constData(),
-                nullptr
-            };
-            commandCode = m_api->command(m_state->handle, arguments);
-        }
-    } else {
-        const auto command = effectiveLoadfileOptions.trimmed().isEmpty()
-            ? QStringLiteral("loadfile %1 replace").arg(escapeArg(transportUrl))
-            : QStringLiteral("loadfile %1 replace -1 %2")
-                  .arg(escapeArg(transportUrl), escapeArg(effectiveLoadfileOptions));
-        commandCode = m_api->commandString(m_state->handle, command.toUtf8().constData());
-    }
+    const auto commandCode = loadFileLocked(transportUrl, effectiveLoadfileOptions);
 
     if (commandCode < 0) {
         closeLiveStream(QStringLiteral("loadfile-failed"));
@@ -1086,10 +1084,7 @@ bool MpvPlayer::advanceLiveMediaPeriod()
             .arg(m_liveStream->readGeneration()));
     beginTrackLoad(m_liveStream->virtualUrl());
     const auto options = trackLoadOptions({});
-    const auto command = options.isEmpty()
-        ? QStringLiteral("loadfile %1 replace").arg(escapeArg(m_liveStream->virtualUrl()))
-        : QStringLiteral("loadfile %1 replace -1 %2").arg(escapeArg(m_liveStream->virtualUrl()), escapeArg(options));
-    const auto result = m_api->commandString(m_state->handle, command.toUtf8().constData());
+    const auto result = loadFileLocked(m_liveStream->virtualUrl(), options);
     if (result < 0) {
         closeLiveStream(QStringLiteral("period-load-failed"));
         emit errorOccurred(QStringLiteral("Live configuration cutover failed: %1")
@@ -2022,6 +2017,7 @@ bool MpvPlayer::loadApi()
         && resolve(m_api->initialize, "mpv_initialize")
         && resolve(m_api->terminateDestroy, "mpv_terminate_destroy")
         && resolve(m_api->setOptionString, "mpv_set_option_string")
+        && resolve(m_api->commandNode, "mpv_command_node")
         && resolve(m_api->commandAsync, "mpv_command_async")
         && resolve(m_api->waitAsyncRequests, "mpv_wait_async_requests")
         && resolve(m_api->setProperty, "mpv_set_property")

@@ -37,9 +37,10 @@ find_package(ZLIB QUIET)
 if (ZLIB_FOUND)
     set(OKILTV_ZLIB_LINK_LIB ZLIB::ZLIB)
 elseif (MINGW OR (WIN32 AND CMAKE_CROSSCOMPILING))
-    # Qt MinGW SDK exposes bundled zlib headers (QtZlib/) but may not provide FindZLIB metadata.
-    # In that setup QtCore already resolves zlib internally, so do not hard-fail configure.
-    message(STATUS "ZLIB package not found; using Qt bundled zlib path for MinGW cross-build.")
+    # QtCore exports its bundled zlib with z_ prefixed symbols. Select its
+    # matching headers explicitly, even if MinGW exposes an unrelated zlib.h.
+    add_compile_definitions(OKILTV_USE_QT_ZLIB)
+    message(STATUS "ZLIB package not found; using Qt bundled zlib headers and symbols.")
 else ()
     message(FATAL_ERROR "ZLIB is required to build EPG gzip/zlib decompression support.")
 endif ()

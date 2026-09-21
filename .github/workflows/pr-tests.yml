@@ -78,7 +78,7 @@ jobs:
         run: |
           mkdir -p reports
           ctest --preset qt-linux-debug -L "^$TEST_GROUP$" --no-tests=error \
-            --output-on-failure --output-junit "$PWD/reports/$TEST_GROUP.xml"
+            --verbose --output-on-failure --output-junit "$PWD/reports/$TEST_GROUP.xml"
       - name: Save test reports and UI diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -92,6 +92,7 @@ jobs:
             qt/out/build/qt-linux-debug/ui-artifacts/**/*.log
             qt/out/build/qt-linux-debug/ui-artifacts/**/*-result.json
             qt/out/build/qt-linux-debug/ui-artifacts/**/failure.json
+            qt/out/build/qt-linux-debug/ui-artifacts/**/before-settings-click.json
             qt/out/build/qt-linux-debug/ui-artifacts/**/*.png
 
   windows-tests:
@@ -128,7 +129,7 @@ jobs:
       - name: Run native Windows tests
         run: |
           New-Item -ItemType Directory -Force reports | Out-Null
-          ctest --test-dir qt/out/build/windows-tests -L '^windows$' --no-tests=error --output-on-failure --output-junit "$env:GITHUB_WORKSPACE/reports/windows.xml"
+          ctest --test-dir qt/out/build/windows-tests -L '^windows$' --no-tests=error --verbose --output-on-failure --output-junit "$env:GITHUB_WORKSPACE/reports/windows.xml"
       - name: Save Windows reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
