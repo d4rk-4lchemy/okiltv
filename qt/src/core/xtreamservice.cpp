@@ -48,7 +48,10 @@ QJsonDocument parseJson(const QByteArray &payload, const QString &context)
 
 QString boundedJsonSample(const QJsonDocument &document)
 {
-    auto sample = QString::fromUtf8(document.toJson(QJsonDocument::Compact));
+    const auto safeDocument = document.isObject()
+        ? QJsonDocument(redactSensitiveJson(document.object()).toObject())
+        : QJsonDocument(redactSensitiveJson(document.array()).toArray());
+    auto sample = QString::fromUtf8(safeDocument.toJson(QJsonDocument::Compact));
     sample = redactSensitiveText(sample);
     constexpr int kMaxSampleChars = 220;
     if (sample.size() > kMaxSampleChars) {
@@ -57,7 +60,7 @@ QString boundedJsonSample(const QJsonDocument &document)
     return sample;
 }
 
-QString normalizedStreamExtension(const QString &candidate, const QString &fallback = QStringLiteral("ts"))
+QString normalizedStreamExtension(const QString &candidate)
 {
     auto normalized = candidate.trimmed().toLower();
     if (normalized.startsWith(u'.')) {
@@ -69,7 +72,7 @@ QString normalizedStreamExtension(const QString &candidate, const QString &fallb
         normalized.clear();
     }
 
-    return normalized.isEmpty() ? fallback : normalized;
+    return normalized.isEmpty() ? QStringLiteral("ts") : normalized;
 }
 
 QString normalizedTimezone(const QString &candidate)

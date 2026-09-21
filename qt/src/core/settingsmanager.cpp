@@ -1,6 +1,9 @@
 #include "settingsmanager.h"
 
 #include "appdatapaths.h"
+#include "secretprotection.h"
+#include "database_service.h"
+#include <stdexcept>
 
 #include <QDateTime>
 #include <QDir>
@@ -22,41 +25,68 @@ constexpr auto kProfilesMigratedKey = "profilesMigratedToSourceStore";
 
 SettingsManager::SettingsManager(QString settingsFilePath)
     : m_settingsFilePath(settingsFilePath.isEmpty() ? AppDataPaths::settingsFile() : std::move(settingsFilePath))
-    , m_sourceStore(AppDataPaths::sourceSummariesFile(), AppDataPaths::sourcesDirectory())
+    , m_sourceStore(QFileInfo(m_settingsFilePath).dir().filePath(QStringLiteral("source-summaries.json")),
+                    QFileInfo(m_settingsFilePath).dir().filePath(QStringLiteral("sources")))
 {
 }
 
 void SettingsManager::load()
 {
     m_lastLoadError.clear();
+    m_unavailableProtectedSettings = {};
+    m_profileDetailCache.clear();
 
     AppSettings parsedSettings;
     QFile file(m_settingsFilePath);
     if (!file.exists()) {
         parsedSettings = {};
     } else if (!file.open(QIODevice::ReadOnly)) {
-        resetToDefaultsWithError(
-            QStringLiteral("Failed to open settings file for read: %1")
-                .arg(file.errorString()));
-        return;
+        throw std::runtime_error("Cannot read saved settings; original data was preserved.");
     } else {
         const auto bytes = file.readAll();
+        // Migration below replaces this file with QSaveFile. An open reader
+        // prevents that atomic replacement on Windows.
+        file.close();
         QJsonParseError parseError;
         const auto document = QJsonDocument::fromJson(bytes, &parseError);
-        if (parseError.error != QJsonParseError::NoError) {
+        if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
             backupInvalidSettingsFile();
-            resetToDefaultsWithError(
-                QStringLiteral("Failed to parse settings JSON: %1")
-                    .arg(parseError.errorString()));
-            return;
+            m_lastLoadError = QStringLiteral("Invalid settings JSON was preserved in an encrypted backup; restored readable source files and default settings.");
+        } else {
+            auto root = document.object();
+            m_unavailableProtectedSettings = root.value(QStringLiteral("unavailableProtectedSettings")).toArray();
+            // A temporarily locked keyring must recover automatically after unlock.
+            // Never replace new settings created on another account with old ones.
+            if (!root.contains(QStringLiteral("protectedSettings"))) {
+                for (qsizetype index = m_unavailableProtectedSettings.size(); index > 0; --index) {
+                    const auto stored = m_unavailableProtectedSettings.at(index - 1).toString();
+                    if (!isProtectedSecret(stored)) continue;
+                    try {
+                        if (!QJsonDocument::fromJson(unprotectSecret(stored).toUtf8()).isObject()) continue;
+                        root.insert(QStringLiteral("protectedSettings"), stored);
+                        m_unavailableProtectedSettings.removeAt(index - 1);
+                        break;
+                    } catch (const std::exception &) {
+                        // Keep the opaque recovery copy untouched; try an older copy.
+                        continue;
+                    }
+                }
+            }
+            if (root.contains(QStringLiteral("protectedSettings"))) {
+                const auto stored = root.value(QStringLiteral("protectedSettings")).toString();
+                if (!isProtectedSecret(stored)) throw std::runtime_error("Invalid protected settings.");
+                try {
+                    const auto secrets = QJsonDocument::fromJson(unprotectSecret(stored).toUtf8());
+                    if (!secrets.isObject()) throw std::runtime_error("Invalid protected settings data.");
+                    const auto object = secrets.object();
+                    for (auto it = object.begin(); it != object.end(); ++it) root.insert(it.key(), it.value());
+                } catch (const std::exception &) {
+                    if (!m_unavailableProtectedSettings.contains(stored)) m_unavailableProtectedSettings.append(stored);
+                    m_lastLoadError = QStringLiteral("Protected DVR and player settings cannot be unlocked on this account. Original data has been preserved.");
+                }
+            }
+            parsedSettings = appSettingsFromJson(root);
         }
-        if (!document.isObject()) {
-            backupInvalidSettingsFile();
-            resetToDefaultsWithError(QStringLiteral("Settings JSON root is not an object."));
-            return;
-        }
-
-        parsedSettings = appSettingsFromJson(document.object());
     }
 
     m_current = parsedSettings;
@@ -83,6 +113,14 @@ void SettingsManager::load()
         m_sourceSummaries = m_sourceStore.loadSummaries();
     }
 
+    // Protect orphan files too, but never overwrite already protected sources
+    // when their original account/keyring is unavailable.
+    m_sourceStore.migrateLegacyDetails();
+    for (const auto &summary : m_sourceSummaries) {
+        if (!m_sourceStore.detailIsProtected(summary.id)) {
+            throw std::runtime_error("A saved source is missing; migration stopped without removing legacy settings.");
+        }
+    }
     m_current.profiles.clear();
     rebuildSummaryMirrorFromSourceSummaries();
     syncProfileActivityFlagsAndMirror();
@@ -100,6 +138,27 @@ void SettingsManager::load()
             save();
         }
     }
+    const auto backups = QFileInfo(m_settingsFilePath).dir().entryInfoList(
+        { QFileInfo(m_settingsFilePath).fileName() + QStringLiteral(".invalid-*.bak") }, QDir::Files);
+    for (const auto &backupInfo : backups) {
+        QFile backup(backupInfo.filePath());
+        if (!backup.open(QIODevice::ReadOnly)) throw std::runtime_error("Cannot read legacy settings backup.");
+        const auto bytes = backup.readAll();
+        backup.close();
+        if (QJsonDocument::fromJson(bytes).object().contains(QStringLiteral("protectedBackup"))) continue;
+        const auto encoded = QString::fromLatin1(bytes.toBase64());
+        const auto encrypted = protectSecret(encoded);
+        if (unprotectSecret(encrypted) != encoded) throw std::runtime_error("Backup protection verification failed.");
+        QSaveFile output(backupInfo.filePath());
+        const auto payload = QJsonDocument(QJsonObject { { QStringLiteral("protectedBackup"), encrypted } }).toJson();
+        if (!output.open(QIODevice::WriteOnly)
+            || !output.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner)
+            || output.write(payload) != payload.size() || !output.commit()) {
+            throw std::runtime_error("Cannot protect legacy settings backup.");
+        }
+    }
+    save(); // Complete legacy migration only after all source details are durable.
+    if (!m_lastSaveError.isEmpty()) throw std::runtime_error(m_lastSaveError.toStdString());
 }
 
 QJsonObject SettingsManager::channelTrackPreferences(const QString &profileId, const QString &channelKey) const
@@ -160,6 +219,32 @@ void SettingsManager::save() const
     auto root = toJson(settingsToPersist);
     root.insert(QLatin1String(kProfilesMigratedKey), true);
 
+    try {
+        if (!m_unavailableProtectedSettings.isEmpty()) {
+            root.insert(QStringLiteral("unavailableProtectedSettings"), m_unavailableProtectedSettings);
+        }
+        const bool needsProtection = !m_current.dvrSchedules.isEmpty() || !m_current.mpvOptions.isEmpty()
+            || m_current.playerUserAgent != defaultPlayerUserAgent();
+        if (needsProtection) {
+            QJsonObject secrets;
+            for (const auto &key : { QStringLiteral("dvrSchedules"), QStringLiteral("mpvOptions"), QStringLiteral("playerUserAgent") }) {
+                secrets.insert(key, root.take(key));
+            }
+            const auto plain = QString::fromUtf8(QJsonDocument(secrets).toJson(QJsonDocument::Compact));
+            const auto encrypted = protectSecret(plain);
+            if (unprotectSecret(encrypted) != plain) throw std::runtime_error("Settings protection verification failed.");
+            root.insert(QStringLiteral("protectedSettings"), encrypted);
+        }
+    } catch (const std::exception &error) {
+        m_lastSaveError = QString::fromUtf8(error.what());
+        file.cancelWriting();
+        return;
+    }
+    if (!file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
+        m_lastSaveError = QStringLiteral("Cannot restrict settings file permissions.");
+        file.cancelWriting();
+        return;
+    }
     const QJsonDocument document(root);
     const auto payload = document.toJson(QJsonDocument::Indented);
     if (file.write(payload) != payload.size()) {
@@ -225,13 +310,15 @@ std::optional<ServerProfile> SettingsManager::profileDetailById(const QUuid &id)
         return m_profileDetailCache.value(id);
     }
 
-    const auto detail = m_sourceStore.loadDetail(id);
-    if (!detail.has_value()) {
+    try {
+        auto detail = m_sourceStore.loadDetail(id);
+        if (!detail.has_value()) return std::nullopt;
+        m_profileDetailCache.insert(id, detail.value());
+        return detail;
+    } catch (const std::exception &) {
+        m_lastLoadError = QStringLiteral("Source credentials cannot be unlocked. Unlock the original system account's secret store or re-enter the source connection details in Settings > Sources.");
         return std::nullopt;
     }
-
-    m_profileDetailCache.insert(id, detail.value());
-    return detail;
 }
 
 void SettingsManager::setActiveProfileId(const std::optional<QUuid> &profileId)
@@ -328,7 +415,15 @@ bool SettingsManager::removeProfile(const QUuid &id)
         return false;
     }
 
+    const auto databasePath = QFileInfo(m_settingsFilePath).dir().filePath(QStringLiteral("iptv.db"));
+    try {
+        if (QFileInfo::exists(databasePath)) DatabaseService(databasePath).removeProfileData(id);
+    } catch (const std::exception &error) {
+        m_lastSaveError = QString::fromUtf8(error.what());
+        return false;
+    }
     m_sourceSummaries.removeAt(index);
+    m_current.dvrSchedules.removeIf([&id](const DvrScheduleEntry &entry) { return entry.profileId == guidToString(id); });
     m_current.channelTrackPreferences.remove(guidToString(id));
     clearProfileDetailCache(id);
     if (!m_sourceStore.removeDetail(id, &m_lastSaveError)) {
@@ -421,8 +516,19 @@ void SettingsManager::backupInvalidSettingsFile() const
     const auto backupPath = QStringLiteral("%1.invalid-%2.bak")
         .arg(
             m_settingsFilePath,
-            QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd-hhmmss")));
-    source.copy(backupPath);
+            QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd-hhmmss-zzz"))
+                + u'-' + QUuid::createUuid().toString(QUuid::WithoutBraces));
+    if (!source.open(QIODevice::ReadOnly)) throw std::runtime_error("Cannot preserve damaged settings.");
+    const auto encoded = QString::fromLatin1(source.readAll().toBase64());
+    const auto protectedValue = protectSecret(encoded);
+    if (unprotectSecret(protectedValue) != encoded) throw std::runtime_error("Cannot verify settings backup protection.");
+    QSaveFile backup(backupPath);
+    const auto bytes = QJsonDocument(QJsonObject { { QStringLiteral("protectedBackup"), protectedValue } }).toJson();
+    if (!backup.open(QIODevice::WriteOnly)
+        || !backup.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner)
+        || backup.write(bytes) != bytes.size() || !backup.commit()) {
+        throw std::runtime_error("Cannot preserve damaged settings securely.");
+    }
 }
 
 void SettingsManager::syncProfileActivityFlagsAndMirror()
@@ -465,37 +571,17 @@ void SettingsManager::clearProfileDetailCache(const QUuid &id)
     m_profileDetailCache.remove(id);
 }
 
-void SettingsManager::clearMissingProfileArtifacts(const QSet<QUuid> &knownIds)
-{
-    const auto files = QDir(AppDataPaths::sourcesDirectory()).entryInfoList(
-        QStringList() << QStringLiteral("*.json"),
-        QDir::Files,
-        QDir::Name);
-    for (const auto &file : files) {
-        const auto baseName = file.baseName();
-        const auto id = parseGuid(baseName);
-        if (id.isNull() || knownIds.contains(id)) {
-            continue;
-        }
-
-        QFile::remove(file.filePath());
-    }
-}
-
 void SettingsManager::migrateLegacyProfilesIfNeeded(const AppSettings &legacySettings)
 {
     auto summaries = buildSummariesFromProfiles(legacySettings.profiles);
     QString errorText;
-    QSet<QUuid> knownIds;
     for (const auto &profile : legacySettings.profiles) {
         if (!m_sourceStore.saveDetail(profile, &errorText)) {
-            continue;
+            throw std::runtime_error(errorText.toStdString());
         }
-        knownIds.insert(profile.id);
     }
 
-    m_sourceStore.saveSummaries(summaries, &errorText);
-    clearMissingProfileArtifacts(knownIds);
+    if (!m_sourceStore.saveSummaries(summaries, &errorText)) throw std::runtime_error(errorText.toStdString());
 }
 
 QList<SourceSummary> SettingsManager::buildSummariesFromProfiles(const QList<ServerProfile> &profiles) const

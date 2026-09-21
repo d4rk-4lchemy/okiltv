@@ -1,3 +1,4 @@
+#include "../src/core/secretprotection.h"
 #include "../src/core/appdatapaths.h"
 #include "../src/core/catchupurlresolver.h"
 #include "../src/core/database_service.h"
@@ -18,17 +19,17 @@
 #include <QMutex>
 #include <QTemporaryDir>
 #include <QScopeGuard>
+#include <QSqlDatabase>
+#include <QSqlQuery>
 #include <ctime>
 #include <QtTest>
 
 #include <cmath>
 #include <stdexcept>
-#if __has_include(<zlib.h>)
-#include <zlib.h>
-#elif __has_include(<QtZlib/zlib.h>)
+#if defined(OKILTV_USE_QT_ZLIB)
 #include <QtZlib/zlib.h>
 #else
-#error "zlib headers are required for XMLTV gzip/zlib tests."
+#include <zlib.h>
 #endif
 
 using namespace OKILTV::Core;
@@ -133,6 +134,7 @@ class CoreTests final : public QObject
     Q_OBJECT
 
 private slots:
+    void initTestCase() { OKILTV::Core::useIsolatedSecretKeyForTests(); }
     void channelTrackPreferencesRoundTrip();
     void trackPreferencesMatchIdentity();
     void uiTransparencySettingsCompatibility();
@@ -150,6 +152,15 @@ private slots:
     void appDataPathsMigratesLegacyRootIntoOKILTVDirectory();
     void debugLoggerOnlyWritesFilesForExplicitDump();
     void debugLoggerCursorAndSubscribersStayOrdered();
+    void protectedStorageRoundTripAndTampering();
+    void credentialMigrationPreservesSettingsAndSources();
+    void credentialMigrationFailurePreservesLegacyFile();
+    void credentialMigrationProtectsDatabase();
+    void lockedSettingsPreserveRecoveryData();
+    void lockedSourceRequiresExplicitReplacement();
+    void sourceRemovalCleansProtectedCopies();
+    void databaseCredentialMigrationRollsBackOnFailure();
+    void redactionMasksStructuredSecrets();
     void redactionMasksXtreamSecrets();
     void redactionMasksAuthorizationAndTokenSecrets();
     void m3uParserKeepsFieldParity();
@@ -181,6 +192,8 @@ private slots:
     void catchupUrlResolverRejectsUnavailableTargets();
     void settingsLoadInvalidJsonCreatesBackupAndReportsError();
     void settingsSaveReportsErrorAndCreatesParentDirectory();
+    void settingsReloadCommitsExistingFile();
+    void channelGroupIdsDoNotDecryptChannels();
 };
 
 void CoreTests::dateTimeFormatDetection_data()
@@ -518,7 +531,13 @@ void CoreTests::settingsCompatibilityRoundTrips()
 
     QFile roundTrip(settingsPath);
     QVERIFY(roundTrip.open(QIODevice::ReadOnly));
-    const auto document = QJsonDocument::fromJson(roundTrip.readAll());
+    const auto storedDocument = QJsonDocument::fromJson(roundTrip.readAll());
+    QVERIFY(storedDocument.isObject());
+    QVERIFY(storedDocument.object().contains(QStringLiteral("protectedSettings")));
+    auto combined = storedDocument.object();
+    const auto secretSettings = QJsonDocument::fromJson(unprotectSecret(combined.value(QStringLiteral("protectedSettings")).toString()).toUtf8()).object();
+    for (auto it = secretSettings.begin(); it != secretSettings.end(); ++it) combined.insert(it.key(), it.value());
+    const QJsonDocument document(combined);
     QVERIFY(document.isObject());
     QVERIFY(document.object().contains(QStringLiteral("mpvDllPath")));
     QVERIFY(document.object().contains(QStringLiteral("lastSection")));
@@ -770,6 +789,328 @@ void CoreTests::debugLoggerCursorAndSubscribersStayOrdered()
     QCOMPARE(observedEntries.at(observedEntries.size() - 1).message, QStringLiteral("second-entry"));
 
     logger.unsubscribe(subscriptionId);
+}
+
+
+void CoreTests::protectedStorageRoundTripAndTampering()
+{
+    const auto secret = QStringLiteral("żółć-audit-secret-123");
+    const auto first = protectSecret(secret);
+    const auto second = protectSecret(secret);
+    QVERIFY(isProtectedSecret(first));
+    QVERIFY(!first.contains(QStringLiteral("audit-secret")));
+    QVERIFY(first != second);
+    QCOMPARE(unprotectSecret(first), secret);
+    QCOMPARE(unprotectSecret(QStringLiteral("legacy")), QStringLiteral("legacy"));
+    const auto separator = first.lastIndexOf(u':');
+    auto bytes = QByteArray::fromBase64(first.mid(separator + 1).toLatin1());
+    bytes[bytes.size() - 1] = static_cast<char>(bytes.back() ^ 1);
+    const auto damaged = first.left(separator + 1) + QString::fromLatin1(bytes.toBase64());
+    QVERIFY_EXCEPTION_THROWN(unprotectSecret(damaged), std::runtime_error);
+    QVERIFY_EXCEPTION_THROWN(unprotectSecret(QStringLiteral("okiltv-secret:v99:unknown")), std::runtime_error);
+}
+
+void CoreTests::credentialMigrationPreservesSettingsAndSources()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ServerProfile profile;
+    profile.id = QUuid::createUuid();
+    profile.name = QStringLiteral("Migrated source");
+    profile.xtreamBaseUrl = QStringLiteral("https://provider.invalid");
+    profile.xtreamUsername = QStringLiteral("audit-login");
+    profile.xtreamPassword = QStringLiteral("audit-password");
+    AppSettings legacy;
+    legacy.profiles = { profile };
+    legacy.activeProfileId = profile.id;
+    legacy.playerVolume = 43;
+    legacy.mpvOptions.insert(QStringLiteral("http-header-fields"), QStringLiteral("Authorization: Bearer audit-token"));
+    DvrScheduleEntry recording;
+    recording.id = QStringLiteral("recording");
+    recording.profileId = guidToString(profile.id);
+    recording.channelId = 5;
+    recording.streamUrl = QStringLiteral("https://provider.invalid/live/audit-login/audit-password/5.ts");
+    recording.start = QDateTime::currentDateTimeUtc().addSecs(3600);
+    recording.stop = recording.start.addSecs(3600);
+    legacy.dvrSchedules = { recording };
+    const auto path = dir.filePath(QStringLiteral("settings.json"));
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    const auto original = QJsonDocument(toJson(legacy)).toJson();
+    QCOMPARE(file.write(original), original.size());
+    file.close();
+    QFile backup(dir.filePath(QStringLiteral("settings.json.invalid-old.bak")));
+    QVERIFY(backup.open(QIODevice::WriteOnly));
+    backup.write(original);
+    backup.close();
+    SettingsManager manager(path);
+    manager.load();
+    QVERIFY(manager.activeProfile().has_value());
+    QCOMPARE(manager.activeProfile()->xtreamPassword, profile.xtreamPassword);
+    QCOMPARE(manager.current().dvrSchedules.first().streamUrl, recording.streamUrl);
+    QCOMPARE(manager.current().playerVolume, 43.0);
+    const auto sourcePath = dir.filePath(QStringLiteral("sources/%1.json").arg(guidToString(profile.id)));
+    for (const auto &artifact : { path, sourcePath, backup.fileName() }) {
+        QFile persisted(artifact);
+        QVERIFY2(persisted.open(QIODevice::ReadOnly), qPrintable(artifact));
+        const auto bytes = persisted.readAll();
+        QVERIFY(!bytes.contains("audit-password"));
+        QVERIFY(!bytes.contains("audit-login"));
+        QVERIFY(!bytes.contains("audit-token"));
+    }
+    SettingsManager restart(path);
+    restart.load();
+    QCOMPARE(restart.activeProfile()->xtreamPassword, profile.xtreamPassword);
+    QCOMPARE(restart.current().dvrSchedules.first().streamUrl, recording.streamUrl);
+    QCOMPARE(restart.current().mpvOptions, legacy.mpvOptions);
+    // A standalone legacy source file (already split from settings) is migrated too.
+    QFile source(sourcePath);
+    QVERIFY(source.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    source.write(QJsonDocument(toJson(profile)).toJson());
+    source.close();
+    SettingsManager splitLegacy(path);
+    splitLegacy.load();
+    QVERIFY(source.open(QIODevice::ReadOnly));
+    QVERIFY(!source.readAll().contains("audit-password"));
+}
+
+void CoreTests::credentialMigrationFailurePreservesLegacyFile()
+{
+    QTemporaryDir dir;
+    ServerProfile profile;
+    profile.id = QUuid::createUuid();
+    profile.xtreamPassword = QStringLiteral("audit-password");
+    AppSettings legacy;
+    legacy.profiles = { profile };
+    const auto bytes = QJsonDocument(toJson(legacy)).toJson();
+    const auto path = dir.filePath(QStringLiteral("settings.json"));
+    QFile settingsFile(path);
+    QVERIFY(settingsFile.open(QIODevice::WriteOnly));
+    settingsFile.write(bytes);
+    settingsFile.close();
+    QFile obstruction(dir.filePath(QStringLiteral("sources")));
+    QVERIFY(obstruction.open(QIODevice::WriteOnly));
+    obstruction.write("not-a-directory");
+    obstruction.close();
+    SettingsManager manager(path);
+    QVERIFY_EXCEPTION_THROWN(manager.load(), std::runtime_error);
+    QVERIFY(settingsFile.open(QIODevice::ReadOnly));
+    QCOMPARE(settingsFile.readAll(), bytes);
+    settingsFile.close();
+    QVERIFY(obstruction.remove());
+    manager.load();
+    QCOMPARE(manager.profileById(profile.id)->xtreamPassword, profile.xtreamPassword);
+}
+
+void CoreTests::credentialMigrationProtectsDatabase()
+{
+    QTemporaryDir dir;
+    const auto path = dir.filePath(QStringLiteral("iptv.db"));
+    const auto id = QUuid::createUuid();
+    int rebuilds = 0;
+    const auto rebuildStarted = [&]() { ++rebuilds; };
+    DatabaseService initial(path, rebuildStarted);
+    QCOMPARE(rebuilds, 0);
+    Channel channel;
+    channel.id = 7;
+    channel.profileId = id;
+    channel.name = QStringLiteral("Fixture");
+    channel.streamUrl = QStringLiteral("https://provider.invalid/live/user/audit-db-secret/7.ts");
+    initial.upsertChannels({channel});
+    QCOMPARE(initial.loadChannels(id).first().streamUrl, channel.streamUrl);
+    const auto connectionName = QStringLiteral("credential-migration-fixture");
+    {
+        auto database = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        database.setDatabaseName(path);
+        QVERIFY(database.open());
+        QSqlQuery query(database);
+        query.prepare(QStringLiteral("UPDATE channels SET stream_url=?, icon_url=?, catchup_source_template=?"));
+        query.addBindValue(channel.streamUrl);
+        query.addBindValue(QStringLiteral("https://provider.invalid/audit-icon-secret"));
+        query.addBindValue(QStringLiteral("https://provider.invalid/audit-catchup-secret/{utc}"));
+        QVERIFY(query.exec());
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+    DatabaseService migrated(path, rebuildStarted);
+    QCOMPARE(rebuilds, 1);
+    QCOMPARE(migrated.loadChannels(id).first().streamUrl, channel.streamUrl);
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto bytes = file.readAll();
+    QVERIFY(!bytes.contains("audit-db-secret"));
+    QVERIFY(!bytes.contains("audit-icon-secret"));
+    QVERIFY(!bytes.contains("audit-catchup-secret"));
+    DatabaseService again(path, rebuildStarted);
+    QCOMPARE(rebuilds, 1);
+    QCOMPARE(again.loadChannels(id).first().streamUrl, channel.streamUrl);
+    file.close();
+    {
+        auto raw = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        raw.setDatabaseName(path);
+        QVERIFY(raw.open());
+        QSqlQuery query(raw);
+        QVERIFY(query.exec(QStringLiteral("INSERT INTO security_migrations VALUES ('channel-cleanup-v1')")));
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+    DatabaseService resumed(path, rebuildStarted);
+    QCOMPARE(rebuilds, 2);
+    QCOMPARE(resumed.loadChannels(id).first().streamUrl, channel.streamUrl);
+}
+
+
+void CoreTests::sourceRemovalCleansProtectedCopies()
+{
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    ServerProfile profile;
+    profile.id = QUuid::createUuid();
+    profile.xtreamPassword = QStringLiteral("remove-secret");
+    QVERIFY(settings.addProfile(profile));
+    DatabaseService database(dir.filePath(QStringLiteral("iptv.db")));
+    Channel channel;
+    channel.id = 1;
+    channel.profileId = profile.id;
+    channel.name = QStringLiteral("Fixture");
+    channel.streamUrl = QStringLiteral("https://provider.invalid/remove-secret");
+    database.upsertChannels({channel});
+    DvrScheduleEntry entry;
+    entry.profileId = guidToString(profile.id);
+    entry.streamUrl = channel.streamUrl;
+    settings.current().dvrSchedules.append(entry);
+    settings.save();
+    QVERIFY(settings.removeProfile(profile.id));
+    QVERIFY(database.loadChannels(profile.id).isEmpty());
+    QVERIFY(settings.current().dvrSchedules.isEmpty());
+    QVERIFY(!QFileInfo::exists(dir.filePath(QStringLiteral("sources/%1.json").arg(guidToString(profile.id)))));
+    SettingsManager restart(settings.settingsFilePath());
+    restart.load();
+    QVERIFY(restart.sourceSummaries().isEmpty());
+    QVERIFY(restart.current().dvrSchedules.isEmpty());
+}
+
+void CoreTests::databaseCredentialMigrationRollsBackOnFailure()
+{
+    QTemporaryDir dir;
+    const auto path = dir.filePath(QStringLiteral("iptv.db"));
+    const auto profileId = QUuid::createUuid();
+    DatabaseService database(path);
+    Channel channel;
+    channel.id = 1;
+    channel.profileId = profileId;
+    channel.name = QStringLiteral("Fixture");
+    channel.streamUrl = QStringLiteral("https://provider.invalid/rollback-secret");
+    database.upsertChannels({channel});
+    const auto connectionName = QStringLiteral("migration-failure-fixture");
+    {
+        auto raw = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        raw.setDatabaseName(path);
+        QVERIFY(raw.open());
+        QSqlQuery query(raw);
+        query.prepare(QStringLiteral("UPDATE channels SET stream_url=?"));
+        query.addBindValue(channel.streamUrl);
+        QVERIFY(query.exec());
+        QVERIFY(query.exec(QStringLiteral("CREATE TRIGGER refuse_migration BEFORE UPDATE ON channels BEGIN SELECT RAISE(ABORT, 'fixture failure'); END")));
+        QVERIFY_EXCEPTION_THROWN(database.ensureSchema(), std::runtime_error);
+        QVERIFY(query.exec(QStringLiteral("SELECT stream_url FROM channels")));
+        QVERIFY(query.next());
+        QCOMPARE(query.value(0).toString(), channel.streamUrl);
+        query.finish();
+        QVERIFY(query.exec(QStringLiteral("DROP TRIGGER refuse_migration")));
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+    database.ensureSchema();
+    QCOMPARE(database.loadChannels(profileId).first().streamUrl, channel.streamUrl);
+}
+
+
+void CoreTests::lockedSourceRequiresExplicitReplacement()
+{
+    QTemporaryDir dir;
+    SettingsManager original(dir.filePath(QStringLiteral("settings.json")));
+    ServerProfile profile;
+    profile.id = QUuid::createUuid();
+    profile.xtreamPassword = QStringLiteral("original-secret");
+    QVERIFY(original.addProfile(profile));
+    original.setActiveProfileId(profile.id);
+    QFile source(dir.filePath(QStringLiteral("sources/%1.json").arg(guidToString(profile.id))));
+    const auto locked = QJsonDocument(QJsonObject {
+        { QStringLiteral("protectedProfile"), QStringLiteral("okiltv-secret:v1:other-account:abc") }
+    }).toJson();
+    QVERIFY(source.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    source.write(locked);
+    source.close();
+    SettingsManager moved(original.settingsFilePath());
+    moved.load();
+    QVERIFY(!moved.activeProfile().has_value());
+    QVERIFY(!moved.lastLoadError().isEmpty());
+    QVERIFY(source.open(QIODevice::ReadOnly));
+    QCOMPARE(source.readAll(), locked);
+    source.close();
+    profile.xtreamPassword = QStringLiteral("reentered-secret");
+    QVERIFY(moved.replaceProfile(profile.id, profile));
+    QCOMPARE(moved.activeProfile()->xtreamPassword, profile.xtreamPassword);
+    SettingsManager restart(original.settingsFilePath());
+    restart.load();
+    QCOMPARE(restart.activeProfile()->xtreamPassword, profile.xtreamPassword);
+}
+
+void CoreTests::lockedSettingsPreserveRecoveryData()
+{
+    QTemporaryDir dir;
+    const auto path = dir.filePath(QStringLiteral("settings.json"));
+    const auto unavailable = QStringLiteral("okiltv-secret:v1:another-account:abc");
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write(QJsonDocument(QJsonObject {{QStringLiteral("protectedSettings"), unavailable}}).toJson());
+    file.close();
+    SettingsManager manager(path);
+    manager.load();
+    QVERIFY(!manager.lastLoadError().isEmpty());
+    manager.current().mpvOptions.insert(QStringLiteral("http-header-fields"), QStringLiteral("Authorization: Bearer new-secret"));
+    manager.save();
+    QVERIFY(manager.lastSaveError().isEmpty());
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto object = QJsonDocument::fromJson(file.readAll()).object();
+    QVERIFY(object.value(QStringLiteral("unavailableProtectedSettings")).toArray().contains(unavailable));
+    SettingsManager restart(path);
+    restart.load();
+    QCOMPARE(restart.current().mpvOptions, manager.current().mpvOptions);
+    file.close();
+    QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    const auto recoverable = protectSecret(QString::fromUtf8(QJsonDocument(QJsonObject {
+        { QStringLiteral("playerUserAgent"), QStringLiteral("Recovered-Agent") }
+    }).toJson()));
+    file.write(QJsonDocument(QJsonObject {
+        { QStringLiteral("unavailableProtectedSettings"), QJsonArray { recoverable } }
+    }).toJson());
+    file.close();
+    SettingsManager unlocked(path);
+    unlocked.load();
+    QCOMPARE(unlocked.current().playerUserAgent, QStringLiteral("Recovered-Agent"));
+
+}
+
+void CoreTests::redactionMasksStructuredSecrets()
+{
+    const auto url = QStringLiteral("https://audit-user:audit-secret@example.invalid/video.ts");
+    QVERIFY(!redactSensitiveUrl(url).contains(QStringLiteral("audit-secret")));
+    QVERIFY(!redactSensitiveText(url).contains(QStringLiteral("audit-user")));
+    const auto raw = QStringLiteral(R"({"username":"audit-user","password":"audit-secret","nested":{"xtreamPassword":"escaped\"secret"}})");
+    const auto text = redactSensitiveText(QStringLiteral("API sample=") + raw);
+    QVERIFY(!text.contains(QStringLiteral("audit-user")));
+    QVERIFY(!text.contains(QStringLiteral("audit-secret")));
+    QVERIFY(!text.contains(QStringLiteral("escaped")));
+    const QJsonObject object {
+        { QStringLiteral("password"), QStringLiteral("plain-secret") },
+        { QStringLiteral("nested"), QJsonArray { QJsonObject {
+            { QStringLiteral("xtreamPassword"), QStringLiteral("nested-secret") },
+            { QStringLiteral("title"), QStringLiteral("Programme") } } } }
+    };
+    const auto sanitized = redactSensitiveJson(object).toObject();
+    QCOMPARE(sanitized.value(QStringLiteral("password")).toString(), QStringLiteral("***"));
+    const auto nested = sanitized.value(QStringLiteral("nested")).toArray().first().toObject();
+    QCOMPARE(nested.value(QStringLiteral("xtreamPassword")).toString(), QStringLiteral("***"));
+    QCOMPARE(nested.value(QStringLiteral("title")).toString(), QStringLiteral("Programme"));
 }
 
 void CoreTests::redactionMasksXtreamSecrets()
@@ -1488,6 +1829,76 @@ void CoreTests::settingsLoadInvalidJsonCreatesBackupAndReportsError()
         { QStringLiteral("settings.json.invalid-*.bak") },
         QDir::Files | QDir::NoDotAndDotDot);
     QVERIFY(!backups.isEmpty());
+    QFile backup(dir.filePath(backups.first()));
+    QVERIFY(backup.open(QIODevice::ReadOnly));
+    const auto envelope = QJsonDocument::fromJson(backup.readAll()).object();
+    const auto recovered = QByteArray::fromBase64(unprotectSecret(envelope.value(QStringLiteral("protectedBackup")).toString()).toLatin1());
+    QCOMPARE(recovered, QByteArrayLiteral("{invalid-json"));
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    QVERIFY(QJsonDocument::fromJson(file.readAll()).isObject());
+}
+
+void CoreTests::channelGroupIdsDoNotDecryptChannels()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const auto path = dir.filePath(QStringLiteral("iptv.db"));
+    DatabaseService database(path);
+    const auto profile = QUuid::createUuid();
+    const auto otherProfile = QUuid::createUuid();
+    QList<Channel> channels;
+    const QStringList categories { QStringLiteral("Sports"), QString(), QStringLiteral("News"), QStringLiteral("Sports") };
+    for (int i = 0; i < categories.size(); ++i) {
+        Channel channel;
+        channel.id = i;
+        channel.profileId = profile;
+        channel.name = QStringLiteral("Fixture");
+        channel.categoryId = categories[i];
+        channel.sortOrder = i;
+        channel.streamUrl = QStringLiteral("https://fixture.invalid/secret");
+        channels.push_back(channel);
+    }
+    auto other = channels.first();
+    other.profileId = otherProfile;
+    other.categoryId = QStringLiteral("Other source");
+    channels.push_back(other);
+    database.upsertChannels(channels);
+    const auto connectionName = QStringLiteral("group-metadata-fixture");
+    {
+        auto raw = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        raw.setDatabaseName(path);
+        QVERIFY(raw.open());
+        QSqlQuery query(raw);
+        QVERIFY(query.exec(QStringLiteral("UPDATE channels SET stream_url='okiltv-secret:v99:unavailable'")));
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+    QVERIFY(database.loadChannels(profile).isEmpty());
+    QCOMPARE(database.loadChannelGroupIds(profile),
+        (QStringList { QStringLiteral("Sports"), ungroupedCategoryId(), QStringLiteral("News") }));
+    QCOMPARE(database.loadChannelGroupIds(otherProfile), QStringList { QStringLiteral("Other source") });
+    QVERIFY(database.loadChannelGroupIds(QUuid::createUuid()).isEmpty());
+}
+
+void CoreTests::settingsReloadCommitsExistingFile()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const auto path = tempDir.filePath(QStringLiteral("settings.json"));
+    {
+        SettingsManager settings(path);
+        settings.load();
+        settings.current().playerVolume = 37.5;
+        settings.save();
+        QVERIFY2(settings.lastSaveError().isEmpty(), qPrintable(settings.lastSaveError()));
+    }
+    // Every startup commits the migration state, including an already migrated
+    // file. Windows rejects this if load() still owns an open read handle.
+    for (int startup = 0; startup < 2; ++startup) {
+        SettingsManager settings(path);
+        settings.load();
+        QVERIFY2(settings.lastSaveError().isEmpty(), qPrintable(settings.lastSaveError()));
+        QCOMPARE(settings.current().playerVolume, 37.5);
+    }
 }
 
 void CoreTests::settingsSaveReportsErrorAndCreatesParentDirectory()
@@ -1507,7 +1918,7 @@ void CoreTests::settingsSaveReportsErrorAndCreatesParentDirectory()
     const auto badPath = tempDir.filePath(QStringLiteral("as-directory"));
     QVERIFY(QDir().mkpath(badPath));
     SettingsManager failingSettings(badPath);
-    failingSettings.load();
+    QVERIFY_EXCEPTION_THROWN(failingSettings.load(), std::runtime_error);
     failingSettings.save();
     QVERIFY(!failingSettings.lastSaveError().isEmpty());
 }

@@ -116,8 +116,8 @@ QDateTime parseIsoUtc(const QString &value)
 
 QString catchupProgramLabel(const EpgEntry &program, const DateTimeFormatOptions options)
 {
-    const auto title = program.title.trimmed();
-    const auto timeRange = epgEntryTimeRange(program, options);
+    auto title = program.title.trimmed();
+    auto timeRange = epgEntryTimeRange(program, options);
     if (title.isEmpty()) {
         return timeRange;
     }
@@ -671,19 +671,28 @@ void AppController::initialize()
 
     m_playerController->setVolume(m_settings->current().playerVolume);
 
+    QElapsedTimer groupSyncTimer;
+    groupSyncTimer.start();
+    Core::DebugLogger::instance().log(QStringLiteral("app"), QStringLiteral("Synchronizing saved source groups (metadata only)."));
     auto preferencesChanged = false;
     for (const auto &summary : m_settings->sourceSummaries()) {
-        preferencesChanged = syncProfileGroupPreferences(summary.id, m_database->loadChannels(summary.id))
+        if (!m_settings->profileById(summary.id).has_value()) continue;
+        preferencesChanged = syncProfileGroupIds(summary.id, m_database->loadChannelGroupIds(summary.id))
             || preferencesChanged;
     }
     if (preferencesChanged) {
         m_settings->save();
         m_profilesModel->reload();
     }
+    Core::DebugLogger::instance().log(QStringLiteral("app"),
+        QStringLiteral("Saved source groups synchronized in %1 ms.").arg(groupSyncTimer.elapsed()));
 
     const auto profile = m_settings->activeProfile();
     if (profile.has_value()) {
         loadProfile(guidToString(profile->id));
+    } else if (!m_settings->lastLoadError().isEmpty()) {
+        setStatusText(m_settings->lastLoadError());
+        m_shellController->openOverlay(QStringLiteral("settings"), QStringLiteral("sources"));
     }
 }
 
@@ -694,17 +703,19 @@ void AppController::loadProfile(const QString &profileId)
     const auto parsedId = parseGuid(profileId);
     const auto profile = m_settings->profileById(parsedId);
     if (!profile.has_value()) {
-        setStatusText(QStringLiteral("Profile not found."));
+        setStatusText(m_settings->lastLoadError().isEmpty()
+            ? QStringLiteral("Profile not found.") : m_settings->lastLoadError());
         return;
     }
 
     const auto currentChannel = m_playerController->currentChannelValue();
     const auto *pipSession = qobject_cast<PlayerController *>(m_multiViewController->pipControllerObject());
+    const auto activeSourceId = m_settings->current().activeProfileId;
     const auto crossProfileActivationFromCatchup = currentChannel.has_value()
         && currentChannel->profileId != profile->id
         && (m_playerController->inCatchupMode() || (pipSession && pipSession->inCatchupMode()))
-        && m_settings->current().activeProfileId.has_value()
-        && m_settings->current().activeProfileId.value() == profile->id;
+        && activeSourceId.has_value()
+        && activeSourceId.value() == profile->id;
     if (crossProfileActivationFromCatchup) {
         ++m_catchupPlayGeneration;
         Core::DebugLogger::instance().log(
@@ -827,7 +838,7 @@ void AppController::loadProfile(const QString &profileId)
                 const auto activeProfileBeforeSave = activeProfileId();
                 if (result.sourceRefreshSucceeded) {
                     m_settings->setProfileLastRefreshed(result.profile.id, result.profile.lastRefreshed);
-                    m_settings->setProfileGroupCount(result.profile.id, result.categories.size());
+                    m_settings->setProfileGroupCount(result.profile.id, static_cast<int>(result.categories.size()));
                 }
                 if (!result.profile.xtreamServerTimezone.trimmed().isEmpty()) {
                     m_settings->setProfileXtreamServerTimezone(
@@ -1337,14 +1348,9 @@ QList<Channel> AppController::guideChannels() const
 
 bool AppController::syncProfileGroupPreferences(const QUuid &profileId, const QList<Channel> &channels)
 {
-    const auto profileKey = guidToString(profileId);
-    auto &hiddenGroups = m_settings->current().hiddenGroupsByProfile[profileKey];
-    auto &groupOrder = m_settings->current().groupOrderByProfile[profileKey];
-    const auto favouritesGroupId = QString::fromUtf8(kFavouritesCategoryId);
     QStringList discoveredGroups;
     QSet<QString> seenGroups;
     discoveredGroups.reserve(channels.size());
-    auto settingsChanged = false;
 
     for (const auto &channel : channels) {
         const auto groupId = normalizeChannelCategoryId(channel.categoryId);
@@ -1354,12 +1360,21 @@ bool AppController::syncProfileGroupPreferences(const QUuid &profileId, const QL
         }
     }
 
-    if (!channels.isEmpty() && !discoveredGroups.contains(favouritesGroupId)) {
+    return syncProfileGroupIds(profileId, std::move(discoveredGroups));
+}
+
+bool AppController::syncProfileGroupIds(const QUuid &profileId, QStringList discoveredGroups)
+{
+    const auto profileKey = guidToString(profileId);
+    auto &hiddenGroups = m_settings->current().hiddenGroupsByProfile[profileKey];
+    auto &groupOrder = m_settings->current().groupOrderByProfile[profileKey];
+    const auto favouritesGroupId = QString::fromUtf8(kFavouritesCategoryId);
+    if (!discoveredGroups.isEmpty() && !discoveredGroups.contains(favouritesGroupId)) {
         discoveredGroups.prepend(favouritesGroupId);
     }
 
     const auto reconciled = reconcileSourceGroups(discoveredGroups, { hiddenGroups, groupOrder });
-    settingsChanged = hiddenGroups != reconciled.hiddenGroups || groupOrder != reconciled.groupOrder;
+    const auto settingsChanged = hiddenGroups != reconciled.hiddenGroups || groupOrder != reconciled.groupOrder;
     hiddenGroups = reconciled.hiddenGroups;
     groupOrder = reconciled.groupOrder;
     return settingsChanged;
@@ -1759,7 +1774,7 @@ void AppController::playCatchupAtOffsetInternal(
     const auto resolvedCatchupUrl = target->url.trimmed();
     const auto catchupChannel = validation.channel.value();
     const auto catchupProgram = validation.program.value();
-    const auto playbackTarget = target.value();
+    const auto &playbackTarget = target.value();
     const auto catchupGeneration = ++m_catchupPlayGeneration;
     const auto requestedSeekSeconds = std::isfinite(targetSeconds) && targetSeconds >= 0.0 ? targetSeconds : 0.0;
     const auto programmeAvailableSeconds = std::max<qint64>(0,

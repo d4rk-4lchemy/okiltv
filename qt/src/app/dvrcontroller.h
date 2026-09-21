@@ -37,6 +37,8 @@ public:
     int activeRecordingCount() const;
     bool exitConfirmationRequired() const;
 
+    void removeSourceSchedules(const QString &profileId);
+
     Q_INVOKABLE bool toggleProgramSchedule(const QVariantMap &channel, const QVariantMap &program);
     Q_INVOKABLE bool isProgramScheduled(const QVariantMap &channel, const QVariantMap &program) const;
     Q_INVOKABLE bool isProgramScheduledByIdentity(

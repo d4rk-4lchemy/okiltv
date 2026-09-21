@@ -1,3 +1,4 @@
+#include "../src/core/secretprotection.h"
 #include <sstream>
 
 #define private public
@@ -47,9 +48,12 @@
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QCoreApplication>
+#include <QSqlDatabase>
+#include <QSqlQuery>
 #include <QThreadPool>
 #include <QDataStream>
 #include <QDir>
+#include <QImage>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QHash>
@@ -383,6 +387,7 @@ class AppModelTests final : public QObject
     Q_OBJECT
 
 private slots:
+    void initTestCase() { OKILTV::Core::useIsolatedSecretKeyForTests(); }
     void trackPreferencesRejectStaleSnapshots();
     void removingProfileClearsTrackPreferences();
     void playerRemembersTracksAcrossRestartAndFallsBack();
@@ -397,6 +402,7 @@ private slots:
     void appControllerRestoresVolumeAfterExit();
     void multiviewVolumeChangesPreserveSelectedAudioTrack();
     void mpvPlayerEmitsObservedPauseChanges();
+    void mpvPlayerLoadsPerFileOptions();
     void mpvPlayerReopensAudioOutputOnStreamReplacement_data();
     void mpvPlayerReopensAudioOutputOnStreamReplacement();
     void playerControllerPlaysAudioOnly_data();
@@ -495,6 +501,7 @@ private slots:
     void mpvPlayerSteadyStateCacheBandMapping();
     void mpvPlayerRenderCallbackUpdatesHeartbeatTimestamp();
     void mpvPlayerInitializationErrorAllowsStateQueries();
+    void mpvPlayerDefersIdleBackendInitialization();
     void playerControllerStartupBufferFallbackTimeoutMapping();
     void playerControllerAdaptiveSteadyStateMaxBytesMapping();
     void playerControllerCatchupCacheBudgetsAreBounded_data();
@@ -546,6 +553,8 @@ private slots:
     void appControllerCatchupResumePersistsAndHonorsExplicitStart();
     void appControllerCatchupProgressFollowsEndlessProgramme();
     void playerControllerCatchupProgressIgnoresUnconfirmedTransport();
+    void playerControllerQueuedProgrammeStopCannotStopNewTune();
+    void playerControllerRecoveryRespectsPauseAndPendingReload();
     void playerControllerCatchupResumeReportsRealPlayback_data();
     void playerControllerCatchupResumeReportsRealPlayback();
     void appControllerPlayCatchupGuideUtcPayloadResolvesExpectedEpochUrl();
@@ -575,6 +584,7 @@ private slots:
     void multiviewRetainedSelectionClearsOnProfileChange();
     void multiviewExitAfterSwapKeepsPromotedPrimaryWithoutRetune();
     void multiviewExitAfterSwapDefersDetachedPlayerCleanup();
+    void multiviewStartupCleanupPreservesPlaybackAndRunsOnce();
     void multiviewRetiredSecondarySignalsDoNotCorruptReusedSlot();
     void multiviewPrimaryAssignmentRetunesSharedPrimaryInPlaceAfterSwap();
     void dvrControllerToggleScheduleAndExitGuard();
@@ -598,6 +608,7 @@ private slots:
     void channelListModelExposesDvrRecordingRole();
     void sourceGroupsModelAppliesSelectionThresholdAndPersistsReorder();
     void sourceGroupsThreshold_data();
+    void startupGroupSyncDoesNotDecryptChannelUrls();
     void sourceGroupsThreshold();
     void sourceGroupsRefreshPreservesDrafts();
     void sourceGroupImportNotices();
@@ -954,6 +965,37 @@ void AppModelTests::mpvPlayerEmitsObservedPauseChanges()
         QCOMPARE(pauseSpy.last().first().toBool(), paused);
         QCOMPARE(player.pauseState(), std::optional<bool>(paused));
     }
+}
+
+void AppModelTests::mpvPlayerLoadsPerFileOptions()
+{
+    const auto previousHeadless = qgetenv("OKILTV_HEADLESS_TEST");
+    const auto restore = qScopeGuard([&]() {
+        if (previousHeadless.isNull()) { qunsetenv("OKILTV_HEADLESS_TEST"); }
+        else { qputenv("OKILTV_HEADLESS_TEST", previousHeadless); }
+    });
+    qputenv("OKILTV_HEADLESS_TEST", "0");
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const auto path = directory.filePath(QStringLiteral("frame with spaces,comma.png"));
+    QImage frame(16, 16, QImage::Format_RGB32);
+    frame.fill(Qt::red);
+    QVERIFY(frame.save(path));
+
+    OKILTV::Player::MpvPlayer player;
+    player.configureOptions({ {QStringLiteral("vo"), QStringLiteral("null")},
+                              {QStringLiteral("ao"), QStringLiteral("null")} });
+    QSignalSpy loaded(&player, &OKILTV::Player::MpvPlayer::fileLoaded);
+    QSignalSpy errors(&player, &OKILTV::Player::MpvPlayer::errorOccurred);
+    // mpv 0.37 rejects the positional '-1' introduced in 0.38 as an options
+    // string. Verify actual loading and per-file options on either version.
+    player.play(path, QStringLiteral("pause=yes,image-display-duration=30"));
+    QVERIFY2(errors.isEmpty(), qPrintable(player.diagnostics()));
+    QTRY_VERIFY_WITH_TIMEOUT(!loaded.isEmpty() || !errors.isEmpty(), 5000);
+    QVERIFY2(errors.isEmpty(), qPrintable(player.diagnostics()));
+    QVERIFY(!loaded.isEmpty());
+    QCOMPARE(player.pauseState(), std::optional<bool>(true));
+    QCOMPARE(player.propertyDouble("image-display-duration"), std::optional<double>(30.0));
 }
 
 void AppModelTests::mpvPlayerReopensAudioOutputOnStreamReplacement_data()
@@ -1656,20 +1698,18 @@ void AppModelTests::liveReservePreservesManualPauseAndStopsCleanly()
     channel.id = 482;
     channel.streamUrl = QStringLiteral("http://127.0.0.1/live-reserve-test.ts");
     controller.playChannel(channel);
-    controller.m_liveReservePending = true;
-    controller.m_liveReserveTargetSeconds = 8.5;
-    controller.m_liveReserveTimer.start();
+    QVERIFY(controller.beginLiveReserve(0.0, false));
     controller.refreshBufferingState();
     QVERIFY(controller.isBuffering());
     controller.togglePause();
     QVERIFY(controller.m_userPausedManually);
-    QVERIFY(!controller.m_liveReservePending);
+    QVERIFY(!controller.m_buffering.liveReservePending());
     QVERIFY(!controller.evaluateLiveReserve());
     QVERIFY(controller.m_userPausedManually);
     controller.stop();
-    QVERIFY(!controller.m_liveReservePending);
-    QCOMPARE(controller.m_liveReserveTargetSeconds, 0.0);
-    QVERIFY(!controller.m_liveReserveRetryTimer.isValid());
+    QVERIFY(!controller.m_buffering.liveReservePending());
+    QCOMPARE(controller.m_buffering.liveReserveTarget(), 0.0);
+    QVERIFY(!controller.m_buffering.m_liveRetryMs.has_value());
     QCOMPARE(controller.effectiveLiveBufferTargetSeconds(), controller.player()->bufferTargetSeconds());
 }
 
@@ -1681,7 +1721,7 @@ void AppModelTests::liveReservePausesOnlyAtDepletionRegardlessOfAdaptation()
     controller.m_positionTimer.stop();
     // Match the roughly seven-second provider cadence seen in session logs.
     for (int tick = 0; tick <= 84; ++tick) {
-        controller.m_liveBufferTuner.observe(static_cast<double>(tick) / 4.0,
+        controller.m_buffering.observeDelivery(static_cast<double>(tick) / 4.0,
                                              static_cast<double>((tick / 28) * 7), false);
     }
     QCOMPARE(controller.effectiveLiveBufferTargetSeconds(), 8.5);
@@ -1693,14 +1733,14 @@ void AppModelTests::liveReservePausesOnlyAtDepletionRegardlessOfAdaptation()
     QVERIFY(!controller.beginLiveReserve(0.0, true)); // Consumer backpressure.
     QVERIFY(controller.beginLiveReserve(0.1, false));
     QCOMPARE(controller.isPlaying(), wasPlaying); // Only backend signals own this.
-    QCOMPARE(controller.m_liveReserveTargetSeconds, 8.5);
+    QCOMPARE(controller.m_buffering.liveReserveTarget(), 8.5);
     for (const auto cache : { 0.1, 0.25, 3.0, 7.0, 8.49 }) {
         QVERIFY(controller.advanceLiveReserve(cache, State { 28.0, false, false }, 2000));
         QVERIFY(controller.isBuffering());
     }
     QVERIFY(!controller.advanceLiveReserve(8.5, State { 35.0, false, false }, 9000));
     QVERIFY(!controller.isBuffering());
-    QVERIFY(!controller.m_liveReserveRetryTimer.isValid());
+    QVERIFY(!controller.m_buffering.m_liveRetryMs.has_value());
     QVERIFY(controller.beginLiveReserve(0.0, false));
     QVERIFY(controller.advanceLiveReserve(7.0, State { 42.0, false, false }, 2000));
     QVERIFY(!controller.advanceLiveReserve(8.5, State { 49.0, false, false }, 7000));
@@ -1710,7 +1750,7 @@ void AppModelTests::liveReservePausesOnlyAtDepletionRegardlessOfAdaptation()
     QVERIFY(!controller.beginLiveReserve(7.0, false));
     QVERIFY(!controller.beginLiveReserve(1.34, false));
     QVERIFY(controller.beginLiveReserve(0.0, false));
-    QCOMPARE(controller.m_liveReserveTargetSeconds, 30.0);
+    QCOMPARE(controller.m_buffering.liveReserveTarget(), 30.0);
     QVERIFY(controller.advanceLiveReserve(7.0, State { 56.0, false, false }, 2000));
     QVERIFY(controller.advanceLiveReserve(29.9, State { 79.0, false, false }, 11000));
     QVERIFY(!controller.advanceLiveReserve(30.0, State { 79.1, false, false }, 12000));
@@ -1727,7 +1767,7 @@ void AppModelTests::liveReserveHandlesMissingTelemetryEofAndOutage()
     QVERIFY(!controller.beginLiveReserve(std::numeric_limits<double>::quiet_NaN(), false));
     QVERIFY(!controller.beginLiveReserve(-1.0, false));
     QVERIFY(controller.beginLiveReserve(0.05, false)); // Protect even before cadence is learned.
-    QCOMPARE(controller.m_liveReserveTargetSeconds, 3.0);
+    QCOMPARE(controller.m_buffering.liveReserveTarget(), 3.0);
     QVERIFY(controller.advanceLiveReserve(0.0, State { 1.0, false, false }, 9000));
     QVERIFY(!controller.advanceLiveReserve(std::nullopt, std::nullopt, 10000));
     QVERIFY(!controller.beginLiveReserve(0.0, false)); // Allow the reconnect watchdog to work.
@@ -1739,7 +1779,7 @@ void AppModelTests::liveReserveHandlesMissingTelemetryEofAndOutage()
     QVERIFY(controller.beginLiveReserve(0.05, false));
     QVERIFY(!controller.advanceLiveReserve(0.05, State { 2.0, false, true }, 250)); // Release EOF tail.
     controller.stop();
-    QVERIFY(!controller.m_liveReserveRetryTimer.isValid());
+    QVERIFY(!controller.m_buffering.m_liveRetryMs.has_value());
 }
 
 void AppModelTests::liveReservePreservesDeliveryLearning()
@@ -1750,7 +1790,7 @@ void AppModelTests::liveReservePreservesDeliveryLearning()
     controller.m_positionTimer.stop();
     for (int tick = 0; tick <= 84; ++tick) {
         const auto now = static_cast<double>(tick) / 4.0;
-        controller.m_liveBufferTuner.observe(now, static_cast<double>((tick / 28) * 7), false);
+        controller.m_buffering.observeDelivery(now, static_cast<double>((tick / 28) * 7), false);
         if (tick == 24 || tick == 52) {
             QVERIFY(controller.beginLiveReserve(0.05, false));
         }
@@ -1759,7 +1799,7 @@ void AppModelTests::liveReservePreservesDeliveryLearning()
         }
     }
     // Repeated app-owned holds must not reset the three-burst learning window.
-    QCOMPARE(controller.m_liveBufferTuner.detectedIntervalSeconds(), 7.0);
+    QCOMPARE(controller.m_buffering.detectedIntervalSeconds(), 7.0);
     QCOMPARE(controller.effectiveLiveBufferTargetSeconds(), 8.5);
     controller.stop();
 }
@@ -1929,9 +1969,9 @@ void AppModelTests::playerControllerLiveTuneUsesFastStartupPolicy()
 
     playerController.playChannel(channel);
 
-    QVERIFY(!playerController.m_resumePlaybackAfterLoad);
-    QVERIFY(!playerController.m_startupBufferProbeTimer.isActive());
-    QVERIFY(!playerController.m_startupBufferFallbackTimer.isActive());
+    QVERIFY(!playerController.m_buffering.startupPending());
+    QVERIFY(!playerController.m_buffering.startupProbeTimer().isActive());
+    QVERIFY(!playerController.m_buffering.startupFallbackTimer().isActive());
     QVERIFY(!playerController.player()->m_startupBufferingStrictMode);
     QVERIFY(playerLogs.contains(QStringLiteral("Startup policy selected for tune: fast-live.")));
     QVERIFY(playerLogs.contains(
@@ -2009,10 +2049,10 @@ void AppModelTests::playerControllerShowsLoadingIndicatorAfterTuneDelay()
     controller.beginDeferredLoadingIndicator();
     controller.m_loadingIndicatorDelayTimer.stop();
     controller.m_loadingPlaybackFileLoaded = true;
-    controller.m_resumePlaybackAfterLoad = true;
+    controller.m_buffering.setStartupPending(true);
     emit controller.player()->playbackRestarted();
     QVERIFY(controller.isLoading());
-    controller.m_resumePlaybackAfterLoad = false;
+    controller.m_buffering.setStartupPending(false);
     controller.refreshBufferingState();
     QVERIFY(!controller.isLoading());
     QVERIFY(!controller.m_loadingIndicatorPending);
@@ -2080,7 +2120,7 @@ void AppModelTests::playerControllerInitialTuneErrorStartsReconnectWithoutImmedi
     channel.streamUrl = QStringLiteral("http://127.0.0.1/channel-115");
 
     playerController.playChannel(channel);
-    QVERIFY(!playerController.m_resumePlaybackAfterLoad);
+    QVERIFY(!playerController.m_buffering.startupPending());
 
     QVERIFY(QMetaObject::invokeMethod(
         playerController.player(),
@@ -2088,8 +2128,8 @@ void AppModelTests::playerControllerInitialTuneErrorStartsReconnectWithoutImmedi
         Qt::DirectConnection,
         Q_ARG(QString, QStringLiteral("simulated-startup-error"))));
 
-    QVERIFY(playerController.m_reconnectActive);
-    QVERIFY(playerController.m_reconnectAttemptInFlight || playerController.m_reconnectTransportStopIssued);
+    QVERIFY(playerController.m_recovery.active());
+    QVERIFY(playerController.m_recovery.attemptInFlight() || playerController.m_recovery.waitingStop());
     QVERIFY(!playerController.channelLoadFailed());
     QTRY_VERIFY_WITH_TIMEOUT(!reconnectStartLogs.isEmpty(), 1000);
     QVERIFY(reconnectStartLogs.constLast().contains(QStringLiteral("wait-for-data=2.4s")));
@@ -2110,12 +2150,12 @@ void AppModelTests::playerControllerInitialTunePlaybackEndedStartsReconnectWitho
     channel.streamUrl = QStringLiteral("http://127.0.0.1/channel-116");
 
     playerController.playChannel(channel);
-    QVERIFY(!playerController.m_resumePlaybackAfterLoad);
+    QVERIFY(!playerController.m_buffering.startupPending());
 
     QVERIFY(QMetaObject::invokeMethod(playerController.player(), "playbackEnded", Qt::DirectConnection));
 
-    QVERIFY(playerController.m_reconnectActive);
-    QVERIFY(playerController.m_reconnectAttemptInFlight || playerController.m_reconnectTransportStopIssued);
+    QVERIFY(playerController.m_recovery.active());
+    QVERIFY(playerController.m_recovery.attemptInFlight() || playerController.m_recovery.waitingStop());
     QVERIFY(!playerController.channelLoadFailed());
     QCOMPARE(playbackErrorSpy.count(), 0);
 }
@@ -2137,7 +2177,7 @@ void AppModelTests::playerControllerInitialTuneReconnectSuccessClearsFailure()
         "errorOccurred",
         Qt::DirectConnection,
         Q_ARG(QString, QStringLiteral("simulated-startup-error"))));
-    QVERIFY(playerController.m_reconnectActive);
+    QVERIFY(playerController.m_recovery.active());
 
     QVERIFY(QMetaObject::invokeMethod(playerController.player(), "fileLoaded", Qt::DirectConnection));
     QVERIFY(QMetaObject::invokeMethod(
@@ -2176,7 +2216,7 @@ void AppModelTests::playerControllerInitialTuneRetryExhaustionEmitsFinalFailure(
         Qt::DirectConnection,
         Q_ARG(QString, QStringLiteral("simulated-startup-error"))));
 
-    QVERIFY(playerController.m_reconnectActive);
+    QVERIFY(playerController.m_recovery.active());
     QCOMPARE(playbackErrorSpy.count(), 0);
 
     // Reconnect now includes a stop-settle window per attempt; keep timeout lenient for CI jitter.
@@ -2331,6 +2371,7 @@ void AppModelTests::playerControllerCatchupModeRoundTripsToLive()
             playRequestLogs.push_back(entry.message);
         }
     });
+    const auto unsubscribe = qScopeGuard([subscriptionId]() { DebugLogger::instance().unsubscribe(subscriptionId); });
 
     Channel channel;
     channel.id = 70;
@@ -2351,13 +2392,13 @@ void AppModelTests::playerControllerCatchupModeRoundTripsToLive()
     QCOMPARE(playerController.playbackMode(), QStringLiteral("live"));
     QCOMPARE(playerController.catchupProgramLabel(), QStringLiteral(""));
     QCOMPARE(playerController.currentPlaybackUrl(), QStringLiteral("http://127.0.0.1/live"));
-    auto livePlayLog = std::find_if(playRequestLogs.cbegin(), playRequestLogs.cend(), [](const QString &line) {
-        return line.startsWith(QStringLiteral("Play requested: http://127.0.0.1/live"));
+    // The last request is the return-to-live tune; provider paths are masked.
+    auto livePlayLog = std::find_if(playRequestLogs.crbegin(), playRequestLogs.crend(), [](const QString &line) {
+        return line.startsWith(QStringLiteral("Play requested:"));
     });
-    QVERIFY(livePlayLog != playRequestLogs.cend());
+    QVERIFY(livePlayLog != playRequestLogs.crend());
     QVERIFY(!livePlayLog->contains(QStringLiteral("cache-secs=120")));
     QVERIFY(!livePlayLog->contains(QStringLiteral("demuxer-hysteresis-secs=115")));
-    DebugLogger::instance().unsubscribe(subscriptionId);
 }
 
 void AppModelTests::playerControllerPauseDuringCatchupBypassesTimeshiftStartup()
@@ -2405,12 +2446,13 @@ void AppModelTests::playerControllerInitialCatchupTuneRecoveryTargetsCatchupUrl(
             reconnectStartLogs.push_back(entry.message);
         }
     });
+    const auto unsubscribe = qScopeGuard([subscriptionId]() { DebugLogger::instance().unsubscribe(subscriptionId); });
 
     playerController.playCatchupChannel(
         channel,
         QStringLiteral("http://127.0.0.1/catchup119"),
         QStringLiteral("Past Show"));
-    QVERIFY(!playerController.m_resumePlaybackAfterLoad);
+    QVERIFY(!playerController.m_buffering.startupPending());
 
     QVERIFY(QMetaObject::invokeMethod(
         playerController.player(),
@@ -2418,16 +2460,15 @@ void AppModelTests::playerControllerInitialCatchupTuneRecoveryTargetsCatchupUrl(
         Qt::DirectConnection,
         Q_ARG(QString, QStringLiteral("simulated-initial-archive-error"))));
 
-    QVERIFY(playerController.m_reconnectActive);
+    QVERIFY(playerController.m_recovery.active());
     QVERIFY(!playerController.channelLoadFailed());
     QTRY_VERIFY_WITH_TIMEOUT(!reconnectStartLogs.isEmpty(), 1000);
-    QVERIFY(reconnectStartLogs.constLast().contains(QStringLiteral("http://127.0.0.1/catchup119")));
+    QVERIFY(reconnectStartLogs.constLast().contains(QStringLiteral("http://127.0.0.1/***")));
     QVERIFY(reconnectStartLogs.constLast().contains(QStringLiteral("force-seekable=yes")));
     QVERIFY(reconnectStartLogs.constLast().contains(QStringLiteral("cache-secs=90")));
     QCOMPARE(playerController.playbackMode(), QStringLiteral("catchup"));
     QCOMPARE(playerController.currentPlaybackUrl(), QStringLiteral("http://127.0.0.1/catchup119"));
 
-    DebugLogger::instance().unsubscribe(subscriptionId);
 }
 
 void AppModelTests::playerControllerCatchupBypassesLiveStartupBufferGate()
@@ -2460,14 +2501,14 @@ void AppModelTests::playerControllerCatchupBypassesLiveStartupBufferGate()
         QStringLiteral("http://127.0.0.1/catchup120"),
         QStringLiteral("Past Show"));
 
-    QVERIFY(!playerController.m_resumePlaybackAfterLoad);
-    QVERIFY(!playerController.m_startupBufferFallbackTimer.isActive());
-    QVERIFY(!playerController.m_startupBufferProbeTimer.isActive());
+    QVERIFY(!playerController.m_buffering.startupPending());
+    QVERIFY(!playerController.m_buffering.startupFallbackTimer().isActive());
+    QVERIFY(!playerController.m_buffering.startupProbeTimer().isActive());
 
     QVERIFY(QMetaObject::invokeMethod(playerController.player(), "fileLoaded", Qt::DirectConnection));
-    QVERIFY(!playerController.m_resumePlaybackAfterLoad);
-    QVERIFY(!playerController.m_startupBufferFallbackTimer.isActive());
-    QVERIFY(!playerController.m_startupBufferProbeTimer.isActive());
+    QVERIFY(!playerController.m_buffering.startupPending());
+    QVERIFY(!playerController.m_buffering.startupFallbackTimer().isActive());
+    QVERIFY(!playerController.m_buffering.startupProbeTimer().isActive());
     QVERIFY(startupBufferLogs.isEmpty());
 
     DebugLogger::instance().unsubscribe(subscriptionId);
@@ -2522,7 +2563,7 @@ void AppModelTests::playerControllerCatchupReconnectTargetsCatchupUrl()
         Q_ARG(QString, QStringLiteral("simulated-archive-error"))));
 
     QTRY_VERIFY_WITH_TIMEOUT(!reconnectStartLogs.isEmpty(), 1000);
-    QVERIFY(reconnectStartLogs.constLast().contains(QStringLiteral("http://127.0.0.1/catchup72")));
+    QVERIFY(reconnectStartLogs.constLast().contains(QStringLiteral("http://127.0.0.1/***")));
     QVERIFY(reconnectStartLogs.constLast().contains(QStringLiteral("force-seekable=yes")));
     QVERIFY(reconnectStartLogs.constLast().contains(QStringLiteral("hr-seek=no")));
     QVERIFY(reconnectStartLogs.constLast().contains(QStringLiteral("cache=yes")));
@@ -2591,18 +2632,18 @@ void AppModelTests::playerControllerCatchupReconnectRestoresStreamPositionAfterF
         "errorOccurred",
         Qt::DirectConnection,
         Q_ARG(QString, QStringLiteral("simulated-archive-error"))));
-    QVERIFY(playerController.m_reconnectActive);
-    QVERIFY(playerController.m_reconnectAttemptInFlight || playerController.m_reconnectTransportStopIssued);
-    if (!playerController.m_reconnectAttemptInFlight) {
+    QVERIFY(playerController.m_recovery.active());
+    QVERIFY(playerController.m_recovery.attemptInFlight() || playerController.m_recovery.waitingStop());
+    if (!playerController.m_recovery.attemptInFlight()) {
         QTest::qWait(500);
         playerController.handleReconnectAttemptTick();
     }
-    QVERIFY(playerController.m_reconnectAttemptInFlight);
-    QVERIFY(playerController.m_catchupReconnectResumeStreamRelativeSeconds.has_value());
-    QCOMPARE(static_cast<int>(std::lround(playerController.m_catchupReconnectResumeStreamRelativeSeconds.value())), 52);
+    QVERIFY(playerController.m_recovery.attemptInFlight());
+    QVERIFY(playerController.m_catchupSession.m_catchupReconnectResumeStreamRelativeSeconds.has_value());
+    QCOMPARE(static_cast<int>(std::lround(playerController.m_catchupSession.m_catchupReconnectResumeStreamRelativeSeconds.value())), 52);
 
     QVERIFY(QMetaObject::invokeMethod(playerController.player(), "fileLoaded", Qt::DirectConnection));
-    QVERIFY(!playerController.m_catchupReconnectResumeStreamRelativeSeconds.has_value());
+    QVERIFY(!playerController.m_catchupSession.m_catchupReconnectResumeStreamRelativeSeconds.has_value());
     QTRY_VERIFY_WITH_TIMEOUT(!resumeLogs.isEmpty(), 1000);
     QVERIFY(resumeLogs.constLast().contains(QStringLiteral("52.000s")));
 
@@ -2639,13 +2680,13 @@ void AppModelTests::playerControllerCatchupRollbackGuardCorrectsLargeWarmupRegre
     });
 
     // Non-initial URL load context keeps immediate rollback correction behavior.
-    playerController.m_catchupRollbackInitialLoadContext = false;
+    playerController.m_catchupSession.m_catchupRollbackInitialLoadContext = false;
     playerController.m_player.m_cachedTelemetry.positionSeconds = 80.0;
     playerController.updatePosition();
     playerController.m_player.m_cachedTelemetry.positionSeconds = 40.0;
     playerController.updatePosition();
 
-    QVERIFY(playerController.m_catchupRollbackGuardConsumed);
+    QVERIFY(playerController.m_catchupSession.m_catchupRollbackGuardConsumed);
     QTRY_VERIFY_WITH_TIMEOUT(!guardLogs.isEmpty(), 1000);
     QVERIFY(guardLogs.constLast().contains(QStringLiteral("rollback=40.000s")));
 
@@ -2690,14 +2731,14 @@ void AppModelTests::playerControllerCatchupRollbackGuardDefersCorrectionUntilSee
     playerController.updatePosition();
     playerController.m_player.m_cachedTelemetry.positionSeconds = 40.0;
     playerController.updatePosition();
-    QVERIFY(playerController.m_catchupRollbackDeferredPending);
+    QVERIFY(playerController.m_catchupSession.m_catchupRollbackDeferredPending);
     QTRY_VERIFY_WITH_TIMEOUT(!deferredLogs.isEmpty(), 1000);
 
     playerController.m_player.m_cachedTelemetry.demuxerSeekableRangeSeconds = std::pair<double, double> { 0.0, 120.0 };
     playerController.m_player.m_cachedTelemetry.positionSeconds = 41.0;
     playerController.updatePosition();
 
-    QVERIFY(!playerController.m_catchupRollbackDeferredPending);
+    QVERIFY(!playerController.m_catchupSession.m_catchupRollbackDeferredPending);
     QTRY_VERIFY_WITH_TIMEOUT(!appliedLogs.isEmpty(), 1000);
 
     DebugLogger::instance().unsubscribe(subscriptionId);
@@ -2736,13 +2777,13 @@ void AppModelTests::playerControllerCatchupRollbackGuardDeferredCorrectionExpire
     playerController.updatePosition();
     playerController.m_player.m_cachedTelemetry.positionSeconds = 40.0;
     playerController.updatePosition();
-    QVERIFY(playerController.m_catchupRollbackDeferredPending);
+    QVERIFY(playerController.m_catchupSession.m_catchupRollbackDeferredPending);
 
-    playerController.m_catchupRollbackDeferredTimer.invalidate();
+    playerController.m_catchupSession.m_deferredStartedMs.reset();
     playerController.m_player.m_cachedTelemetry.positionSeconds = 41.0;
     playerController.updatePosition();
 
-    QVERIFY(!playerController.m_catchupRollbackDeferredPending);
+    QVERIFY(!playerController.m_catchupSession.m_catchupRollbackDeferredPending);
     QTRY_VERIFY_WITH_TIMEOUT(!expiredLogs.isEmpty(), 1000);
 
     DebugLogger::instance().unsubscribe(subscriptionId);
@@ -2976,32 +3017,32 @@ void AppModelTests::playerControllerCatchupReconnectStabilizationIgnoresCacheDur
         "errorOccurred",
         Qt::DirectConnection,
         Q_ARG(QString, QStringLiteral("simulated-archive-error-stabilization"))));
-    QVERIFY(playerController.m_reconnectActive);
-    QVERIFY(playerController.m_reconnectAttemptInFlight || playerController.m_reconnectTransportStopIssued);
-    if (!playerController.m_reconnectAttemptInFlight) {
+    QVERIFY(playerController.m_recovery.active());
+    QVERIFY(playerController.m_recovery.attemptInFlight() || playerController.m_recovery.waitingStop());
+    if (!playerController.m_recovery.attemptInFlight()) {
         QTest::qWait(500);
         playerController.handleReconnectAttemptTick();
     }
-    QVERIFY(playerController.m_reconnectAttemptInFlight);
+    QVERIFY(playerController.m_recovery.attemptInFlight());
 
     playerController.m_isPlaying = true;
     playerController.m_backendBuffering = false;
-    playerController.m_playbackStalled = false;
-    playerController.m_lastPlaybackPositionSeconds = -1.0;
+    playerController.m_recovery.m_playbackStalled = false;
+    playerController.m_recovery.m_lastPlaybackPositionSeconds = -1.0;
 
     // Exercise real elapsed time: twelve rapid calls hid the ten-second timeout.
     for (int i = 0; i < 12; ++i) {
         QTest::qWait(1000);
-        QVERIFY(playerController.m_reconnectAttemptInFlight);
-        QCOMPARE(playerController.m_reconnectAttemptCount, 1);
+        QVERIFY(playerController.m_recovery.attemptInFlight());
+        QCOMPARE(playerController.m_recovery.attempts(), 1);
         playerController.m_player.m_cachedTelemetry.positionSeconds = static_cast<double>(i + 1);
         playerController.m_player.m_cachedTelemetry.displayedVideoFramePtsSeconds = static_cast<double>(i + 1);
         playerController.m_player.m_cachedTelemetry.demuxerCacheDurationSeconds = 4096.0;
         playerController.updatePosition();
     }
 
-    QVERIFY(!playerController.m_reconnectActive);
-    QVERIFY(!playerController.m_reconnectAttemptInFlight);
+    QVERIFY(!playerController.m_recovery.active());
+    QVERIFY(!playerController.m_recovery.attemptInFlight());
     QVERIFY(strictEnabledLogs.isEmpty());
 
     DebugLogger::instance().unsubscribe(subscriptionId);
@@ -3043,7 +3084,7 @@ void AppModelTests::playerControllerXtreamCatchupSeekRegeneratesUrlTransparently
     QVERIFY(seekLogs.constLast().contains(QStringLiteral("mode=url-regenerate")));
     QVERIFY(seekLogs.constLast().contains(QStringLiteral("streamBase=120.000s")));
     QVERIFY(seekLogs.constLast().contains(QStringLiteral("residual=38.000s")));
-    QVERIFY(playerController.m_catchupTimelineReloadInFlight);
+    QVERIFY(playerController.m_catchupSession.reloadInFlight());
     playerController.runCatchupTimelineReload();
     playerController.finishCatchupTimelineReload(QStringLiteral("test-stop-ack"));
     QCOMPARE(
@@ -3080,7 +3121,7 @@ void AppModelTests::playerControllerXtreamCatchupSeekWaitsForStopAckBeforeReload
 
     playerController.seekTimeshiftToFraction(158.0 / 3600.0);
 
-    QVERIFY(playerController.m_catchupTimelineReloadInFlight);
+    QVERIFY(playerController.m_catchupSession.reloadInFlight());
     QCOMPARE(
         playerController.currentPlaybackUrl(),
         QStringLiteral("http://cdn.example/archive/initial2731.ts"));
@@ -3091,7 +3132,7 @@ void AppModelTests::playerControllerXtreamCatchupSeekWaitsForStopAckBeforeReload
     playerController.runCatchupTimelineReload();
     playerController.finishCatchupTimelineReload(QStringLiteral("test-stop-ack"));
 
-    QTRY_VERIFY_WITH_TIMEOUT(!playerController.m_catchupTimelineReloadInFlight, 1000);
+    QTRY_VERIFY_WITH_TIMEOUT(!playerController.m_catchupSession.reloadInFlight(), 1000);
     QCOMPARE(
         playerController.currentPlaybackUrl(),
         QStringLiteral("http://provider.example/timeshift/user/pass/59/2026-05-18:12-02/2731.ts"));
@@ -3120,9 +3161,9 @@ void AppModelTests::playerControllerXtreamCatchupSeekTimeoutReloadsWithoutStopAc
         canonicalUrl);
 
     playerController.seekTimeshiftToFraction(158.0 / 3600.0);
-    QVERIFY(playerController.m_catchupTimelineReloadInFlight);
+    QVERIFY(playerController.m_catchupSession.reloadInFlight());
 
-    QTRY_VERIFY_WITH_TIMEOUT(!playerController.m_catchupTimelineReloadInFlight, 1000);
+    QTRY_VERIFY_WITH_TIMEOUT(!playerController.m_catchupSession.reloadInFlight(), 1000);
     QCOMPARE(
         playerController.currentPlaybackUrl(),
         QStringLiteral("http://provider.example/timeshift/user/pass/59/2026-05-18:12-02/2732.ts"));
@@ -3151,18 +3192,18 @@ void AppModelTests::playerControllerXtreamCatchupSeekCoalescesRapidClicksLastWin
         canonicalUrl);
 
     playerController.seekTimeshiftToFraction(158.0 / 3600.0);
-    QVERIFY(playerController.m_catchupTimelineReloadInFlight);
+    QVERIFY(playerController.m_catchupSession.reloadInFlight());
     playerController.seekTimeshiftToFraction(301.0 / 3600.0);
-    QVERIFY(playerController.m_pendingCatchupTimelineReloadTargetSeconds.has_value());
+    QVERIFY(playerController.m_catchupSession.m_queuedSeek.has_value());
     QCOMPARE(
-        static_cast<int>(std::lround(playerController.m_pendingCatchupTimelineReloadTargetSeconds.value())),
+        static_cast<int>(std::lround(playerController.m_catchupSession.m_queuedSeek.value())),
         301);
     playerController.runCatchupTimelineReload();
     playerController.finishCatchupTimelineReload(QStringLiteral("test-stop-ack"));
-    QTRY_VERIFY_WITH_TIMEOUT(!playerController.m_catchupTimelineReloadInFlight, 1000);
+    QTRY_VERIFY_WITH_TIMEOUT(!playerController.m_catchupSession.reloadInFlight(), 1000);
     playerController.runCatchupTimelineReload();
     playerController.finishCatchupTimelineReload(QStringLiteral("test-stop-ack"));
-    QTRY_VERIFY_WITH_TIMEOUT(!playerController.m_catchupTimelineReloadInFlight, 1000);
+    QTRY_VERIFY_WITH_TIMEOUT(!playerController.m_catchupSession.reloadInFlight(), 1000);
     QCOMPARE(
         playerController.currentPlaybackUrl(),
         QStringLiteral("http://provider.example/timeshift/user/pass/56/2026-05-18:12-05/2733.ts"));
@@ -3229,7 +3270,7 @@ void AppModelTests::playerControllerCatchupRegeneratedSeekStopsReconnectWithoutS
     QTRY_VERIFY_WITH_TIMEOUT(!reconnectStopLogs.isEmpty(), 1000);
     QVERIFY(reconnectStopLogs.constLast().contains(QStringLiteral("catchup-seek-url-regenerate")));
     QCOMPARE(playerController.playbackMode(), QStringLiteral("catchup"));
-    QVERIFY(playerController.m_catchupTimelineReloadInFlight);
+    QVERIFY(playerController.m_catchupSession.reloadInFlight());
     playerController.runCatchupTimelineReload();
     playerController.finishCatchupTimelineReload(QStringLiteral("test-stop-ack"));
     QCOMPARE(
@@ -3267,10 +3308,10 @@ void AppModelTests::playerControllerCatchupDegradationWatchdogTriggersSilentReco
 
     playerController.m_isPlaying = true;
     playerController.m_backendBuffering = true;
-    playerController.m_playbackStalled = true;
-    playerController.m_lastPlaybackPositionSeconds = 100.0;
-    playerController.m_catchupTimelineAvailableSeconds = 1800.0;
-    playerController.m_catchupTimelinePositionSeconds = 120.0;
+    playerController.m_recovery.m_playbackStalled = true;
+    playerController.m_recovery.m_lastPlaybackPositionSeconds = 100.0;
+    playerController.m_catchupSession.m_catchupTimelineAvailableSeconds = 1800.0;
+    playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 120.0;
 
     for (int i = 0; i < 8; ++i) {
         playerController.m_player.m_cachedTelemetry.positionSeconds = 102.0 + i;
@@ -3281,8 +3322,8 @@ void AppModelTests::playerControllerCatchupDegradationWatchdogTriggersSilentReco
     }
 
     // 80s degradation watchdog removed: low cache by itself must not trigger reconnect churn.
-    QVERIFY(!playerController.m_reconnectActive);
-    QVERIFY(!playerController.m_catchupTimelineReloadInFlight);
+    QVERIFY(!playerController.m_recovery.active());
+    QVERIFY(!playerController.m_catchupSession.reloadInFlight());
 }
 
 void AppModelTests::playerControllerCatchupDegradationWatchdogNearEndSuppressesRecovery()
@@ -3313,8 +3354,8 @@ void AppModelTests::playerControllerCatchupDegradationWatchdogNearEndSuppressesR
 
     playerController.m_isPlaying = true;
     playerController.m_backendBuffering = true;
-    playerController.m_playbackStalled = true;
-    playerController.m_lastPlaybackPositionSeconds = 100.0;
+    playerController.m_recovery.m_playbackStalled = true;
+    playerController.m_recovery.m_lastPlaybackPositionSeconds = 100.0;
     for (int i = 0; i < 10; ++i) {
         playerController.m_player.m_cachedTelemetry.positionSeconds = 1150.0 + i;
         playerController.m_player.m_cachedTelemetry.displayedVideoFramePtsSeconds = 100.0;
@@ -3323,8 +3364,8 @@ void AppModelTests::playerControllerCatchupDegradationWatchdogNearEndSuppressesR
         playerController.updatePosition();
     }
 
-    QVERIFY(!playerController.m_reconnectActive);
-    QVERIFY(!playerController.m_catchupTimelineReloadInFlight);
+    QVERIFY(!playerController.m_recovery.active());
+    QVERIFY(!playerController.m_catchupSession.reloadInFlight());
 }
 
 void AppModelTests::playerControllerCatchupDegradationWatchdogEscalatesToHardRestore()
@@ -3355,17 +3396,17 @@ void AppModelTests::playerControllerCatchupDegradationWatchdogEscalatesToHardRes
 
     playerController.m_isPlaying = true;
     playerController.m_backendBuffering = true;
-    playerController.m_playbackStalled = true;
-    playerController.m_lastPlaybackPositionSeconds = 200.0;
-    playerController.m_catchupTimelineAvailableSeconds = 1800.0;
-    playerController.m_catchupTimelinePositionSeconds = 300.0;
+    playerController.m_recovery.m_playbackStalled = true;
+    playerController.m_recovery.m_lastPlaybackPositionSeconds = 200.0;
+    playerController.m_catchupSession.m_catchupTimelineAvailableSeconds = 1800.0;
+    playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 300.0;
     playerController.m_player.m_cachedTelemetry.positionSeconds = 201.0;
     playerController.m_player.m_cachedTelemetry.displayedVideoFramePtsSeconds = 200.0;
     playerController.m_player.m_cachedTelemetry.demuxerCacheDurationSeconds = 0.0;
     playerController.m_player.m_cachedTelemetry.cacheSpeedBytesPerSecond = 0.0;
     playerController.updatePosition();
 
-    QVERIFY(playerController.m_catchupTimelineReloadInFlight);
+    QVERIFY(playerController.m_catchupSession.reloadInFlight());
 }
 
 void AppModelTests::playerControllerCatchupDegradationWatchdogPrefersSeamlessCutoverWhenStandbyReady()
@@ -3398,19 +3439,19 @@ void AppModelTests::playerControllerCatchupDegradationWatchdogPrefersSeamlessCut
 
     playerController.m_isPlaying = true;
     playerController.m_backendBuffering = true;
-    playerController.m_playbackStalled = true;
-    playerController.m_catchupSeamlessPending = true;
-    playerController.m_catchupSeamlessStandbyReady = true;
-    playerController.m_catchupSeamlessStandbyVideoReady = true;
-    playerController.m_catchupSeamlessStandbyLoadIssued = true;
+    playerController.m_recovery.m_playbackStalled = true;
+    playerController.m_catchupSession.standby().m_phase = OKILTV::App::Playback::CatchupStandbyTransition::Phase::Armed;
+    playerController.m_catchupSession.standby().m_ready = true;
+    playerController.m_catchupSession.standby().m_videoReady = true;
+    playerController.m_catchupSession.standby().m_phase = OKILTV::App::Playback::CatchupStandbyTransition::Phase::Loading;
     playerController.m_catchupSeamlessStandbyPlayer = &playerController.m_catchupStandbyPlayer;
-    playerController.m_catchupSeamlessStandbyUrl =
+    playerController.m_catchupSession.standby().m_url =
         QStringLiteral("http://provider.example/timeshift/user/pass/59/2026-05-18:12-02/3177.ts");
-    playerController.m_catchupSeamlessStandbyStreamBaseOffsetSeconds = 120.0;
-    playerController.m_catchupTimelineAvailableSeconds = 1800.0;
-    playerController.m_catchupTimelinePositionSeconds = 300.0;
-    playerController.m_catchupNearZeroTickCount = 0;
-    playerController.m_catchupRecoveryCooldownTimer.invalidate();
+    playerController.m_catchupSession.standby().m_baseOffset = 120.0;
+    playerController.m_catchupSession.m_catchupTimelineAvailableSeconds = 1800.0;
+    playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 300.0;
+    playerController.m_catchupSession.m_nearZeroTicks = 0;
+    playerController.m_catchupSession.m_recoverySince.reset();
 
     playerController.evaluateCatchupDegradationRecovery(
         0.0,
@@ -3423,8 +3464,8 @@ void AppModelTests::playerControllerCatchupDegradationWatchdogPrefersSeamlessCut
     QCOMPARE(playerController.m_catchupStandbyPlayer.m_steadyStateCacheHysteresisSeconds, 85.0);
     QCOMPARE(playerController.m_catchupStandbyPlayer.m_steadyStateDemuxerMaxBytes, static_cast<qint64>(96) * 1024 * 1024);
     QCOMPARE(playerController.m_catchupStandbyPlayer.m_steadyStateDemuxerMaxBackBytes, static_cast<qint64>(32) * 1024 * 1024);
-    QVERIFY(!playerController.m_catchupTimelineReloadInFlight);
-    QVERIFY(!playerController.m_catchupSeamlessPending);
+    QVERIFY(!playerController.m_catchupSession.reloadInFlight());
+    QVERIFY(!playerController.m_catchupSession.standby().pending());
 }
 
 void AppModelTests::playerControllerCatchupDegradationWatchdogFallsBackToHardRestoreWhenStandbyNotReady()
@@ -3457,14 +3498,14 @@ void AppModelTests::playerControllerCatchupDegradationWatchdogFallsBackToHardRes
 
     playerController.m_isPlaying = true;
     playerController.m_backendBuffering = true;
-    playerController.m_playbackStalled = true;
-    playerController.m_catchupSeamlessPending = true;
-    playerController.m_catchupSeamlessStandbyReady = false;
-    playerController.m_catchupSeamlessStandbyLoadIssued = true;
-    playerController.m_catchupTimelineAvailableSeconds = 1800.0;
-    playerController.m_catchupTimelinePositionSeconds = 300.0;
-    playerController.m_catchupNearZeroTickCount = 0;
-    playerController.m_catchupRecoveryCooldownTimer.invalidate();
+    playerController.m_recovery.m_playbackStalled = true;
+    playerController.m_catchupSession.standby().m_phase = OKILTV::App::Playback::CatchupStandbyTransition::Phase::Armed;
+    playerController.m_catchupSession.standby().m_ready = false;
+    playerController.m_catchupSession.standby().m_phase = OKILTV::App::Playback::CatchupStandbyTransition::Phase::Loading;
+    playerController.m_catchupSession.m_catchupTimelineAvailableSeconds = 1800.0;
+    playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 300.0;
+    playerController.m_catchupSession.m_nearZeroTicks = 0;
+    playerController.m_catchupSession.m_recoverySince.reset();
 
     playerController.evaluateCatchupDegradationRecovery(
         0.0,
@@ -3472,7 +3513,7 @@ void AppModelTests::playerControllerCatchupDegradationWatchdogFallsBackToHardRes
         false,
         false);
 
-    QVERIFY(playerController.m_catchupTimelineReloadInFlight);
+    QVERIFY(playerController.m_catchupSession.reloadInFlight());
 }
 
 void AppModelTests::playerControllerCatchupProgrammeBoundaryBypassesSeamlessExtension()
@@ -3501,19 +3542,19 @@ void AppModelTests::playerControllerCatchupProgrammeBoundaryBypassesSeamlessExte
         Qt::DirectConnection,
         Q_ARG(bool, false)));
 
-    playerController.m_catchupSeamlessPending = true;
-    playerController.m_catchupSeamlessStandbyLoadIssued = true;
-    playerController.m_catchupSeamlessStandbyReady = false;
-    playerController.m_catchupSeamlessFallbackDeferred = true;
-    playerController.m_catchupSeamlessFallbackTimer.start();
-    playerController.m_catchupTimelinePositionSeconds = 3598.5;
+    playerController.m_catchupSession.standby().m_phase = OKILTV::App::Playback::CatchupStandbyTransition::Phase::Armed;
+    playerController.m_catchupSession.standby().m_phase = OKILTV::App::Playback::CatchupStandbyTransition::Phase::Loading;
+    playerController.m_catchupSession.standby().m_ready = false;
+    playerController.m_catchupSession.standby().m_fallbackDeferred = true;
+    playerController.m_catchupSession.standby().fallbackTimer().start();
+    playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 3598.5;
 
     QVERIFY(playerController.handleCatchupPlaybackEndedRecovery());
 
     QTRY_VERIFY_WITH_TIMEOUT(!playerController.currentChannelValue().has_value(), 1000);
     QCOMPARE(playerController.playbackMode(), QStringLiteral("live"));
-    QVERIFY(!playerController.m_catchupSeamlessPending);
-    QVERIFY(!playerController.m_catchupTimelineReloadInFlight);
+    QVERIFY(!playerController.m_catchupSession.standby().pending());
+    QVERIFY(!playerController.m_catchupSession.reloadInFlight());
 }
 
 void AppModelTests::playerControllerCatchupProgrammeBoundaryDetectionRequiresStopEdgeAndEndPosition()
@@ -3542,14 +3583,14 @@ void AppModelTests::playerControllerCatchupProgrammeBoundaryDetectionRequiresSto
         Qt::DirectConnection,
         Q_ARG(bool, false)));
 
-    playerController.m_catchupTimelinePositionSeconds = 1799.5;
+    playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 1799.5;
     QVERIFY(!playerController.maybeStopCatchupAtProgrammeBoundary(
         1799.5,
         std::nullopt,
         QStringLiteral("test-running-edge")));
     QCOMPARE(playerController.playbackMode(), QStringLiteral("catchup"));
     QVERIFY(playerController.currentChannelValue().has_value());
-    QVERIFY(!playerController.m_catchupProgramBoundaryReached);
+    QVERIFY(!playerController.m_catchupSession.m_catchupProgramBoundaryReached);
 
     const auto pastStartUtc = QDateTime::currentDateTimeUtc().addSecs(-3600);
     const auto pastStopUtc = QDateTime::currentDateTimeUtc().addSecs(-2);
@@ -3567,17 +3608,17 @@ void AppModelTests::playerControllerCatchupProgrammeBoundaryDetectionRequiresSto
         Qt::DirectConnection,
         Q_ARG(bool, false)));
 
-    playerController.m_catchupTimelinePositionSeconds = 300.0;
+    playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 300.0;
     QVERIFY(!playerController.maybeStopCatchupAtProgrammeBoundary(
         300.0,
         std::nullopt,
         QStringLiteral("test-past-not-ended")));
     QCOMPARE(playerController.playbackMode(), QStringLiteral("catchup"));
     QVERIFY(playerController.currentChannelValue().has_value());
-    QVERIFY(!playerController.m_catchupProgramBoundaryReached);
+    QVERIFY(!playerController.m_catchupSession.m_catchupProgramBoundaryReached);
 
     // Wall-clock programme end is not yet the published archive edge.
-    playerController.m_catchupTimelinePositionSeconds = 3598.5;
+    playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 3598.5;
     QVERIFY(!playerController.maybeStopCatchupAtProgrammeBoundary(
         3598.5, std::nullopt, QStringLiteral("test-end-inside-safety-margin")));
 }
@@ -3611,12 +3652,12 @@ void AppModelTests::playerControllerCatchupPastProgrammeDemuxerEofStopsLikeExpli
     playerController.m_player.m_cachedTelemetry.positionSeconds = 3598.5;
     playerController.m_player.m_cachedTelemetry.displayedVideoFramePtsSeconds = 3598.5;
     playerController.m_player.m_cachedTelemetry.demuxerCacheDurationSeconds = 2.0;
-    playerController.m_catchupTimelinePositionSeconds = 3598.5;
-    playerController.m_catchupSeamlessPending = true;
-    playerController.m_catchupSeamlessStandbyLoadIssued = true;
-    playerController.m_catchupSeamlessStandbyReady = false;
-    playerController.m_catchupSeamlessFallbackDeferred = true;
-    playerController.m_catchupSeamlessFallbackTimer.start();
+    playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 3598.5;
+    playerController.m_catchupSession.standby().m_phase = OKILTV::App::Playback::CatchupStandbyTransition::Phase::Armed;
+    playerController.m_catchupSession.standby().m_phase = OKILTV::App::Playback::CatchupStandbyTransition::Phase::Loading;
+    playerController.m_catchupSession.standby().m_ready = false;
+    playerController.m_catchupSession.standby().m_fallbackDeferred = true;
+    playerController.m_catchupSession.standby().fallbackTimer().start();
     playerController.m_isPlaying = true;
 
     QVERIFY(!playerController.maybeStopCatchupAtProgrammeBoundary(
@@ -3635,8 +3676,8 @@ void AppModelTests::playerControllerCatchupPastProgrammeDemuxerEofStopsLikeExpli
     QCOMPARE(playerController.playbackMode(), QStringLiteral("live"));
     QCOMPARE(playerController.nowPlayingName(), QStringLiteral("No channel"));
     QCOMPARE(playerController.currentPlaybackUrl(), QStringLiteral(""));
-    QVERIFY(!playerController.m_catchupSeamlessPending);
-    QVERIFY(!playerController.m_catchupTimelineReloadInFlight);
+    QVERIFY(!playerController.m_catchupSession.standby().pending());
+    QVERIFY(!playerController.m_catchupSession.reloadInFlight());
 }
 
 void AppModelTests::playerControllerCatchupSeamlessStandbyRetriesWithStopFirstBackoff()
@@ -3673,24 +3714,24 @@ void AppModelTests::playerControllerCatchupSeamlessStandbyRetriesWithStopFirstBa
     QVERIFY(armed);
 
     QVERIFY(playerController.startSeamlessCatchupStandbyLoad());
-    QVERIFY(playerController.m_catchupSeamlessStandbyStopPending);
-    QVERIFY(!playerController.m_catchupSeamlessStandbyLoadIssued);
+    QVERIFY(playerController.m_catchupSession.standby().stopPending());
+    QVERIFY(!playerController.m_catchupSession.standby().loadIssued());
 
     QVERIFY(QMetaObject::invokeMethod(&playerController.m_catchupStandbyPlayer, "playbackStopped", Qt::DirectConnection));
-    QVERIFY(playerController.m_catchupSeamlessStandbyLoadIssued);
-    QVERIFY(!playerController.m_catchupSeamlessStandbyStopPending);
+    QVERIFY(playerController.m_catchupSession.standby().loadIssued());
+    QVERIFY(!playerController.m_catchupSession.standby().stopPending());
     QVERIFY(playerController.m_catchupStandbyPlayer.audioEnabledRequested());
-    QVERIFY(playerController.m_catchupSeamlessLastStandbyAttemptTimer.isValid());
+    QVERIFY(playerController.m_catchupSession.standby().m_lastAttempt.has_value());
 
     QVERIFY(QMetaObject::invokeMethod(
         &playerController.m_catchupStandbyPlayer,
         "errorOccurred",
         Qt::DirectConnection,
         Q_ARG(QString, QStringLiteral("simulated-standby-failure"))));
-    QVERIFY(!playerController.m_catchupSeamlessStandbyLoadIssued);
+    QVERIFY(!playerController.m_catchupSession.standby().loadIssued());
 
     QVERIFY(!playerController.startSeamlessCatchupStandbyLoad());
-    QVERIFY(!playerController.m_catchupSeamlessStandbyStopPending);
+    QVERIFY(!playerController.m_catchupSession.standby().stopPending());
 }
 
 void AppModelTests::playerControllerCatchupSeamlessStandbyRetryRefreshesXtreamUrl()
@@ -3731,25 +3772,25 @@ void AppModelTests::playerControllerCatchupSeamlessStandbyRetryRefreshesXtreamUr
     QVERIFY(armed);
 
     QVERIFY(playerController.launchSeamlessCatchupStandbyLoad(&playerController.m_catchupStandbyPlayer));
-    QVERIFY(playerController.m_catchupSeamlessStandbyLoadIssued);
-    QVERIFY(!playerController.m_catchupSeamlessStandbyUrl.isEmpty());
-    QVERIFY(playerController.m_catchupSeamlessStandbyUrl != armedUrl);
-    QVERIFY(playerController.m_catchupSeamlessStandbyStreamBaseOffsetSeconds >= 0.0);
+    QVERIFY(playerController.m_catchupSession.standby().loadIssued());
+    QVERIFY(!playerController.m_catchupSession.standby().url().isEmpty());
+    QVERIFY(playerController.m_catchupSession.standby().url() != armedUrl);
+    QVERIFY(playerController.m_catchupSession.standby().baseOffset() >= 0.0);
     // Wall-clock publication advanced while recovery was paused. The next
     // fallback response must follow the watched position, not the old delay.
-    playerController.m_catchupContinuousFallback = true;
-    playerController.m_catchupTimelinePositionSeconds = 152.0;
-    playerController.m_catchupDesiredDelaySeconds = 0.0;
+    playerController.m_catchupSession.m_catchupContinuousFallback = true;
+    playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 152.0;
+    playerController.m_catchupSession.m_catchupDesiredDelaySeconds = 0.0;
     QVERIFY(playerController.refreshSeamlessCatchupStandbyRetryUrl());
-    QCOMPARE(playerController.m_catchupSeamlessStandbyStreamBaseOffsetSeconds, 120.0);
+    QCOMPARE(playerController.m_catchupSession.standby().baseOffset(), 120.0);
     playerController.abortSeamlessCatchupRolling(QStringLiteral("test-eof-reload"), true);
-    playerController.m_catchupLastRollingExtensionAttemptTimer.invalidate();
-    playerController.m_catchupRollingRetryWindowTimer.invalidate();
+    playerController.m_catchupSession.m_lastRolling.reset();
+    playerController.m_catchupSession.m_rollingSince.reset();
     QVERIFY(playerController.extendCatchupRollingWindow(QStringLiteral("playback-ended"), false));
-    QCOMPARE(playerController.m_catchupContinuousRecoveryTarget, std::optional<double>(152.0));
+    QCOMPARE(playerController.m_catchupSession.m_catchupContinuousRecoveryTarget, std::optional<double>(152.0));
     playerController.runCatchupTimelineReload();
-    QVERIFY(!playerController.m_catchupReconnectResumeStreamRelativeSeconds.has_value());
-    QCOMPARE(playerController.m_catchupTimelinePositionSeconds, 120.0);
+    QVERIFY(!playerController.m_catchupSession.m_catchupReconnectResumeStreamRelativeSeconds.has_value());
+    QCOMPARE(playerController.m_catchupSession.m_catchupTimelinePositionSeconds, 120.0);
 
 
 }
@@ -3791,13 +3832,13 @@ void AppModelTests::playerControllerCatchupSeamlessCutoverRequiresStandbyVideoRe
     QVERIFY(playerController.seamlessStandbyPlayerObject() != nullptr);
 
     QVERIFY(QMetaObject::invokeMethod(&playerController.m_catchupStandbyPlayer, "playbackRestarted", Qt::DirectConnection));
-    QVERIFY(playerController.m_catchupSeamlessStandbyReady);
-    QVERIFY(!playerController.m_catchupSeamlessStandbyVideoReady);
+    QVERIFY(playerController.m_catchupSession.standby().ready());
+    QVERIFY(!playerController.m_catchupSession.standby().videoReady());
     QVERIFY(!playerController.standbySeamlessVideoReady());
     QVERIFY(!playerController.usingSharedPlayback());
 
-    playerController.m_catchupSeamlessFallbackDeferred = true;
-    playerController.m_catchupSeamlessStandbyVideoReady = true;
+    playerController.m_catchupSession.standby().m_fallbackDeferred = true;
+    playerController.m_catchupSession.standby().m_videoReady = true;
     QVERIFY(playerController.standbySeamlessVideoReady());
 }
 
@@ -3839,16 +3880,16 @@ void AppModelTests::playerControllerCatchupSeamlessSecondCycleTracksBaseStandbyS
     QVERIFY(armed);
     QCOMPARE(playerController.m_catchupSeamlessStandbyPlayer.data(), &playerController.m_player);
     QVERIFY(playerController.launchSeamlessCatchupStandbyLoad(&playerController.m_player));
-    QVERIFY(playerController.m_catchupSeamlessStandbyLoadIssued);
-    QVERIFY(!playerController.m_catchupSeamlessStandbyReady);
-    QVERIFY(!playerController.m_catchupSeamlessStandbyVideoReady);
+    QVERIFY(playerController.m_catchupSession.standby().loadIssued());
+    QVERIFY(!playerController.m_catchupSession.standby().ready());
+    QVERIFY(!playerController.m_catchupSession.standby().videoReady());
 
     QVERIFY(QMetaObject::invokeMethod(&playerController.m_player, "playbackRestarted", Qt::DirectConnection));
-    QVERIFY(playerController.m_catchupSeamlessStandbyReady);
-    QVERIFY(!playerController.m_catchupSeamlessStandbyVideoReady);
+    QVERIFY(playerController.m_catchupSession.standby().ready());
+    QVERIFY(!playerController.m_catchupSession.standby().videoReady());
 
     QVERIFY(QMetaObject::invokeMethod(&playerController.m_player, "videoReconfigured", Qt::DirectConnection));
-    QVERIFY(playerController.m_catchupSeamlessStandbyVideoReady);
+    QVERIFY(playerController.m_catchupSession.standby().videoReady());
 }
 
 void AppModelTests::playerControllerCatchupSeamlessStandbyFailureArmsFastRetry()
@@ -3883,7 +3924,7 @@ void AppModelTests::playerControllerCatchupSeamlessStandbyFailureArmsFastRetry()
         QStringLiteral("http://provider.example/timeshift/user/pass/61/2026-05-18:12-05/3185.ts"),
         300.0));
     QVERIFY(playerController.launchSeamlessCatchupStandbyLoad(&playerController.m_catchupStandbyPlayer));
-    QVERIFY(playerController.m_catchupSeamlessStandbyLoadIssued);
+    QVERIFY(playerController.m_catchupSession.standby().loadIssued());
 
     QVERIFY(QMetaObject::invokeMethod(
         &playerController.m_catchupStandbyPlayer,
@@ -3891,10 +3932,10 @@ void AppModelTests::playerControllerCatchupSeamlessStandbyFailureArmsFastRetry()
         Qt::DirectConnection,
         Q_ARG(QString, QStringLiteral("simulated-transient-provider-error"))));
 
-    QVERIFY(playerController.m_catchupSeamlessFastRetryPending);
-    QVERIFY(playerController.m_catchupSeamlessFastRetryBudgetRemaining > 0);
-    QVERIFY(playerController.m_catchupSeamlessFastRetryWindowTimer.isValid());
-    QVERIFY(playerController.m_catchupSeamlessFastRetryTimer.isActive());
+    QVERIFY(playerController.m_catchupSession.standby().retryPending());
+    QVERIFY(playerController.m_catchupSession.standby().retryBudget() > 0);
+    QVERIFY(playerController.m_catchupSession.standby().m_retryWindow.has_value());
+    QVERIFY(playerController.m_catchupSession.standby().retryTimer().isActive());
 }
 
 void AppModelTests::playerControllerCatchupDegradationWatchdogDefersHardRestoreDuringFastRetryWindow()
@@ -3923,15 +3964,15 @@ void AppModelTests::playerControllerCatchupDegradationWatchdogDefersHardRestoreD
         Qt::DirectConnection,
         Q_ARG(bool, false)));
 
-    playerController.m_catchupSeamlessPending = true;
-    playerController.m_catchupSeamlessStandbyLoadIssued = false;
-    playerController.m_catchupSeamlessFastRetryPending = true;
-    playerController.m_catchupSeamlessFastRetryBudgetRemaining = 1;
-    playerController.m_catchupSeamlessFastRetryWindowTimer.start();
-    playerController.m_catchupNearZeroTickCount = 0;
-    playerController.m_catchupRecoveryCooldownTimer.invalidate();
-    playerController.m_catchupTimelineAvailableSeconds = 1800.0;
-    playerController.m_catchupTimelinePositionSeconds = 1200.0;
+    playerController.m_catchupSession.standby().m_phase = OKILTV::App::Playback::CatchupStandbyTransition::Phase::Armed;
+    playerController.m_catchupSession.standby().m_phase = OKILTV::App::Playback::CatchupStandbyTransition::Phase::Armed;
+    playerController.m_catchupSession.standby().m_retryPending = true;
+    playerController.m_catchupSession.standby().m_retryBudget = 1;
+    playerController.m_catchupSession.standby().m_retryWindow = playerController.m_liveDeliveryClock.elapsed();
+    playerController.m_catchupSession.m_nearZeroTicks = 0;
+    playerController.m_catchupSession.m_recoverySince.reset();
+    playerController.m_catchupSession.m_catchupTimelineAvailableSeconds = 1800.0;
+    playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 1200.0;
 
     playerController.evaluateCatchupDegradationRecovery(
         0.0,
@@ -3939,8 +3980,8 @@ void AppModelTests::playerControllerCatchupDegradationWatchdogDefersHardRestoreD
         false,
         false);
 
-    QVERIFY(!playerController.m_catchupTimelineReloadInFlight);
-    QVERIFY(playerController.m_catchupSeamlessPending);
+    QVERIFY(!playerController.m_catchupSession.reloadInFlight());
+    QVERIFY(playerController.m_catchupSession.standby().pending());
 }
 
 void AppModelTests::playerControllerCatchupEofCloseArmsSeamlessRolloverRegardlessOfCacheLevel()
@@ -3974,11 +4015,11 @@ void AppModelTests::playerControllerCatchupEofCloseArmsSeamlessRolloverRegardles
         playerController.m_player.m_cachedTelemetry.positionSeconds = 42.0;
         playerController.m_player.m_cachedTelemetry.demuxerCacheDurationSeconds = cacheDurationSeconds;
         playerController.m_player.m_cachedTelemetry.cacheSpeedBytesPerSecond = 0.0;
-        playerController.m_catchupTimelineAvailableSeconds = 1800.0;
-        playerController.m_catchupTimelinePositionSeconds = 1680.0;
-        playerController.m_catchupTransportEndTimelineSeconds = 1500.0;
-        playerController.m_catchupDesiredDelaySeconds = 120.0;
-        playerController.m_catchupActiveEofObserved = true;
+        playerController.m_catchupSession.m_catchupTimelineAvailableSeconds = 1800.0;
+        playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 1680.0;
+        playerController.m_catchupSession.m_catchupTransportEndTimelineSeconds = 1500.0;
+        playerController.m_catchupSession.m_catchupDesiredDelaySeconds = 120.0;
+        playerController.m_catchupSession.m_catchupActiveEofObserved = true;
         auto closedSession = OKILTV::Player::CatchupStreamSession::create(
             QStringLiteral("http://provider.example/archive/segment.ts"));
         closedSession->closeProviderConnection(QStringLiteral("test-closed"));
@@ -3986,11 +4027,11 @@ void AppModelTests::playerControllerCatchupEofCloseArmsSeamlessRolloverRegardles
 
         playerController.updatePosition();
 
-        const auto rolloverStarted = playerController.m_catchupSeamlessPending
-            || playerController.m_catchupSeamlessStandbyLoadIssued
-            || playerController.m_catchupSeamlessStandbyReady;
+        const auto rolloverStarted = playerController.m_catchupSession.standby().pending()
+            || playerController.m_catchupSession.standby().loadIssued()
+            || playerController.m_catchupSession.standby().ready();
         QVERIFY(rolloverStarted);
-        QVERIFY(!playerController.m_catchupTimelineReloadInFlight);
+        QVERIFY(!playerController.m_catchupSession.reloadInFlight());
     };
 
     runScenario(59.0);
@@ -4027,11 +4068,11 @@ void AppModelTests::playerControllerCatchupEofCloseWaitsBeforeStandbyWarmup()
     playerController.m_player.m_cachedTelemetry.positionSeconds = 42.0;
     playerController.m_player.m_cachedTelemetry.demuxerCacheDurationSeconds = 10.0;
     playerController.m_player.m_cachedTelemetry.cacheSpeedBytesPerSecond = 0.0;
-    playerController.m_catchupTimelineAvailableSeconds = 1620.0;
-    playerController.m_catchupTimelinePositionSeconds = 1480.0;
-    playerController.m_catchupTransportEndTimelineSeconds = 1485.0;
-    playerController.m_catchupDesiredDelaySeconds = 120.0;
-    playerController.m_catchupActiveEofObserved = true;
+    playerController.m_catchupSession.m_catchupTimelineAvailableSeconds = 1620.0;
+    playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 1480.0;
+    playerController.m_catchupSession.m_catchupTransportEndTimelineSeconds = 1485.0;
+    playerController.m_catchupSession.m_catchupDesiredDelaySeconds = 120.0;
+    playerController.m_catchupSession.m_catchupActiveEofObserved = true;
     auto closedSession = OKILTV::Player::CatchupStreamSession::create(
         QStringLiteral("http://provider.example/archive/segment.ts"));
     closedSession->closeProviderConnection(QStringLiteral("test-closed"));
@@ -4039,10 +4080,10 @@ void AppModelTests::playerControllerCatchupEofCloseWaitsBeforeStandbyWarmup()
 
     playerController.updatePosition();
 
-    QVERIFY(playerController.m_catchupSeamlessPending);
-    QVERIFY(!playerController.m_catchupSeamlessStandbyLoadIssued);
-    QVERIFY(playerController.m_catchupSeamlessPostCloseDelayPending);
-    QVERIFY(playerController.m_catchupSeamlessPostCloseDelayTimer.isActive());
+    QVERIFY(playerController.m_catchupSession.standby().pending());
+    QVERIFY(!playerController.m_catchupSession.standby().loadIssued());
+    QVERIFY(playerController.m_catchupSession.standby().delayPending());
+    QVERIFY(playerController.m_catchupSession.standby().delayTimer().isActive());
 }
 
 void AppModelTests::playerControllerCatchupSeamlessCutoverDoesNotForceCloseNewActiveSessionFromStaleEofTick_data()
@@ -4079,8 +4120,8 @@ void AppModelTests::playerControllerCatchupSeamlessCutoverDoesNotForceCloseNewAc
         Qt::DirectConnection,
         Q_ARG(bool, false)));
 
-    playerController.m_catchupProgressTransportReady = false; // A replacement is still loading.
-    playerController.m_catchupProgressSeekTargetSeconds = 900.0;
+    playerController.m_catchupSession.m_catchupProgressTransportReady = false; // A replacement is still loading.
+    playerController.m_catchupSession.m_catchupProgressSeekTargetSeconds = 900.0;
 
     // Prepare a committed seamless cutover path during degradation recovery.
     playerController.m_isPlaying = true;
@@ -4091,21 +4132,21 @@ void AppModelTests::playerControllerCatchupSeamlessCutoverDoesNotForceCloseNewAc
     playerController.m_catchupStandbyPlayer.m_cachedTelemetry.demuxerCacheDurationSeconds = 108.0;
     playerController.m_catchupStandbyPlayer.m_cachedTelemetry.positionSeconds = 2.0;
 
-    playerController.m_catchupTimelineAvailableSeconds = 1600.0;
-    playerController.m_catchupTimelinePositionSeconds = 1200.0;
-    playerController.m_catchupTransportEndTimelineSeconds = 1200.2;
-    playerController.m_catchupDesiredDelaySeconds = 100.0;
-    playerController.m_catchupNearZeroTickCount = 0;
-    playerController.m_catchupRecoveryCooldownTimer.invalidate();
+    playerController.m_catchupSession.m_catchupTimelineAvailableSeconds = 1600.0;
+    playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 1200.0;
+    playerController.m_catchupSession.m_catchupTransportEndTimelineSeconds = 1200.2;
+    playerController.m_catchupSession.m_catchupDesiredDelaySeconds = 100.0;
+    playerController.m_catchupSession.m_nearZeroTicks = 0;
+    playerController.m_catchupSession.m_recoverySince.reset();
 
-    playerController.m_catchupSeamlessPending = true;
-    playerController.m_catchupSeamlessStandbyLoadIssued = true;
-    playerController.m_catchupSeamlessStandbyReady = true;
-    playerController.m_catchupSeamlessStandbyVideoReady = true;
+    playerController.m_catchupSession.standby().m_phase = OKILTV::App::Playback::CatchupStandbyTransition::Phase::Armed;
+    playerController.m_catchupSession.standby().m_phase = OKILTV::App::Playback::CatchupStandbyTransition::Phase::Loading;
+    playerController.m_catchupSession.standby().m_ready = true;
+    playerController.m_catchupSession.standby().m_videoReady = true;
     playerController.m_catchupSeamlessStandbyPlayer = &playerController.m_catchupStandbyPlayer;
-    playerController.m_catchupSeamlessStandbyUrl = QStringLiteral("http://provider.example/timeshift/user/pass/61/2026-05-18:12-10/3191.ts");
-    playerController.m_catchupSeamlessStandbyStreamBaseOffsetSeconds = 1200.0;
-    playerController.m_catchupSeamlessFallbackDeferred = true;
+    playerController.m_catchupSession.standby().m_url = QStringLiteral("http://provider.example/timeshift/user/pass/61/2026-05-18:12-10/3191.ts");
+    playerController.m_catchupSession.standby().m_baseOffset = 1200.0;
+    playerController.m_catchupSession.standby().m_fallbackDeferred = true;
 
     auto oldActiveSession = OKILTV::Player::CatchupStreamSession::create(
         QStringLiteral("http://provider.example/archive/old-segment.ts"));
@@ -4118,25 +4159,25 @@ void AppModelTests::playerControllerCatchupSeamlessCutoverDoesNotForceCloseNewAc
     if (activeCacheSeconds > 1.0) {
         QCOMPARE(playerController.playbackPlayer(), &playerController.m_player);
         playerController.m_player.m_cachedTelemetry.demuxerCacheDurationSeconds = 0.2;
-        playerController.m_catchupRecoveryCooldownTimer.restart(); // Exercise near-edge cutover, not the degradation watchdog.
+        playerController.m_catchupSession.m_recoverySince = playerController.m_liveDeliveryClock.elapsed(); // Exercise near-edge cutover, not the degradation watchdog.
         playerController.updatePosition();
     }
 
     QCOMPARE(playerController.playbackPlayer(), &playerController.m_catchupStandbyPlayer);
-    QVERIFY(playerController.m_catchupProgressTransportReady);
-    QVERIFY(!playerController.m_catchupProgressSeekTargetSeconds.has_value());
+    QVERIFY(playerController.m_catchupSession.m_catchupProgressTransportReady);
+    QVERIFY(!playerController.m_catchupSession.m_catchupProgressSeekTargetSeconds.has_value());
     QVERIFY(playerController.m_catchupActiveStreamSession);
     QCOMPARE(playerController.m_catchupActiveStreamSession->sourceUrl(), QStringLiteral("http://provider.example/archive/new-segment.ts"));
     QVERIFY(!playerController.m_catchupActiveStreamSession->closeRequestedByApp());
     QCOMPARE(playerController.catchupTimelinePositionSeconds(), 1202.0);
     QVERIFY(!playerController.catchupTimelineAtLiveEdge());
-    QVERIFY(!playerController.m_catchupProgramBoundaryReached);
+    QVERIFY(!playerController.m_catchupSession.m_catchupProgramBoundaryReached);
 
     playerController.updatePosition();
     QCOMPARE(playerController.catchupTimelinePositionSeconds(), 1202.0);
-    QVERIFY(!playerController.m_catchupTimelineReloadInFlight);
-    QVERIFY(!playerController.m_catchupRollbackDeferredPending);
-    QVERIFY(!playerController.m_catchupRollbackGuardConsumed);
+    QVERIFY(!playerController.m_catchupSession.reloadInFlight());
+    QVERIFY(!playerController.m_catchupSession.m_catchupRollbackDeferredPending);
+    QVERIFY(!playerController.m_catchupSession.m_catchupRollbackGuardConsumed);
 }
 
 void AppModelTests::playerControllerCatchupSeamlessRejectsDeadStandbySession_data()
@@ -4184,22 +4225,22 @@ void AppModelTests::playerControllerCatchupSeamlessRejectsDeadStandbySession()
     playerController.m_catchupStandbyPlayer.m_cachedTelemetry.demuxerCacheDurationSeconds = 108.0;
     playerController.m_catchupStandbyPlayer.m_cachedTelemetry.positionSeconds = 402.0;
 
-    playerController.m_catchupTimelineAvailableSeconds = 1600.0;
-    playerController.m_catchupTimelinePositionSeconds = 1200.0;
-    playerController.m_catchupTransportEndTimelineSeconds = 1200.2;
-    playerController.m_catchupDesiredDelaySeconds = 100.0;
-    playerController.m_catchupNearZeroTickCount = 0;
-    playerController.m_catchupRecoveryCooldownTimer.invalidate();
+    playerController.m_catchupSession.m_catchupTimelineAvailableSeconds = 1600.0;
+    playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 1200.0;
+    playerController.m_catchupSession.m_catchupTransportEndTimelineSeconds = 1200.2;
+    playerController.m_catchupSession.m_catchupDesiredDelaySeconds = 100.0;
+    playerController.m_catchupSession.m_nearZeroTicks = 0;
+    playerController.m_catchupSession.m_recoverySince.reset();
 
-    playerController.m_catchupSeamlessPending = true;
-    playerController.m_catchupSeamlessStandbyLoadIssued = true;
-    playerController.m_catchupSeamlessStandbyReady = true;
-    playerController.m_catchupSeamlessStandbyVideoReady = true;
+    playerController.m_catchupSession.standby().m_phase = OKILTV::App::Playback::CatchupStandbyTransition::Phase::Armed;
+    playerController.m_catchupSession.standby().m_phase = OKILTV::App::Playback::CatchupStandbyTransition::Phase::Loading;
+    playerController.m_catchupSession.standby().m_ready = true;
+    playerController.m_catchupSession.standby().m_videoReady = true;
     playerController.m_catchupSeamlessStandbyPlayer = &playerController.m_catchupStandbyPlayer;
-    playerController.m_catchupSeamlessStandbyUrl =
+    playerController.m_catchupSession.standby().m_url =
         QStringLiteral("http://provider.example/timeshift/user/pass/61/2026-05-18:12-10/3192.ts");
-    playerController.m_catchupSeamlessStandbyStreamBaseOffsetSeconds = 600.0;
-    playerController.m_catchupSeamlessFallbackDeferred = true;
+    playerController.m_catchupSession.standby().m_baseOffset = 600.0;
+    playerController.m_catchupSession.standby().m_fallbackDeferred = true;
 
     QTcpServer server;
     QVERIFY(server.listen(QHostAddress::LocalHost));
@@ -4226,22 +4267,22 @@ void AppModelTests::playerControllerCatchupSeamlessRejectsDeadStandbySession()
             QCOMPARE(deadStandbySession->bufferedBytes(), 0);
         }
         QVERIFY(playerController.standbyCatchupSessionHealthyForCutover());
-        playerController.m_catchupTransportEndTimelineSeconds = -421.0; // Stale URL edge from the reported failure.
+        playerController.m_catchupSession.m_catchupTransportEndTimelineSeconds = -421.0; // Stale URL edge from the reported failure.
         playerController.m_player.m_cachedTelemetry.demuxerCacheDurationSeconds = 13.87;
         QVERIFY(!playerController.maybeCommitSeamlessCatchupCutover(QStringLiteral("test-buffered-tail")));
         playerController.m_player.m_cachedTelemetry.demuxerCacheDurationSeconds = 0.0;
-        playerController.m_catchupContinuousFallback = true;
-        playerController.m_catchupTimelinePositionSeconds = 152.0;
-        playerController.m_catchupSeamlessStandbyStreamBaseOffsetSeconds = 120.0;
+        playerController.m_catchupSession.m_catchupContinuousFallback = true;
+        playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 152.0;
+        playerController.m_catchupSession.standby().m_baseOffset = 120.0;
         playerController.m_catchupStandbyPlayer.m_cachedTelemetry.positionSeconds = 0.0;
         playerController.m_catchupStandbyPlayer.m_cachedTelemetry.demuxerSeekableRangeSeconds = std::make_pair(0.0, 90.0);
         QVERIFY(!playerController.maybeCommitSeamlessCatchupCutover(QStringLiteral("test-align-before-cutover")));
-        QVERIFY(playerController.m_catchupStandbyAlignmentSeekIssued);
+        QVERIFY(playerController.m_catchupSession.standby().alignmentIssued());
         for (int tick = 0; tick < 5; ++tick) {
             playerController.evaluateCatchupDegradationRecovery(0.1, 0.0, false, false);
         }
-        QVERIFY(!playerController.m_catchupTimelineReloadInFlight);
-        QVERIFY(playerController.m_catchupSeamlessPending);
+        QVERIFY(!playerController.m_catchupSession.reloadInFlight());
+        QVERIFY(playerController.m_catchupSession.standby().pending());
         playerController.m_catchupStandbyPlayer.m_cachedTelemetry.positionSeconds = 32.0;
         playerController.m_player.m_cachedTelemetry.pauseState = true;
         playerController.m_isPlaying = false;
@@ -4253,10 +4294,10 @@ void AppModelTests::playerControllerCatchupSeamlessRejectsDeadStandbySession()
     } else {
         QVERIFY(!playerController.maybeCommitSeamlessCatchupCutover(QStringLiteral("test-empty-response"), true));
         QCOMPARE(playerController.playbackPlayer(), &playerController.m_player);
-        QVERIFY(!playerController.m_catchupSeamlessStandbyReady);
+        QVERIFY(!playerController.m_catchupSession.standby().ready());
         // A failed old response must not prevent opening its replacement.
         QVERIFY(playerController.startSeamlessCatchupStandbyLoad());
-        QVERIFY(playerController.m_catchupSeamlessStandbyStopPending);
+        QVERIFY(playerController.m_catchupSession.standby().stopPending());
     }
 }
 
@@ -4291,15 +4332,15 @@ void AppModelTests::playerControllerCatchupReconnectWaitsForTransportSettleBefor
         "errorOccurred",
         Qt::DirectConnection,
         Q_ARG(QString, QStringLiteral("simulated-catchup-reconnect"))));
-    QVERIFY(playerController.m_reconnectActive);
-    QVERIFY(playerController.m_reconnectTransportStopIssued);
-    QCOMPARE(playerController.m_reconnectAttemptCount, 0);
-    QVERIFY(!playerController.m_reconnectAttemptInFlight);
+    QVERIFY(playerController.m_recovery.active());
+    QVERIFY(playerController.m_recovery.waitingStop());
+    QCOMPARE(playerController.m_recovery.attempts(), 0);
+    QVERIFY(!playerController.m_recovery.attemptInFlight());
 
     QTest::qWait(500);
     playerController.handleReconnectAttemptTick();
-    QCOMPARE(playerController.m_reconnectAttemptCount, 1);
-    QVERIFY(playerController.m_reconnectAttemptInFlight);
+    QCOMPARE(playerController.m_recovery.attempts(), 1);
+    QVERIFY(playerController.m_recovery.attemptInFlight());
 }
 
 void AppModelTests::playerControllerCatchupReconnectAttemptLimitEscalatesToHardRestore()
@@ -4328,15 +4369,14 @@ void AppModelTests::playerControllerCatchupReconnectAttemptLimitEscalatesToHardR
         Qt::DirectConnection,
         Q_ARG(bool, false)));
 
-    playerController.m_reconnectActive = true;
-    playerController.m_reconnectAttemptInFlight = false;
-    playerController.m_reconnectAttemptCount = 5;
-    playerController.m_catchupTimelineAvailableSeconds = 1800.0;
-    playerController.m_catchupTimelinePositionSeconds = 300.0;
+    playerController.m_recovery.start();
+    playerController.m_recovery.m_reconnectAttemptCount = 5;
+    playerController.m_catchupSession.m_catchupTimelineAvailableSeconds = 1800.0;
+    playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 300.0;
 
     playerController.handleReconnectAttemptTick();
 
-    QVERIFY(playerController.m_catchupTimelineReloadInFlight);
+    QVERIFY(playerController.m_catchupSession.reloadInFlight());
     QVERIFY(!playerController.m_channelLoadFailed);
 }
 
@@ -4362,13 +4402,13 @@ void AppModelTests::playerControllerCatchupCurrentProgramFollowsPlayback()
     QCOMPARE(atActivation.value(QStringLiteral("timeRange")).toString(), epgEntryTimeRange(program));
     QCOMPARE(atActivation.value(QStringLiteral("progressPercent")).toDouble(), 25.0);
     QSignalSpy changed(&controller, &PlayerController::catchupTimelineChanged);
-    controller.m_catchupTimelinePositionSeconds = 1800;
+    controller.m_catchupSession.m_catchupTimelinePositionSeconds = 1800;
     controller.syncCatchupTimelineState();
     QVERIFY(!changed.isEmpty());
     QCOMPARE(controller.catchupCurrentProgram().value(QStringLiteral("progressPercent")).toDouble(), 50.0);
     controller.syncCatchupTimelineState(); // An unchanged/paused media clock must not advance progress.
     QCOMPARE(controller.catchupCurrentProgram().value(QStringLiteral("progressPercent")).toDouble(), 50.0);
-    controller.m_catchupTimelinePositionSeconds = 0;
+    controller.m_catchupSession.m_catchupTimelinePositionSeconds = 0;
     controller.syncCatchupTimelineState();
     QCOMPARE(controller.catchupCurrentProgram().value(QStringLiteral("progressPercent")).toDouble(), 0.0);
     controller.returnToLiveFromCatchup();
@@ -4418,13 +4458,13 @@ void AppModelTests::appControllerArchivesContinueAcrossProgrammes()
     harness.appController->playCatchup(toVariantMap(channel), toVariantMap(entries.first()));
     auto *player = harness.playerController.get();
     player->m_positionTimer.stop();
-    QVERIFY(player->m_catchupEndless);
+    QVERIFY(player->m_catchupSession.m_catchupEndless);
     QVERIFY(!player->m_currentLoadfileOptions.contains(QStringLiteral("length=")));
     const auto url = player->currentPlaybackUrl();
     QSignalSpy activated(player, &PlayerController::playbackChannelActivated);
     for (int i = 0; i < 3; ++i) {
         const auto offset = i * 600 + 65;
-        player->m_catchupTimelinePositionSeconds = offset;
+        player->m_catchupSession.m_catchupTimelinePositionSeconds = offset;
         player->syncCatchupTimelineState();
         QCOMPARE(player->catchupCurrentProgram().value(QStringLiteral("title")).toString(), entries[i].title);
         QCOMPARE(player->catchupTimelinePositionSeconds(), 65.0);
@@ -4443,7 +4483,7 @@ void AppModelTests::appControllerArchivesContinueAcrossProgrammes()
     QCOMPARE(QUrlQuery(QUrl(regenerated)).queryItemValue(QStringLiteral("utc")).toLongLong(), start.addSecs(1265).toSecsSinceEpoch());
     QVERIFY(QUrlQuery(QUrl(regenerated)).queryItemValue(QStringLiteral("lutc")).toLongLong() > entries.last().stop.toSecsSinceEpoch());
     // Neither missing EPG nor a passive refresh can end the session or reuse an old programme bookmark.
-    player->m_catchupTimelinePositionSeconds = 1900;
+    player->m_catchupSession.m_catchupTimelinePositionSeconds = 1900;
     player->syncCatchupTimelineState();
     QVERIFY(player->catchupCurrentProgram().isEmpty());
     QCOMPARE(player->catchupProgramLabel(), QStringLiteral("Catch-up"));
@@ -4581,27 +4621,27 @@ void AppModelTests::playerControllerContinuousCatchupWaitsAndBoundsRecovery()
     player.playCatchupChannel(channel, channel.streamUrl + QStringLiteral("?utc=0"), QStringLiteral("Archive"),
         start, start.addSecs(60), {}, std::nullopt, std::nullopt, std::nullopt, 180, true);
     player.m_positionTimer.stop();
-    player.m_catchupTimelinePositionSeconds = 420;
+    player.m_catchupSession.m_catchupTimelinePositionSeconds = 420;
     QVERIFY(player.handleCatchupPlaybackEndedRecovery());
-    QVERIFY(player.m_catchupPublicationWaiting);
-    QVERIFY(!player.m_catchupTimelineReloadInFlight);
+    QVERIFY(player.m_catchupSession.publicationWaiting());
+    QVERIFY(!player.m_catchupSession.reloadInFlight());
     const auto url = player.currentPlaybackUrl();
     player.updatePosition();
     QCOMPARE(player.currentPlaybackUrl(), url);
-    player.m_catchupPublicationWaiting = false;
+    player.m_catchupSession.clearPublicationWait();
     for (int i = 0; i < 3; ++i) {
-        player.m_catchupContinuousRecoveryTarget = 100;
+        player.m_catchupSession.m_catchupContinuousRecoveryTarget = 100;
         QVERIFY(player.reloadCatchupForTimelineSeek(100));
-        player.m_catchupTimelineReloadInFlight = false;
-        player.m_catchupTimelineReloadAckTimer.stop();
+        player.m_catchupSession.cancelReload();
+        player.m_catchupSession.reloadAckTimer().stop();
     }
-    player.m_catchupContinuousRecoveryTarget = 100;
+    player.m_catchupSession.m_catchupContinuousRecoveryTarget = 100;
     QVERIFY(!player.reloadCatchupForTimelineSeek(100));
     QVERIFY(player.channelLoadFailed());
     QVERIFY(player.handleCatchupPlaybackEndedRecovery());
     QVERIFY(player.catchupTimelineNoticeText().contains(QStringLiteral("Retry")));
     player.stop();
-    QVERIFY(!player.m_catchupPublicationWaiting);
+    QVERIFY(!player.m_catchupSession.publicationWaiting());
 }
 
 void AppModelTests::playerControllerEndlessCatchupChangesEpgWithoutRetuning()
@@ -4630,13 +4670,13 @@ void AppModelTests::playerControllerEndlessCatchupChangesEpgWithoutRetuning()
     const auto url = controller->currentPlaybackUrl();
     const auto options = controller->m_currentLoadfileOptions;
     QVERIFY(!options.contains(QStringLiteral("length=")));
-    controller->m_catchupTimelinePositionSeconds = 3599;
+    controller->m_catchupSession.m_catchupTimelinePositionSeconds = 3599;
     controller->syncCatchupTimelineState();
     QCOMPARE(controller->catchupProgramLabel(), first.title);
     QCOMPARE(controller->catchupTimelineStartEpochMs(), first.start.toMSecsSinceEpoch());
     QSignalSpy switchSpy(controller, &PlayerController::channelSwitchInProgressChanged);
     QSignalSpy loadingSpy(controller, &PlayerController::isLoadingChanged);
-    controller->m_catchupTimelinePositionSeconds = 3601;
+    controller->m_catchupSession.m_catchupTimelinePositionSeconds = 3601;
     controller->syncCatchupTimelineState();
     QCOMPARE(controller->catchupProgramLabel(), second.title);
     QCOMPARE(controller->catchupTimelineStartEpochMs(), second.start.toMSecsSinceEpoch());
@@ -4644,24 +4684,24 @@ void AppModelTests::playerControllerEndlessCatchupChangesEpgWithoutRetuning()
     QCOMPARE(controller->catchupCurrentProgram().value(QStringLiteral("title")).toString(), second.title);
     QVERIFY(std::abs(controller->catchupCurrentProgram().value(QStringLiteral("progressPercent")).toDouble()
         - 100.0 / 7200.0) < 0.001);
-    QCOMPARE(controller->m_catchupProgramStartUtc, first.start);
+    QCOMPARE(controller->m_catchupSession.m_catchupProgramStartUtc, first.start);
     QCOMPARE(controller->currentPlaybackUrl(), url);
     QCOMPARE(controller->m_currentLoadfileOptions, options);
     QVERIFY(!controller->maybeStopCatchupAtProgrammeBoundary(3601.0, 0.0, QStringLiteral("endless-test")));
     QVERIFY(controller->currentChannelValue().has_value());
     QCOMPARE(switchSpy.count(), 0);
     QCOMPARE(loadingSpy.count(), 0);
-    controller->m_catchupTimelinePositionSeconds = 3500;
+    controller->m_catchupSession.m_catchupTimelinePositionSeconds = 3500;
     controller->syncCatchupTimelineState();
     QCOMPARE(controller->catchupProgramLabel(), first.title);
-    controller->m_catchupTimelinePositionSeconds = 3601;
+    controller->m_catchupSession.m_catchupTimelinePositionSeconds = 3601;
     controller->syncCatchupTimelineState();
     QCOMPARE(controller->catchupProgramLabel(), second.title);
     QCOMPARE(controller->catchupTimelineEndEpochMs(), second.stop.toMSecsSinceEpoch());
     QCOMPARE(controller->catchupTimelineDurationSeconds(), 7200.0);
     controller->seekTimeshiftToFraction(0.25);
-    QVERIFY(std::abs(controller->m_catchupTimelinePositionSeconds - 5400.0) < 1.0);
-    QVERIFY(controller->m_catchupTimelineReloadStreamBaseOffsetSeconds >= 5400.0);
+    QVERIFY(std::abs(controller->m_catchupSession.m_catchupTimelinePositionSeconds - 5400.0) < 1.0);
+    QVERIFY(controller->m_catchupSession.m_reloadBase >= 5400.0);
     harness.epgService->clear();
     controller->syncCatchupTimelineState();
     QCOMPARE(controller->catchupProgramLabel(), QStringLiteral("Catch-up"));
@@ -4669,7 +4709,7 @@ void AppModelTests::playerControllerEndlessCatchupChangesEpgWithoutRetuning()
     QVERIFY(std::abs(controller->catchupTimelineEndEpochMs()
         - QDateTime::currentDateTimeUtc().toMSecsSinceEpoch()) < 1000);
     controller->returnToLiveFromCatchup();
-    QVERIFY(!controller->m_catchupEndless);
+    QVERIFY(!controller->m_catchupSession.m_catchupEndless);
     QCOMPARE(controller->currentPlaybackUrl(), channel.streamUrl);
 }
 
@@ -4692,7 +4732,7 @@ void AppModelTests::playerControllerCatchupRefillsWithoutReplacingTransport()
     QVERIFY(!controller.evaluateCatchupRebuffering(std::nullopt, false));
     for (const auto cache : { 7.0, 1.1, 1.0, 0.56, 0.11 }) {
         QVERIFY(!controller.evaluateCatchupRebuffering(cache, false));
-        QVERIFY(!controller.m_catchupRebuffering);
+        QVERIFY(!controller.m_buffering.catchupRefilling());
     }
     QVERIFY(controller.evaluateCatchupRebuffering(0.1, false));
     controller.refreshBufferingState();
@@ -4713,12 +4753,12 @@ void AppModelTests::playerControllerCatchupRefillsWithoutReplacingTransport()
     controller.m_userPausedManually = false;
     QVERIFY(controller.evaluateCatchupRebuffering(0.05, false));
     QVERIFY(controller.seekCatchupToTimelinePosition(300.0));
-    QVERIFY(!controller.m_catchupRebuffering);
+    QVERIFY(!controller.m_buffering.catchupRefilling());
     QVERIFY(controller.evaluateCatchupRebuffering(0.05, false));
     session->closeProviderConnection(QStringLiteral("test-error-or-teardown"));
     QVERIFY(!controller.evaluateCatchupRebuffering(0.05, false));
     controller.stop();
-    QVERIFY(!controller.m_catchupRebuffering);
+    QVERIFY(!controller.m_buffering.catchupRefilling());
 }
 
 void AppModelTests::playerControllerCatchupRefillTimeoutRequiresPlayableReserve()
@@ -4882,7 +4922,7 @@ void AppModelTests::playerControllerPlaysAcrossMpegTsConfigurationChange()
         }) > 2);
         QVERIFY(std::abs(player->propertyDouble("avsync").value_or(1000.0)) < 0.2);
         QVERIFY(!session->hasNetworkError());
-        QVERIFY(!controller.m_catchupContinuousFallback);
+        QVERIFY(!controller.m_catchupSession.m_catchupContinuousFallback);
         QCOMPARE(errors.count(), 0);
         if (testUrl == localUrl) { QCOMPARE(requests, 1); }
         qInfo() << "Isolated clock fixture: audio and video advancing after 20s; same HTTP session, no reload.";
@@ -4903,7 +4943,7 @@ void AppModelTests::playerControllerPlaysAcrossMpegTsConfigurationChange()
         QCOMPARE(errors.count(), 1);
         QVERIFY(player->m_liveStream == nullptr);
         QVERIFY(!player->m_livePeriodTimer.isActive());
-        QVERIFY(controller.m_reconnectActive);
+        QVERIFY(controller.m_recovery.active());
         return;
     }
     QTRY_VERIFY_WITH_TIMEOUT(session->readGeneration() == 1 || activeSession() != session,
@@ -4925,7 +4965,7 @@ void AppModelTests::playerControllerPlaysAcrossMpegTsConfigurationChange()
     QVERIFY(std::abs(player->propertyDouble("avsync").value_or(1000.0)) < 0.2);
     QCOMPARE(activeSession(), session);
     QVERIFY(!session->hasNetworkError());
-    QVERIFY(!controller.m_catchupContinuousFallback);
+    QVERIFY(!controller.m_catchupSession.m_catchupContinuousFallback);
     if (!live) {
         QVERIFY(controller.catchupTimelinePositionSeconds() >= base + (capture.isEmpty() && testUrl == localUrl ? 6.0 : 48.0));
     }
@@ -4936,7 +4976,7 @@ void AppModelTests::playerControllerPlaysAcrossMpegTsConfigurationChange()
         QCOMPARE(session->readGeneration(), quint64(2));
         QTRY_COMPARE_WITH_TIMEOUT(player->audioCodec().value_or(QString {}), QStringLiteral("aac"), 3000);
         QTRY_COMPARE_WITH_TIMEOUT(player->videoCodec().value_or(QString {}), QStringLiteral("h264"), 3000);
-        QVERIFY(!controller.m_reconnectActive);
+        QVERIFY(!controller.m_recovery.active());
     }
     if (testUrl == localUrl) { QCOMPARE(requests, 1); }
     QCOMPARE(errors.count(), 0);
@@ -5050,10 +5090,10 @@ void AppModelTests::playerControllerSkipsRetriedArchiveGap()
         // Reproduce an unavailable resume point at the gap: the old four-
         // second period cannot reach this point or supply its seek reserve.
         // Pin this point independently of timer/decoder scheduling on the host.
-        controller.m_catchupTimelinePositionSeconds = 10.0;
-        controller.m_catchupReconnectResumeStreamRelativeSeconds = 10.0;
-        controller.m_catchupRecoveryAlignmentActive = true;
-        controller.m_catchupRecoveryAlignmentSeekIssued = false;
+        controller.m_catchupSession.m_catchupTimelinePositionSeconds = 10.0;
+        controller.m_catchupSession.m_catchupReconnectResumeStreamRelativeSeconds = 10.0;
+        controller.m_catchupSession.setAlignmentActive(true);
+        controller.m_catchupSession.resetAlignmentSeek();
         controller.playbackPlayer()->setPaused(true);
     });
     controller.playCatchupChannel(channel, url, QStringLiteral("Archive gap"), start, start.addSecs(1200), url,
@@ -5066,9 +5106,9 @@ void AppModelTests::playerControllerSkipsRetriedArchiveGap()
     QVERIFY(session);
     QCOMPARE(session->readGeneration(), quint64(1));
     QVERIFY(!session->hasNetworkError());
-    QVERIFY(!controller.m_catchupRecoveryAlignmentActive);
-    QVERIFY(!controller.m_catchupReconnectResumeStreamRelativeSeconds);
-    QVERIFY(!controller.m_catchupContinuousRecoveryTarget);
+    QVERIFY(!controller.m_catchupSession.alignmentActive());
+    QVERIFY(!controller.m_catchupSession.m_catchupReconnectResumeStreamRelativeSeconds);
+    QVERIFY(!controller.m_catchupSession.m_catchupContinuousRecoveryTarget);
     auto *player = controller.playbackPlayer();
     QTRY_VERIFY_WITH_TIMEOUT(player->propertyDouble("audio-pts").value_or(-1.0) > 0.0, 5000);
     const auto position = controller.catchupTimelinePositionSeconds();
@@ -5104,23 +5144,23 @@ void AppModelTests::playerControllerStandbyTimeoutLeavesWaitLoop()
     controller.playCatchupChannel(channel, url, QStringLiteral("Timeout recovery"), start,
         start.addSecs(7200), url, std::nullopt, std::nullopt, std::nullopt, 180, true);
     controller.m_positionTimer.stop();
-    controller.m_catchupTimelinePositionSeconds = 54.0;
-    controller.m_catchupContinuousFallback = true;
-    controller.m_catchupSeamlessPending = true;
-    controller.m_catchupSeamlessStandbyLoadIssued = true;
-    controller.m_catchupSeamlessStandbyReady = true;
-    controller.m_catchupSeamlessStandbyVideoReady = true;
+    controller.m_catchupSession.m_catchupTimelinePositionSeconds = 54.0;
+    controller.m_catchupSession.m_catchupContinuousFallback = true;
+    controller.m_catchupSession.standby().m_phase = OKILTV::App::Playback::CatchupStandbyTransition::Phase::Armed;
+    controller.m_catchupSession.standby().m_phase = OKILTV::App::Playback::CatchupStandbyTransition::Phase::Loading;
+    controller.m_catchupSession.standby().m_ready = true;
+    controller.m_catchupSession.standby().m_videoReady = true;
     controller.m_catchupSeamlessStandbyPlayer = &controller.m_catchupStandbyPlayer;
     controller.m_catchupStandbyPlayer.m_cachedTelemetry.positionSeconds = 0.0;
     controller.m_catchupStandbyPlayer.m_cachedTelemetry.demuxerCacheDurationSeconds = 0.0;
     QVERIFY(controller.handleCatchupPlaybackEndedRecovery());
-    QVERIFY(controller.m_catchupSeamlessFallbackDeferred);
-    QVERIFY(controller.m_catchupSeamlessFallbackTimer.isActive());
-    QVERIFY(QMetaObject::invokeMethod(&controller.m_catchupSeamlessFallbackTimer, "timeout", Qt::DirectConnection));
-    QVERIFY(!controller.m_catchupSeamlessPending);
-    QVERIFY(!controller.m_catchupSeamlessFallbackDeferred);
-    QVERIFY(!controller.m_catchupSeamlessFallbackTimer.isActive());
-    QVERIFY(controller.m_catchupTimelineReloadInFlight);
+    QVERIFY(controller.m_catchupSession.standby().fallbackDeferred());
+    QVERIFY(controller.m_catchupSession.standby().fallbackTimer().isActive());
+    QVERIFY(QMetaObject::invokeMethod(&controller.m_catchupSession.standby().fallbackTimer(), "timeout", Qt::DirectConnection));
+    QVERIFY(!controller.m_catchupSession.standby().pending());
+    QVERIFY(!controller.m_catchupSession.standby().fallbackDeferred());
+    QVERIFY(!controller.m_catchupSession.standby().fallbackTimer().isActive());
+    QVERIFY(controller.m_catchupSession.reloadInFlight());
     controller.stop();
 }
 
@@ -5158,19 +5198,19 @@ void AppModelTests::playerControllerRecoversFailedContinuousAtWatchedPosition()
     player->m_cachedTelemetry.demuxerCacheDurationSeconds = 13.87;
     QVERIFY(!controller.recoverFailedContinuousCatchup());
     QVERIFY(!controller.canUseSeamlessCatchupRolling());
-    QVERIFY(!controller.m_catchupTimelineReloadInFlight);
+    QVERIFY(!controller.m_catchupSession.reloadInFlight());
     player->m_cachedTelemetry.demuxerCacheDurationSeconds = 0.5;
     QVERIFY(controller.recoverFailedContinuousCatchup());
-    QVERIFY(controller.m_catchupTimelineReloadInFlight);
-    QCOMPARE(controller.m_catchupTimelineReloadStreamBaseOffsetSeconds, 120.0);
-    QVERIFY(!controller.m_catchupSeamlessPending);
+    QVERIFY(controller.m_catchupSession.reloadInFlight());
+    QCOMPARE(controller.m_catchupSession.m_reloadBase, 120.0);
+    QVERIFY(!controller.m_catchupSession.standby().pending());
     controller.runCatchupTimelineReload();
-    QVERIFY(!controller.m_catchupReconnectResumeStreamRelativeSeconds.has_value());
-    QCOMPARE(controller.m_catchupTimelinePositionSeconds, 120.0);
+    QVERIFY(!controller.m_catchupSession.m_catchupReconnectResumeStreamRelativeSeconds.has_value());
+    QCOMPARE(controller.m_catchupSession.m_catchupTimelinePositionSeconds, 120.0);
     player->fileLoaded();
-    QVERIFY(!controller.m_catchupRecoveryAlignmentActive);
+    QVERIFY(!controller.m_catchupSession.alignmentActive());
     QVERIFY(!controller.advanceCatchupRecoveryAlignment());
-    QVERIFY(controller.m_catchupContinuousFallback);
+    QVERIFY(controller.m_catchupSession.m_catchupContinuousFallback);
     controller.stop();
 }
 
@@ -5184,28 +5224,28 @@ void AppModelTests::playerControllerRecoveryWaitsForCachedResumePoint()
     controller.playCatchupChannel(channel, QStringLiteral("http://provider.example/archive.ts"),
                                  QStringLiteral("Paced recovery"), start, start.addSecs(2400));
     controller.m_positionTimer.stop();
-    controller.m_catchupContinuousFallback = true;
-    controller.m_catchupTimelinePositionSeconds = 643.389;
-    controller.m_catchupReconnectResumeStreamRelativeSeconds = 43.389;
+    controller.m_catchupSession.m_catchupContinuousFallback = true;
+    controller.m_catchupSession.m_catchupTimelinePositionSeconds = 643.389;
+    controller.m_catchupSession.m_catchupReconnectResumeStreamRelativeSeconds = 43.389;
     auto *player = controller.playbackPlayer();
     player->fileLoaded();
-    QVERIFY(controller.m_catchupRecoveryAlignmentActive);
+    QVERIFY(controller.m_catchupSession.alignmentActive());
     player->m_cachedTelemetry.positionSeconds = 1.0;
     player->m_cachedTelemetry.demuxerSeekableRangeSeconds = std::make_pair(0.0, 5.0);
     QVERIFY(controller.advanceCatchupRecoveryAlignment());
-    QVERIFY(!controller.m_catchupRecoveryAlignmentSeekIssued);
-    QCOMPARE(controller.m_catchupTimelinePositionSeconds, 643.389);
+    QVERIFY(!controller.m_catchupSession.alignmentSeekIssued());
+    QCOMPARE(controller.m_catchupSession.m_catchupTimelinePositionSeconds, 643.389);
     player->m_cachedTelemetry.demuxerSeekableRangeSeconds = std::make_pair(0.0, 45.0);
     QVERIFY(controller.advanceCatchupRecoveryAlignment());
-    QVERIFY(controller.m_catchupRecoveryAlignmentSeekIssued);
+    QVERIFY(controller.m_catchupSession.alignmentSeekIssued());
     QVERIFY(controller.advanceCatchupRecoveryAlignment()); // Command alone does not confirm a seek.
     controller.togglePause(); // Manual pause retains ownership of the waiting transport.
     QVERIFY(controller.m_userPausedManually);
     player->m_cachedTelemetry.positionSeconds = 43.4;
     QVERIFY(!controller.advanceCatchupRecoveryAlignment());
-    QVERIFY(!controller.m_catchupRecoveryAlignmentActive);
+    QVERIFY(!controller.m_catchupSession.alignmentActive());
     QVERIFY(controller.m_userPausedManually);
-    QVERIFY(!controller.m_catchupReconnectResumeStreamRelativeSeconds.has_value());
+    QVERIFY(!controller.m_catchupSession.m_catchupReconnectResumeStreamRelativeSeconds.has_value());
     controller.stop();
 }
 
@@ -5230,36 +5270,36 @@ void AppModelTests::playerControllerCatchupTimelineShowsEpgEndAndReturnsLiveFrom
         QStringLiteral("http://provider.example/timeshift/user/pass/61/2026-05-18:12-00/4601.ts"));
     QVERIFY(QMetaObject::invokeMethod(playerController.player(), "fileLoaded", Qt::DirectConnection));
 
-    playerController.m_catchupTimelinePositionSeconds = 0.0;
+    playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 0.0;
     playerController.seekTimeshiftToFraction(38.0 / 60.0);
-    QCOMPARE(playerController.m_catchupTimelinePositionSeconds, 0.0);
+    QCOMPARE(playerController.m_catchupSession.m_catchupTimelinePositionSeconds, 0.0);
     QVERIFY(playerController.catchupTimelineNoticeText().contains(QStringLiteral("3 minutes")));
-    QVERIFY(!playerController.m_catchupTimelineReloadInFlight);
+    QVERIFY(!playerController.m_catchupSession.reloadInFlight());
     QCOMPARE(playerController.catchupTimelineEndEpochMs(), runningStopUtc.toMSecsSinceEpoch());
     QVERIFY(std::abs(playerController.catchupTimelineDurationSeconds() - 3600.0) < 1.0);
     QVERIFY(playerController.catchupTimelineAvailableEdgeEpochMs()
         <= QDateTime::currentDateTimeUtc().addSecs(-180).toMSecsSinceEpoch());
 
     playerController.seekTimeshiftRelative(2300.0);
-    QCOMPARE(playerController.m_catchupTimelinePositionSeconds, 0.0);
+    QCOMPARE(playerController.m_catchupSession.m_catchupTimelinePositionSeconds, 0.0);
 
     playerController.seekTimeshiftToFraction(0.50);
-    QVERIFY(std::abs(playerController.m_catchupTimelinePositionSeconds - 1800.0) < 1.0);
+    QVERIFY(std::abs(playerController.m_catchupSession.m_catchupTimelinePositionSeconds - 1800.0) < 1.0);
     QVERIFY(playerController.catchupTimelineNoticeText().isEmpty());
 
     // Respect source configuration, not a hardcoded three-minute exclusion.
-    playerController.m_catchupSafetySeconds = 300;
+    playerController.m_catchupSession.m_catchupSafetySeconds = 300;
     QVERIFY(playerController.seekCatchupToTimelinePosition(2050.0));
     QVERIFY(!playerController.seekCatchupToTimelinePosition(2150.0));
     QVERIFY(playerController.catchupTimelineNoticeText().contains(QStringLiteral("5 minutes")));
 
     // A recently ended programme still displays its full end, while the
     // unpublished tail remains unavailable for seeking.
-    playerController.m_catchupProgramStopUtc = QDateTime::currentDateTimeUtc().addSecs(-60);
-    QCOMPARE(playerController.catchupTimelineEndEpochMs(), playerController.m_catchupProgramStopUtc.toMSecsSinceEpoch());
-    const auto retainedPosition = playerController.m_catchupTimelinePositionSeconds;
+    playerController.m_catchupSession.m_catchupProgramStopUtc = QDateTime::currentDateTimeUtc().addSecs(-60);
+    QCOMPARE(playerController.catchupTimelineEndEpochMs(), playerController.m_catchupSession.m_catchupProgramStopUtc.toMSecsSinceEpoch());
+    const auto retainedPosition = playerController.m_catchupSession.m_catchupTimelinePositionSeconds;
     playerController.seekTimeshiftToFraction(1.0);
-    QCOMPARE(playerController.m_catchupTimelinePositionSeconds, retainedPosition);
+    QCOMPARE(playerController.m_catchupSession.m_catchupTimelinePositionSeconds, retainedPosition);
     QVERIFY(playerController.catchupTimelineNoticeText().contains(QStringLiteral("5 minutes")));
 
     playerController.playCatchupChannel(
@@ -5270,10 +5310,10 @@ void AppModelTests::playerControllerCatchupTimelineShowsEpgEndAndReturnsLiveFrom
         QDateTime::currentDateTimeUtc().addSecs(-3600),
         QStringLiteral("http://provider.example/timeshift/user/pass/61/2026-05-18:10-00/4601.ts"));
     QVERIFY(QMetaObject::invokeMethod(playerController.player(), "fileLoaded", Qt::DirectConnection));
-    playerController.m_catchupTimelinePositionSeconds = 0.0;
+    playerController.m_catchupSession.m_catchupTimelinePositionSeconds = 0.0;
     playerController.seekTimeshiftToFraction(0.95);
-    QVERIFY(playerController.m_catchupTimelinePositionSeconds > 0.0);
-    QCOMPARE(playerController.catchupTimelineEndEpochMs(), playerController.m_catchupProgramStopUtc.toMSecsSinceEpoch());
+    QVERIFY(playerController.m_catchupSession.m_catchupTimelinePositionSeconds > 0.0);
+    QCOMPARE(playerController.catchupTimelineEndEpochMs(), playerController.m_catchupSession.m_catchupProgramStopUtc.toMSecsSinceEpoch());
     QVERIFY(playerController.catchupTimelineNoticeText().isEmpty());
 
     // Endless sessions use the watched programme's full EPG end too. A future
@@ -5282,7 +5322,7 @@ void AppModelTests::playerControllerCatchupTimelineShowsEpgEndAndReturnsLiveFrom
         channel, QStringLiteral("http://127.0.0.1/catchup4603"),
         QStringLiteral("Running Show"), runningStartUtc, runningStopUtc,
         QStringLiteral("http://provider.example/timeshift/user/pass/61/2026-05-18:12-00/4601.ts"));
-    playerController.m_catchupEndless = true;
+    playerController.m_catchupSession.m_catchupEndless = true;
     EpgEntry runningProgram;
     runningProgram.start = runningStartUtc;
     runningProgram.stop = runningStopUtc;
@@ -5343,7 +5383,7 @@ void AppModelTests::playerControllerSharedPrimarySignalsAndRetuneStayOnActivePla
     QVERIFY(playerController.usingSharedPlayback());
     QCOMPARE(playerController.player(), &promotedPrimaryPlayer);
     QCOMPARE(playerController.currentChannel().value(QStringLiteral("id")).toInt(), replacementChannel.id);
-    QVERIFY(playerController.m_resumePlaybackAfterLoad);
+    QVERIFY(playerController.m_buffering.startupPending());
     QVERIFY(promotedPrimaryPlayer.m_startupBufferingStrictMode);
 
     QVERIFY(QMetaObject::invokeMethod(&promotedPrimaryPlayer, "fileLoaded", Qt::DirectConnection));
@@ -5411,6 +5451,42 @@ void AppModelTests::mpvPlayerRenderCallbackUpdatesHeartbeatTimestamp()
     pendingItem.reset();
     QCoreApplication::sendPostedEvents(&player, QEvent::MetaCall);
     QCOMPARE(player.m_updateTarget.data(), static_cast<QObject *>(&item));
+}
+
+void AppModelTests::mpvPlayerDefersIdleBackendInitialization()
+{
+    OKILTV::Player::MpvPlayer player;
+    QSignalSpy errors(&player, &OKILTV::Player::MpvPlayer::errorOccurred);
+    player.setVolume(37);
+    player.setAudioEnabled(false);
+    player.stop();
+    QVERIFY(player.diagnostics().isEmpty());
+    QVERIFY(!player.propertyDouble("volume").has_value());
+    QCOMPARE(errors.count(), 0);
+
+    QVERIFY(player.ensureInitialized());
+    QCOMPARE(player.propertyDouble("volume"), std::optional<double>(37.0));
+    QCOMPARE(player.propertyString("aid").value_or(QString()), QStringLiteral("no"));
+    player.setAudioEnabled(true);
+    player.setVolume(62);
+    QTRY_COMPARE(player.propertyDouble("volume"), std::optional<double>(62.0));
+    QTRY_COMPARE(player.propertyString("aid").value_or(QString()), QStringLiteral("auto"));
+
+    player.unload();
+    player.stop();
+    QVERIFY(!player.propertyDouble("volume").has_value());
+    QVERIFY(player.ensureInitialized());
+    QCOMPARE(player.propertyDouble("volume"), std::optional<double>(62.0));
+
+    PlayerController controller;
+    Channel channel;
+    channel.id = 1;
+    channel.name = QStringLiteral("Lazy standby test");
+    channel.streamUrl = QStringLiteral("http://127.0.0.1/lazy-standby.ts");
+    controller.playChannel(channel);
+    QVERIFY(controller.m_catchupStandbyPlayer.diagnostics().isEmpty());
+    controller.stop();
+    QVERIFY(controller.m_catchupStandbyPlayer.diagnostics().isEmpty());
 }
 
 void AppModelTests::mpvPlayerInitializationErrorAllowsStateQueries()
@@ -5529,14 +5605,14 @@ void AppModelTests::playerControllerReconnectRebuildsReserveOnSameConnection()
     channel.id = 176;
     channel.streamUrl = QStringLiteral("http://127.0.0.1/recovery");
     c.m_currentChannel = channel;
-    c.m_reconnectActive = true;
-    c.m_reconnectAttemptInFlight = true;
-    c.m_reconnectAttemptCount = 1;
-    c.m_reconnectFileLoaded = true;
-    c.m_reconnectReservePending = true;
-    c.m_reconnectReserveTargetSeconds = 7.5;
-    c.m_reconnectReserveProgressTimer.start();
-    c.m_reconnectTotalAttemptTimer.start();
+    c.m_recovery.start();
+    c.m_recovery.beginLoad(false, 3.0, c.m_liveDeliveryClock.elapsed());
+    c.m_recovery.m_reconnectAttemptCount = 1;
+    c.m_recovery.loaded(c.m_liveDeliveryClock.elapsed());
+    c.m_recovery.m_phase = OKILTV::App::Playback::PlaybackRecovery::Phase::RebuildingReserve;
+    c.m_recovery.m_reserveTarget = 7.5;
+    c.m_recovery.m_reserveProgressMs = c.m_liveDeliveryClock.elapsed();
+    c.m_recovery.m_totalStartedMs = c.m_liveDeliveryClock.elapsed();
     auto &t = c.m_player.m_cachedTelemetry;
     t.pauseState = true;
     t.cacheSpeedBytesPerSecond = 4198.0;
@@ -5544,30 +5620,30 @@ void AppModelTests::playerControllerReconnectRebuildsReserveOnSameConnection()
         t.demuxerCacheDurationSeconds = cache;
         c.updatePosition();
         c.handleReconnectAttemptTick();
-        QVERIFY(c.m_reconnectReservePending);
-        QVERIFY(!c.m_reconnectStabilizing);
-        QCOMPARE(c.m_reconnectAttemptCount, 1);
-        QVERIFY(c.m_reconnectAttemptInFlight);
+        QVERIFY(c.m_recovery.reservePending());
+        QVERIFY(!c.m_recovery.stabilizing());
+        QCOMPARE(c.m_recovery.attempts(), 1);
+        QVERIFY(c.m_recovery.attemptInFlight());
     }
     t.demuxerCacheDurationSeconds = 7.6;
     QVERIFY(!c.advanceReconnectReserve());
-    QVERIFY(!c.m_reconnectReservePending);
+    QVERIFY(!c.m_recovery.reservePending());
     QVERIFY(!c.m_player.m_pauseRequested);
     // Another gap rebuilds the reserve without replacing the transport.
-    c.m_reconnectStabilizing = true;
-    c.m_reconnectRecoveryUnhealthyTickCount = 2;
+    c.m_recovery.m_phase = OKILTV::App::Playback::PlaybackRecovery::Phase::Stabilizing;
+    c.m_recovery.m_reconnectRecoveryUnhealthyTickCount = 2;
     t.demuxerCacheDurationSeconds = 0.7;
     QVERIFY(c.advanceReconnectReserve());
     QVERIFY(c.m_player.m_pauseRequested);
-    QVERIFY(!c.m_reconnectStabilizing);
+    QVERIFY(!c.m_recovery.stabilizing());
     for (int i = 0; i < 4; ++i) {
         c.updatePosition();
         c.handleReconnectAttemptTick();
     }
-    QCOMPARE(c.m_reconnectAttemptCount, 1);
+    QCOMPARE(c.m_recovery.attempts(), 1);
     t.demuxerCacheDurationSeconds = 8.0;
     QVERIFY(!c.advanceReconnectReserve());
-    QCOMPARE(c.m_reconnectRecoveryUnhealthyTickCount, 0);
+    QCOMPARE(c.m_recovery.m_reconnectRecoveryUnhealthyTickCount, 0);
 }
 
 void AppModelTests::playerControllerReconnectReserveHonorsStopAndFailure()
@@ -5577,16 +5653,16 @@ void AppModelTests::playerControllerReconnectReserveHonorsStopAndFailure()
         c.m_positionTimer.stop();
         c.m_liveDeliveryTimer.stop();
         c.m_currentChannel = Channel {};
-        c.m_reconnectActive = true;
-        c.m_reconnectAttemptInFlight = true;
-        c.m_reconnectFileLoaded = true;
-        c.m_reconnectReservePending = true;
-        c.m_reconnectReserveTargetSeconds = 7.5;
-        c.m_reconnectReserveProgressTimer.start();
+        c.m_recovery.start();
+        c.m_recovery.beginLoad(false, 3.0, c.m_liveDeliveryClock.elapsed());
+        c.m_recovery.loaded(c.m_liveDeliveryClock.elapsed());
+        c.m_recovery.m_phase = OKILTV::App::Playback::PlaybackRecovery::Phase::RebuildingReserve;
+        c.m_recovery.m_reserveTarget = 7.5;
+        c.m_recovery.m_reserveProgressMs = c.m_liveDeliveryClock.elapsed();
         c.m_player.m_cachedTelemetry.demuxerCacheDurationSeconds = 2.0;
         if (manualPause) {
             c.togglePause();
-            QVERIFY(!c.m_reconnectActive);
+            QVERIFY(!c.m_recovery.active());
             QVERIFY(c.m_userPausedManually);
             QVERIFY(c.m_player.m_pauseRequested);
         } else {
@@ -5594,9 +5670,9 @@ void AppModelTests::playerControllerReconnectReserveHonorsStopAndFailure()
             state.eof = true;
             c.m_player.m_cachedTelemetry.cacheReadState = state;
             QVERIFY(c.advanceReconnectReserve());
-            QVERIFY(!c.m_reconnectAttemptInFlight);
+            QVERIFY(!c.m_recovery.attemptInFlight());
         }
-        QVERIFY(!c.m_reconnectReservePending);
+        QVERIFY(!c.m_recovery.reservePending());
     }
 }
 
@@ -5606,19 +5682,19 @@ void AppModelTests::playerControllerReconnectReserveTimesOutWithoutProgress()
     c.m_positionTimer.stop();
     c.m_liveDeliveryTimer.stop();
     c.m_currentChannel = Channel {};
-    c.m_reconnectActive = true;
-    c.m_reconnectAttemptInFlight = true;
-    c.m_reconnectFileLoaded = true;
-    c.m_reconnectReservePending = true;
-    c.m_reconnectReserveTargetSeconds = 3.0;
+    c.m_recovery.start();
+    c.m_recovery.beginLoad(false, 3.0, c.m_liveDeliveryClock.elapsed());
+    c.m_recovery.loaded(c.m_liveDeliveryClock.elapsed());
+    c.m_recovery.m_phase = OKILTV::App::Playback::PlaybackRecovery::Phase::RebuildingReserve;
+    c.m_recovery.m_reserveTarget = 3.0;
     c.m_waitForDataStreamSeconds = 0.1;
-    c.m_reconnectReserveProgressTimer.start();
+    c.m_recovery.m_reserveProgressMs = c.m_liveDeliveryClock.elapsed();
     c.m_player.m_cachedTelemetry.demuxerCacheDurationSeconds = 0.0;
     c.m_player.m_cachedTelemetry.cacheSpeedBytesPerSecond = 4198.0;
     QTest::qWait(10100);
     QVERIFY(c.advanceReconnectReserve());
-    QVERIFY(!c.m_reconnectAttemptInFlight);
-    QVERIFY(!c.m_reconnectReservePending);
+    QVERIFY(!c.m_recovery.attemptInFlight());
+    QVERIFY(!c.m_recovery.reservePending());
 }
 
 void AppModelTests::playerControllerLiveReconnectAllowsFullStabilizationWindow()
@@ -5633,10 +5709,10 @@ void AppModelTests::playerControllerLiveReconnectAllowsFullStabilizationWindow()
     controller.m_currentChannel = channel;
     controller.m_currentPlaybackUrl = channel.streamUrl;
     controller.m_isPlaying = true;
-    controller.m_reconnectActive = true;
-    controller.m_reconnectAttemptInFlight = true;
-    controller.m_reconnectAttemptCount = 1;
-    controller.m_reconnectAttemptIssuedTimer.start();
+    controller.m_recovery.start();
+    controller.m_recovery.beginLoad(false, 3.0, controller.m_liveDeliveryClock.elapsed());
+    controller.m_recovery.m_reconnectAttemptCount = 1;
+    controller.m_recovery.m_attemptStartedMs = controller.m_liveDeliveryClock.elapsed();
     // Time establishing the connection must not consume the health window.
     QTest::qWait(1100);
     for (int i = 0; i < 12; ++i) {
@@ -5650,18 +5726,18 @@ void AppModelTests::playerControllerLiveReconnectAllowsFullStabilizationWindow()
         telemetry.cacheSpeedBytesPerSecond = i % 3 == 0 ? 1000000.0 : 0.0;
         controller.updatePosition();
         if (i == 0) {
-            QVERIFY(controller.m_reconnectStabilizing);
-            QVERIFY(controller.m_reconnectAttemptIssuedTimer.elapsed() < 1000);
+            QVERIFY(controller.m_recovery.stabilizing());
+            QVERIFY((controller.m_liveDeliveryClock.elapsed() - controller.m_recovery.m_attemptStartedMs) < 1000);
         }
         if (i < 11) {
             QTest::qWait(1000);
             controller.handleReconnectAttemptTick();
-            QVERIFY(controller.m_reconnectAttemptInFlight);
-            QCOMPARE(controller.m_reconnectAttemptCount, 1);
+            QVERIFY(controller.m_recovery.attemptInFlight());
+            QCOMPARE(controller.m_recovery.attempts(), 1);
         }
     }
-    QVERIFY(!controller.m_reconnectActive);
-    QVERIFY(!controller.m_reconnectAttemptInFlight);
+    QVERIFY(!controller.m_recovery.active());
+    QVERIFY(!controller.m_recovery.attemptInFlight());
 }
 
 void AppModelTests::playerControllerLiveWatchdogRespectsTuneGrace()
@@ -5684,15 +5760,15 @@ void AppModelTests::playerControllerLiveWatchdogRespectsTuneGrace()
     telemetry.cacheSpeedBytesPerSecond = 0.0;
     for (int i = 0; i < 5; ++i) {
         controller.updatePosition();
-        QVERIFY(!controller.m_reconnectActive);
+        QVERIFY(!controller.m_recovery.active());
     }
     // Once startup protection expires, a dead stream must still recover.
     controller.m_tuneAttemptTimer.invalidate();
     for (int i = 0; i < 4; ++i) {
         controller.updatePosition();
     }
-    QVERIFY(controller.m_reconnectActive);
-    QVERIFY(controller.m_reconnectTransportStopIssued);
+    QVERIFY(controller.m_recovery.active());
+    QVERIFY(controller.m_recovery.waitingStop());
 }
 
 void AppModelTests::timeshiftControllerPreparingUntilPlaybackAttached()
@@ -5955,7 +6031,7 @@ void AppModelTests::dateTimeFormatsApplyOnlyOnSaveAndRefreshCachedPrograms()
     QSignalSpy tuneSpy(harness.playerController.get(), &PlayerController::playbackChannelActivated);
     const auto playerObject = harness.playerController->playbackPlayerObject();
     harness.playerController->m_playbackMode = QStringLiteral("catchup");
-    harness.playerController->m_catchupDisplayProgram = program;
+    harness.playerController->m_catchupSession.m_catchupDisplayProgram = program;
 
     controller->setDateOrder(QStringLiteral("mdy"));
     controller->setTimeFormat(QStringLiteral("12h"));
@@ -6751,7 +6827,7 @@ void AppModelTests::catchupPipPreservesIndependentSessionsOnSwapAndClose()
     const auto stop = start.addSecs(3600);
     first->playCatchupChannel(channels[0], QStringLiteral("http://127.0.0.1/archive-one"),
         QStringLiteral("Archive One"), start, stop);
-    first->m_catchupTimelinePositionSeconds = 600;
+    first->m_catchupSession.m_catchupTimelinePositionSeconds = 600;
     first->m_userPausedManually = true;
     first->m_pauseToggleRequested = true;
     first->setVolume(37);
@@ -6762,7 +6838,7 @@ void AppModelTests::catchupPipPreservesIndependentSessionsOnSwapAndClose()
     QVERIFY(second);
     second->playCatchupChannel(channels[1], QStringLiteral("http://127.0.0.1/archive-two"),
         QStringLiteral("Archive Two"), start, stop);
-    second->m_catchupTimelinePositionSeconds = 1200;
+    second->m_catchupSession.m_catchupTimelinePositionSeconds = 1200;
     auto *secondBackend = second->player();
     QSignalSpy firstTune(first, &PlayerController::playbackChannelActivated);
     QSignalSpy secondTune(second, &PlayerController::playbackChannelActivated);
@@ -6772,8 +6848,8 @@ void AppModelTests::catchupPipPreservesIndependentSessionsOnSwapAndClose()
         QCOMPARE(harness.appController->m_playerController, multi->primaryController());
         QCOMPARE(first->player(), firstBackend);
         QCOMPARE(second->player(), secondBackend);
-        QCOMPARE(first->m_catchupTimelinePositionSeconds, 600.0);
-        QCOMPARE(second->m_catchupTimelinePositionSeconds, 1200.0);
+        QCOMPARE(first->m_catchupSession.m_catchupTimelinePositionSeconds, 600.0);
+        QCOMPARE(second->m_catchupSession.m_catchupTimelinePositionSeconds, 1200.0);
         QVERIFY(first->m_userPausedManually);
         QVERIFY(first->m_pauseToggleRequested);
         if (i == 0) {
@@ -6868,7 +6944,7 @@ void AppModelTests::catchupPipGuideStartsSecondArchiveAndTracksBothBookmarks()
     multi->focusTile(1);
     harness.appController->playCatchup(toVariantMap(channels[1]), toVariantMap(b));
     QVERIFY(first->inCatchupMode());
-    QCOMPARE(first->m_catchupProgramStartUtc, b.start);
+    QCOMPARE(first->m_catchupSession.m_catchupProgramStartUtc, b.start);
     QVERIFY(second->inCatchupMode());
     multi->focusTile(1);
     multi->exitMultiView();
@@ -7450,7 +7526,7 @@ void AppModelTests::appControllerPlayCatchupAllowsRunningProgramAfterSourceMargi
     harness.appController->playCatchup(channelVariant, programVariant);
 
     QCOMPARE(harness.playerController->playbackMode(), QStringLiteral("catchup"));
-    QCOMPARE(harness.playerController->m_catchupSafetySeconds, marginMinutes * 60);
+    QCOMPARE(harness.playerController->m_catchupSession.m_catchupSafetySeconds, marginMinutes * 60);
     const auto action = harness.appController->catchupActionState(channelVariant, programVariant);
     QVERIFY(action.value(QStringLiteral("enabled")).toBool());
     QCOMPARE(action.value(QStringLiteral("safetySeconds")).toInt(), marginMinutes * 60);
@@ -7565,7 +7641,7 @@ void AppModelTests::startupRestoresCatchup()
     QVERIFY(harness.playerController->currentChannelValue().has_value());
     QCOMPARE(harness.playerController->currentChannelValue()->id, channel.id);
     if (resume) {
-        QCOMPARE(harness.playerController->m_catchupTimelinePositionSeconds,
+        QCOMPARE(harness.playerController->m_catchupSession.m_catchupTimelinePositionSeconds,
             static_cast<double>(((3600 - remainingSeconds) / 60) * 60));
     } else {
         QCOMPARE(harness.playerController->currentPlaybackUrl(), channel.streamUrl);
@@ -7611,9 +7687,9 @@ void AppModelTests::startupRestoresEndlessXtreamCatchup()
     harness.epgService->loadFromEntries({}); // Startup has not downloaded EPG yet.
     QVERIFY(harness.appController->restoreStartupCatchup(channel));
     QTRY_COMPARE_WITH_TIMEOUT(harness.playerController->playbackMode(), QStringLiteral("catchup"), 5000);
-    QVERIFY(harness.playerController->m_catchupEndless);
-    QCOMPARE(harness.playerController->m_catchupStreamBaseOffsetSeconds, 1380.0);
-    QCOMPARE(harness.playerController->m_catchupProgramStartUtc,
+    QVERIFY(harness.playerController->m_catchupSession.m_catchupEndless);
+    QCOMPARE(harness.playerController->m_catchupSession.m_catchupStreamBaseOffsetSeconds, 1380.0);
+    QCOMPARE(harness.playerController->m_catchupSession.m_catchupProgramStartUtc,
         QDateTime::fromSecsSinceEpoch((program.start.toSecsSinceEpoch() / 60) * 60, QTimeZone::UTC));
     QCOMPARE(harness.playerController->catchupCurrentProgram().value(QStringLiteral("title")).toString(), program.title);
     emit harness.playerController->catchupProgressObserved(
@@ -7689,12 +7765,12 @@ void AppModelTests::appControllerCatchupResumePersistsAndHonorsExplicitStart()
     QTRY_COMPARE_WITH_TIMEOUT(harness.playerController->playbackMode(), QStringLiteral("catchup"), 5000);
     QCOMPARE(harness.playerController->catchupTimelinePositionSeconds(), 1380.0);
     if (xtream) {
-        QCOMPARE(harness.playerController->m_catchupStreamBaseOffsetSeconds, 1380.0);
-        QVERIFY(!harness.playerController->m_catchupPendingInitialSeekSeconds.has_value());
+        QCOMPARE(harness.playerController->m_catchupSession.m_catchupStreamBaseOffsetSeconds, 1380.0);
+        QVERIFY(!harness.playerController->m_catchupSession.m_catchupPendingInitialSeekSeconds.has_value());
         QVERIFY(harness.playerController->currentPlaybackUrl().contains(start.addSecs(1380).toString("yyyy-MM-dd:HH-mm")));
     } else {
-        QCOMPARE(harness.playerController->m_catchupStreamBaseOffsetSeconds, 1380.0);
-        QVERIFY(!harness.playerController->m_catchupPendingInitialSeekSeconds);
+        QCOMPARE(harness.playerController->m_catchupSession.m_catchupStreamBaseOffsetSeconds, 1380.0);
+        QVERIFY(!harness.playerController->m_catchupSession.m_catchupPendingInitialSeekSeconds);
     }
     harness.playerController->stop();
     // A failed load, with no confirmed position, must retain the bookmark.
@@ -7871,9 +7947,9 @@ void AppModelTests::playerControllerCatchupProgressIgnoresUnconfirmedTransport()
     const auto start = QDateTime::currentDateTimeUtc().addSecs(-7200);
     player.m_currentChannel = channel;
     player.m_playbackMode = QStringLiteral("catchup");
-    player.m_catchupProgramStartUtc = start;
-    player.m_catchupProgramStopUtc = start.addSecs(3600);
-    player.m_catchupStreamBaseOffsetSeconds = 1200;
+    player.m_catchupSession.m_catchupProgramStartUtc = start;
+    player.m_catchupSession.m_catchupProgramStopUtc = start.addSecs(3600);
+    player.m_catchupSession.m_catchupStreamBaseOffsetSeconds = 1200;
     player.m_isPlaying = true;
     QList<CatchupProgressSample> samples;
     connect(&player, &PlayerController::catchupProgressObserved, this, [&samples](const CatchupProgressSample &sample) {
@@ -7881,29 +7957,29 @@ void AppModelTests::playerControllerCatchupProgressIgnoresUnconfirmedTransport()
     });
     player.publishCatchupProgress(227);
     QVERIFY(samples.isEmpty()); // No file-loaded confirmation yet.
-    player.m_catchupProgressTransportReady = true;
+    player.m_catchupSession.m_catchupProgressTransportReady = true;
     player.publishCatchupProgress(227);
     QCOMPARE(samples.size(), 1);
     QCOMPARE(samples.last().watchedTime, start.addSecs(1427));
-    player.m_catchupTimelinePositionSeconds = 2400; // Optimistic slider target is ignored.
-    player.m_catchupTimelineReloadInFlight = true;
+    player.m_catchupSession.m_catchupTimelinePositionSeconds = 2400; // Optimistic slider target is ignored.
+    player.m_catchupSession.m_seekPhase = OKILTV::App::Playback::CatchupPlaybackSession::SeekPhase::WaitingStop;
     player.publishCatchupProgress(0);
     QCOMPARE(samples.size(), 1);
-    player.m_catchupTimelineReloadInFlight = false;
-    player.m_catchupProgressSeekTargetSeconds = 1800;
+    player.m_catchupSession.cancelReload();
+    player.m_catchupSession.m_catchupProgressSeekTargetSeconds = 1800;
     player.publishCatchupProgress(0); // Unapplied/failed native seek.
     QCOMPARE(samples.size(), 1);
     player.publishCatchupProgress(603);
     QCOMPARE(samples.size(), 2);
     QCOMPARE(samples.last().watchedTime, start.addSecs(1803));
-    player.m_catchupReconnectResumeStreamRelativeSeconds = 603;
+    player.m_catchupSession.m_catchupReconnectResumeStreamRelativeSeconds = 603;
     player.publishCatchupProgress(0);
     QCOMPARE(samples.size(), 2);
-    player.m_catchupReconnectResumeStreamRelativeSeconds.reset();
-    player.m_catchupRecoveryAlignmentActive = true;
+    player.m_catchupSession.m_catchupReconnectResumeStreamRelativeSeconds.reset();
+    player.m_catchupSession.setAlignmentActive(true);
     player.publishCatchupProgress(0);
     QCOMPARE(samples.size(), 2);
-    player.m_catchupRecoveryAlignmentActive = false;
+    player.m_catchupSession.setAlignmentActive(false);
     player.m_isPlaying = false;
     player.publishCatchupProgress(650);
     QCOMPARE(samples.size(), 2);
@@ -8119,7 +8195,7 @@ void AppModelTests::appControllerPlayCatchupXtreamPreResolvesRedirectUrl()
         harness.playerController->currentPlaybackUrl(),
         QStringLiteral("http://127.0.0.1:%1/archive/final.m3u8").arg(port),
         5000);
-    QVERIFY(harness.playerController->m_catchupEndless);
+    QVERIFY(harness.playerController->m_catchupSession.m_catchupEndless);
 }
 
 void AppModelTests::catchupPipPendingRedirectIsCancelledWhenClosed()
@@ -8336,7 +8412,7 @@ void AppModelTests::appControllerPlayCatchupXtreamRedirectFailureFallsBackToOrig
     QVERIFY(after);
     QVERIFY(harness.playerController->currentPlaybackUrl() == target->url
         || harness.playerController->currentPlaybackUrl() == after->url);
-    QCOMPARE(harness.playerController->currentPlaybackUrl(), harness.playerController->m_catchupCanonicalPlaybackUrl);
+    QCOMPARE(harness.playerController->currentPlaybackUrl(), harness.playerController->m_catchupSession.m_catchupCanonicalPlaybackUrl);
 }
 
 void AppModelTests::appControllerPlayCatchupAtOffsetXtreamLiveProgramUsesOriginDurationDelta()
@@ -8433,7 +8509,7 @@ void AppModelTests::appControllerPlayCatchupAtOffsetXtreamLiveProgramUsesOriginD
     const auto shiftedExpectedTimestamp = expectedTimestamp.addSecs(8 * 60).toString(QStringLiteral("yyyy-MM-dd:HH-mm"));
     QCOMPARE(effectiveMatch.captured(3), shiftedExpectedTimestamp);
     QVERIFY(effectiveUrl.contains(QStringLiteral("/964.ts")));
-    QVERIFY(harness.playerController->m_catchupEndless);
+    QVERIFY(harness.playerController->m_catchupSession.m_catchupEndless);
     QVERIFY(!harness.playerController->m_currentLoadfileOptions.contains(QStringLiteral("length=")));
 }
 
@@ -9143,6 +9219,41 @@ void AppModelTests::multiviewExitAfterSwapKeepsPromotedPrimaryWithoutRetune()
     QCOMPARE(harness.playerController->player(), promotedPrimaryPlayer);
     QCOMPARE(activationSpy.count(), 0);
     QCOMPARE(currentChannelSpy.count(), 0);
+}
+
+void AppModelTests::multiviewStartupCleanupPreservesPlaybackAndRunsOnce()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    harness.appController->initialize();
+    QTRY_VERIFY_WITH_TIMEOUT(!harness.appController->isBusy(), 5000);
+    const auto channels = harness.channelListModel->allChannels();
+    QVERIFY(channels.size() >= 2);
+    QVERIFY(harness.channelListModel->activateById(channels.first().id));
+    QVERIFY(harness.multiViewController->togglePictureInPicture(channels.last().id));
+    const auto tiles = harness.multiViewController->tiles();
+    const auto channel = harness.playerController->currentChannel();
+    auto *primary = harness.playerController->player();
+    auto *multiView = harness.multiViewController.get();
+    QSignalSpy layoutChanges(multiView, &MultiViewController::layoutModeChanged);
+
+    multiView->runStartupPlayerCleanup();
+    QCOMPARE(multiView->m_retiredPlayers.size(), std::size_t { 1 });
+    QVERIFY(!multiView->m_retiredPlayers.front()->diagnostics().isEmpty());
+    multiView->runStartupPlayerCleanup();
+    QCOMPARE(multiView->m_retiredPlayers.size(), std::size_t { 1 });
+    QTRY_VERIFY_WITH_TIMEOUT(multiView->m_retiredPlayers.empty(), 2000);
+    const auto remainingTiles = multiView->tiles();
+    QCOMPARE(remainingTiles.size(), tiles.size());
+    for (qsizetype index = 0; index < tiles.size(); ++index) {
+        QCOMPARE(remainingTiles.at(index).toMap().value(QStringLiteral("playerObject")),
+            tiles.at(index).toMap().value(QStringLiteral("playerObject")));
+    }
+    QCOMPARE(harness.playerController->currentChannel(), channel);
+    QCOMPARE(harness.playerController->player(), primary);
+    QCOMPARE(layoutChanges.count(), 0);
+    multiView->runStartupPlayerCleanup();
+    QVERIFY(multiView->m_retiredPlayers.empty());
 }
 
 void AppModelTests::multiviewExitAfterSwapDefersDetachedPlayerCleanup()
@@ -10054,6 +10165,39 @@ void AppModelTests::channelListModelHidesDeselectedGroupsUntilExplicitGroupIsCho
     settings.current().hiddenGroupsByProfile[QStringLiteral("profile-a")].clear();
     model.refreshFilter();
     QCOMPARE(model.filteredCount(), 2);
+}
+
+void AppModelTests::startupGroupSyncDoesNotDecryptChannelUrls()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    const auto profile = harness.activeProfileId();
+    const auto key = guidToString(profile);
+    Channel channel;
+    channel.id = 1;
+    channel.profileId = profile;
+    channel.name = QStringLiteral("Fixture");
+    channel.categoryId = QStringLiteral("Sports");
+    channel.streamUrl = QStringLiteral("https://fixture.invalid/secret");
+    harness.database->upsertChannels({ channel });
+    const auto connectionName = QStringLiteral("startup-group-metadata-fixture");
+    {
+        auto raw = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        raw.setDatabaseName(harness.database->databaseFilePath());
+        QVERIFY(raw.open());
+        QSqlQuery query(raw);
+        QVERIFY(query.exec(QStringLiteral("UPDATE channels SET stream_url='okiltv-secret:v99:unavailable'")));
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+    // Keep the source inactive: startup must reconcile its groups without
+    // loading any playback data, even when its cached URLs cannot be decrypted.
+    harness.settings->setActiveProfileId(std::nullopt);
+    harness.settings->current().hiddenGroupsByProfile[key] = { QStringLiteral("Sports") };
+    harness.appController->initialize();
+    QCOMPARE(harness.settings->current().groupOrderByProfile.value(key),
+        (QStringList { QStringLiteral("__favourites__"), QStringLiteral("Sports") }));
+    QCOMPARE(harness.settings->current().hiddenGroupsByProfile.value(key), QStringList { QStringLiteral("Sports") });
+    QVERIFY(!harness.appController->isBusy());
 }
 
 void AppModelTests::sourceGroupsThreshold_data()
@@ -11970,6 +12114,51 @@ void AppModelTests::epgRefreshFailureKeepsStaleCacheLoaded()
     QVERIFY(harness.appController->debugSummary().contains(QStringLiteral("simulated network failure")));
     QCOMPARE(harness.epgService->allEntries().first().title, QStringLiteral("Cached Stale"));
     QCOMPARE(network->callCount(url), 1);
+}
+
+void AppModelTests::playerControllerQueuedProgrammeStopCannotStopNewTune()
+{
+    PlayerController controller;
+    controller.m_positionTimer.stop();
+    controller.m_liveDeliveryTimer.stop();
+    const auto start = QDateTime::currentDateTimeUtc().addSecs(-7200);
+    controller.m_playbackMode = QStringLiteral("catchup");
+    controller.m_catchupSession.setProgramStartUtc(start);
+    controller.m_catchupSession.setProgramStopUtc(start.addSecs(3600));
+    controller.m_catchupSession.setTimelinePositionSeconds(3600.0);
+    QVERIFY(controller.maybeStopCatchupAtProgrammeBoundary(3600.0, 0.0, QStringLiteral("test")));
+    Channel next;
+    next.id = 9281;
+    next.streamUrl = QStringLiteral("http://127.0.0.1:1/new.ts");
+    controller.playChannel(next);
+    QCoreApplication::sendPostedEvents(&controller, QEvent::MetaCall);
+    QVERIFY(controller.currentChannelValue());
+    QCOMPARE(controller.currentChannelValue()->id, next.id);
+    QCOMPARE(controller.currentPlaybackUrl(), next.streamUrl);
+    controller.stop();
+}
+
+void AppModelTests::playerControllerRecoveryRespectsPauseAndPendingReload()
+{
+    PlayerController controller;
+    controller.m_positionTimer.stop();
+    controller.m_liveDeliveryTimer.stop();
+    Channel channel;
+    channel.id = 9282;
+    channel.streamUrl = QStringLiteral("http://127.0.0.1:1/live.ts");
+    controller.m_currentChannel = channel;
+    controller.m_userPausedManually = true;
+    controller.startReconnectLoop(QStringLiteral("late-error"));
+    QVERIFY(!controller.m_recovery.active());
+    QVERIFY(controller.m_userPausedManually);
+    controller.m_userPausedManually = false;
+    controller.m_playbackMode = QStringLiteral("catchup");
+    controller.m_currentPlaybackUrl = channel.streamUrl;
+    QVERIFY(controller.m_catchupSession.beginReload(120.0, QStringLiteral("archive"), 120.0));
+    controller.startReconnectLoop(QStringLiteral("teardown-error"));
+    QVERIFY(!controller.m_recovery.active());
+    QCOMPARE(controller.m_catchupSession.reloadUrl(), QStringLiteral("archive"));
+    controller.stop();
 }
 
 QTEST_MAIN(AppModelTests)

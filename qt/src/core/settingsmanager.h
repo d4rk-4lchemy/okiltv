@@ -4,6 +4,7 @@
 #include "sourcestore.h"
 
 #include <QHash>
+#include <QJsonArray>
 #include <QSet>
 #include <QString>
 
@@ -46,7 +47,6 @@ private:
     void rebuildSummaryMirrorFromSourceSummaries();
     bool saveSourceSummaries();
     void clearProfileDetailCache(const QUuid &id);
-    void clearMissingProfileArtifacts(const QSet<QUuid> &knownIds);
     void migrateLegacyProfilesIfNeeded(const AppSettings &legacySettings);
     QList<SourceSummary> buildSummariesFromProfiles(const QList<ServerProfile> &profiles) const;
     static SourceSummary toSummary(const ServerProfile &profile);
@@ -57,7 +57,8 @@ private:
     mutable QList<SourceSummary> m_sourceSummaries;
     mutable QHash<QUuid, ServerProfile> m_profileDetailCache;
     SourceStore m_sourceStore;
-    QString m_lastLoadError;
+    mutable QString m_lastLoadError;
+    QJsonArray m_unavailableProtectedSettings;
     mutable QString m_lastSaveError;
 };
 

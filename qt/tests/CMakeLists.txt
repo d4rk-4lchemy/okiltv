@@ -1,3 +1,11 @@
+qt_add_executable(OKILTVQtDatabaseStartupTests
+    tst_databasestartup.cpp
+    ../src/app/databasestartup.cpp
+    ../src/app/databasestartup.h)
+target_link_libraries(OKILTVQtDatabaseStartupTests PRIVATE Qt6::Widgets Qt6::Test)
+add_test(NAME OKILTVQtDatabaseStartupTests COMMAND OKILTVQtDatabaseStartupTests)
+set_tests_properties(OKILTVQtDatabaseStartupTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 qt_add_executable(OKILTVQtCoreTests
     tst_core.cpp
     ../src/core/appdatapaths.cpp
@@ -31,6 +39,7 @@ qt_add_executable(OKILTVQtCoreTests
     ../src/core/redaction.h
     ../src/core/settingsmanager.cpp
     ../src/core/settingsmanager.h
+    ../src/core/secretprotection.cpp
     ../src/core/sourcestore.cpp
     ../src/core/sourcestore.h
     ../src/core/xtreamservice.cpp
@@ -72,6 +81,14 @@ qt_add_executable(OKILTVQtAppTests
     ../src/app/nownextmodel.h
     ../src/app/portableruntimecontroller.cpp
     ../src/app/portableruntimecontroller.h
+    ../src/app/playback/playbackbuffering.cpp
+    ../src/app/playback/playbackbuffering.h
+    ../src/app/playback/playbackrecovery.cpp
+    ../src/app/playback/playbackrecovery.h
+    ../src/app/playback/catchupplaybacksession.cpp
+    ../src/app/playback/catchupplaybacksession.h
+    ../src/app/playback/catchupstandbytransition.cpp
+    ../src/app/playback/catchupstandbytransition.h
     ../src/app/playercontroller.cpp
     ../src/app/playercontroller.h
     ../src/app/profilesmodel.cpp
@@ -119,6 +136,7 @@ qt_add_executable(OKILTVQtAppTests
     ../src/core/redaction.h
     ../src/core/settingsmanager.cpp
     ../src/core/settingsmanager.h
+    ../src/core/secretprotection.cpp
     ../src/core/sourcestore.cpp
     ../src/core/sourcestore.h
     ../src/core/xtreamservice.cpp
@@ -131,6 +149,7 @@ qt_add_executable(OKILTVQtAppTests
     ../src/player/mpegtstimestampnormalizer.h
     ../src/player/livebuffertuner.cpp
     ../src/player/livebuffertuner.h
+    ../src/player/cachepolicy.cpp
     ../src/player/mpvplayer.cpp
     ../src/player/mpvplayer.h
     ../src/player/mpvvideoitem.cpp
@@ -183,12 +202,17 @@ if (WIN32)
     target_link_libraries(OKILTVQtWindowsProcessJobTests PRIVATE Qt6::Core Qt6::Test)
     add_dependencies(OKILTVQtAppTests OKILTVQtWindowsProcessJobTests)
     add_test(NAME OKILTVQtWindowsProcessJobTests COMMAND OKILTVQtWindowsProcessJobTests)
+    add_test(NAME OKILTVQtWindowsDvrTests COMMAND OKILTVQtAppTests
+        dvrControllerWindowsStoppedJobWithoutFinishedFinalizes
+        dvrControllerWindowsWaitsForDescendants)
+    set_tests_properties(OKILTVQtWindowsDvrTests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;OKILTV_HEADLESS_TEST=1")
 endif ()
 
 # Component-level interaction tests run without provider credentials or media playback.
 # Cross builds cannot execute the target SDK's QML runner on the host.
 if (NOT CMAKE_CROSSCOMPILING)
-    find_program(OKILTV_QMLTESTRUNNER qmltestrunner HINTS "${Qt6_DIR}/../../../bin")
+    find_program(OKILTV_QMLTESTRUNNER qmltestrunner HINTS "${Qt6_DIR}/../../../bin" REQUIRED)
     if (OKILTV_QMLTESTRUNNER)
         add_test(NAME OKILTVQtUiTransparencyTests
             COMMAND "${OKILTV_QMLTESTRUNNER}" -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_uitransparency.qml")
@@ -207,4 +231,66 @@ if (NOT CMAKE_CROSSCOMPILING)
         set_tests_properties(OKILTVQtEpgTimelineTests PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
     endif ()
+endif ()
+
+foreach(target OKILTVQtCoreTests OKILTVQtAppTests)
+    target_link_libraries(${target} PRIVATE ${OKILTV_SECRET_LIB})
+    target_compile_definitions(${target} PRIVATE OKILTV_SECURITY_TESTS)
+endforeach()
+
+qt_add_executable(OKILTVQtPlaybackTests
+    tst_playback_components.cpp
+    ../src/app/playback/playbackbuffering.cpp
+    ../src/app/playback/playbackrecovery.cpp
+    ../src/app/playback/catchupplaybacksession.cpp
+    ../src/app/playback/catchupstandbytransition.cpp
+    ../src/player/cachepolicy.cpp
+    ../src/player/livebuffertuner.cpp
+    ../src/core/models.cpp
+    ../src/core/models_variant.cpp
+    ../src/core/datetimeformat.cpp
+    ../src/core/catchupurlresolver.cpp
+    ../src/core/debuglogger.cpp
+    ../src/core/appdatapaths.cpp
+    ../src/core/redaction.cpp
+)
+target_include_directories(OKILTVQtPlaybackTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_definitions(OKILTVQtPlaybackTests PRIVATE OKILTV_APP_VERSION="${PROJECT_VERSION}")
+target_link_libraries(OKILTVQtPlaybackTests PRIVATE Qt6::Core Qt6::Gui Qt6::Network Qt6::Test)
+add_test(NAME OKILTVQtPlaybackTests COMMAND OKILTVQtPlaybackTests)
+set_tests_properties(OKILTVQtPlaybackTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;OKILTV_HEADLESS_TEST=1")
+
+# Stable group names shared by local CTest runs and the PR workflow matrix.
+set_tests_properties(OKILTVQtCoreTests OKILTVQtDatabaseStartupTests PROPERTIES LABELS core)
+set_tests_properties(OKILTVQtAppTests PROPERTIES LABELS app TIMEOUT 600)
+set_tests_properties(OKILTVQtPlaybackTests OKILTVQtCatchupTests PROPERTIES LABELS playback TIMEOUT 300)
+if (WIN32)
+    set_tests_properties(OKILTVQtWindowsProcessJobTests OKILTVQtWindowsDvrTests
+        PROPERTIES LABELS windows TIMEOUT 120)
+endif ()
+if (NOT CMAKE_CROSSCOMPILING)
+    set_tests_properties(OKILTVQtUiTransparencyTests OKILTVQtProgrammeTimelineTests
+        OKILTVQtEpgTimelineTests OKILTVQtSourceGroupsListTests PROPERTIES LABELS qml TIMEOUT 120)
+endif ()
+
+option(OKILTV_BUILD_UI_TESTS "Register Linux UI tests using Xvfb and a disposable keyring" OFF)
+if (OKILTV_BUILD_UI_TESTS)
+    if (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_CROSSCOMPILING)
+        message(FATAL_ERROR "OKILTV_BUILD_UI_TESTS requires a native Linux build")
+    endif ()
+    find_program(OKILTV_TEST_BASH bash REQUIRED)
+    foreach(scenario
+        05-channel-selection
+        06-overlay-inactivity
+        07-guide-groups
+        08-stationary-pointer-navigation
+        08-ui-transparency)
+        add_test(NAME "UI-${scenario}"
+            COMMAND "${OKILTV_TEST_BASH}" "${CMAKE_SOURCE_DIR}/scripts/ci/run_ui_test.sh"
+                "${CMAKE_SOURCE_DIR}/ui-tests/tests/${scenario}.py"
+                "$<TARGET_FILE:OKILTVQt>"
+                "${CMAKE_BINARY_DIR}/ui-artifacts/${scenario}")
+        set_tests_properties("UI-${scenario}" PROPERTIES
+            LABELS ui TIMEOUT 300 RESOURCE_LOCK okiltv_ui_desktop)
+    endforeach()
 endif ()

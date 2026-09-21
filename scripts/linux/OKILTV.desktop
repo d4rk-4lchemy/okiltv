@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=OKILTV
+Comment=IPTV player
+Exec=OKILTV
+Icon=OKILTV
+Terminal=false
+Categories=AudioVideo;Player;
+StartupWMClass=OKILTV

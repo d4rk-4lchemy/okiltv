@@ -88,7 +88,7 @@ QString ProfilesModel::addXtreamProfile(
     const QString &username,
     const QString &password,
     const QString &xmltvUrl,
-    const int autoRefreshIntervalHours,
+    const int autoRefreshIntervalHours, // NOLINT(bugprone-easily-swappable-parameters) — fixed QML positional API.
     const int catchupSafetyMinutes)
 {
     ServerProfile profile;
@@ -243,6 +243,7 @@ bool ProfilesModel::removeProfile(const QString &profileId)
     if (oldActive != activeProfileId()) {
         emit activeProfileIdChanged();
     }
+    emit profileRemoved(profileId);
     reload();
     return true;
 }

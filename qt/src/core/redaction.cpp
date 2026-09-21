@@ -1,5 +1,7 @@
 #include "redaction.h"
 
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QRegularExpression>
 #include <QUrlQuery>
 
@@ -23,7 +25,12 @@ bool shouldMaskQueryKey(const QString &key)
         || normalized == QStringLiteral("api_key")
         || normalized == QStringLiteral("apikey")
         || normalized == QStringLiteral("signature")
-        || normalized == QStringLiteral("sig");
+        || normalized == QStringLiteral("sig")
+        || normalized == QStringLiteral("xtreamusername")
+        || normalized == QStringLiteral("xtreampassword")
+        || normalized == QStringLiteral("secret")
+        || normalized == QStringLiteral("cookie")
+        || normalized == QStringLiteral("set-cookie");
 }
 
 QString maskXtreamPathSegments(const QString &path)
@@ -67,14 +74,24 @@ QString redactUrlLikeString(const QString &value)
         return value;
     }
 
-    parsed.setPath(maskXtreamPathSegments(parsed.path()));
+    if (!parsed.userInfo().isEmpty()) {
+        parsed.setUserInfo(QStringLiteral("***"));
+    }
+    const auto maskedPath = maskXtreamPathSegments(parsed.path());
+    const auto scheme = parsed.scheme().toLower();
+    const bool networkUrl = scheme == QStringLiteral("http") || scheme == QStringLiteral("https")
+        || scheme == QStringLiteral("rtsp") || scheme == QStringLiteral("rtmp");
+    // Unknown provider layouts may put tokens anywhere in the path.
+    parsed.setPath(networkUrl && maskedPath == parsed.path() && !parsed.path().isEmpty()
+        ? QStringLiteral("/***") : maskedPath);
+    if (networkUrl && !parsed.fragment().isEmpty()) parsed.setFragment(QStringLiteral("***"));
 
     QUrlQuery query(parsed);
     if (!query.isEmpty()) {
         QUrlQuery sanitizedQuery;
         const auto items = query.queryItems(QUrl::FullyDecoded);
         for (const auto &item : items) {
-            if (shouldMaskQueryKey(item.first)) {
+            if (networkUrl || shouldMaskQueryKey(item.first)) {
                 sanitizedQuery.addQueryItem(item.first, QStringLiteral("***"));
             } else {
                 sanitizedQuery.addQueryItem(item.first, item.second);
@@ -96,6 +113,12 @@ QString redactSensitiveUrl(const QString &rawUrl)
 QString redactSensitiveText(const QString &text)
 {
     auto redacted = text;
+    // Match JSON string values including escaped quotes, also inside log prefixes.
+    redacted.replace(
+        QRegularExpression(QStringLiteral(
+            R"re(("(?:username|password|xtreamUsername|xtreamPassword|user|pass|token|access_token|refresh_token|auth|authorization|api_key|apikey|secret|cookie|set-cookie)"\s*:\s*)"(?:[^"\\]|\\.)*")re"),
+            QRegularExpression::CaseInsensitiveOption),
+        QStringLiteral("\\1\"***\""));
     redacted.replace(
         QRegularExpression(
             QStringLiteral(
@@ -121,6 +144,26 @@ QString redactSensitiveText(const QString &text)
     }
 
     return redacted;
+}
+
+QJsonValue redactSensitiveJson(const QJsonValue &value)
+{
+    if (value.isObject()) {
+        auto object = value.toObject();
+        for (auto it = object.begin(); it != object.end(); ++it) {
+            it.value() = shouldMaskQueryKey(it.key())
+                ? QJsonValue(QStringLiteral("***")) : redactSensitiveJson(it.value());
+        }
+        return object;
+    }
+    if (value.isArray()) {
+        QJsonArray result;
+        for (const auto &entry : value.toArray()) {
+            result.append(redactSensitiveJson(entry));
+        }
+        return result;
+    }
+    return value.isString() ? QJsonValue(redactSensitiveText(value.toString())) : value;
 }
 
 QString networkCategoryForUrl(const QUrl &url)

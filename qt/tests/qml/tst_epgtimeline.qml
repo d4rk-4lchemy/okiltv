@@ -183,8 +183,15 @@ TestCase {
         const browsedKey = panel.catchupSelectionKey
         panel.playbackProgram = program(-22)
         tryVerify(function() { return panel.centeredPlaybackKey === panel.playbackKey })
+        // Hover delivery after the layout must not select the row that moved
+        // under a stationary pointer when playback was recentered.
+        verify(waitForRendering(panel))
         compare(panel.catchupSelectionKey, browsedKey)
         verify(!panel.itemAt(panel.playbackIndex).active)
+        const pointerRow = panel.itemAt(panel.playbackIndex + 1)
+        verify(pointerRow !== null)
+        mouseMove(pointerRow, 120, pointerRow.height - 10)
+        tryCompare(panel, "catchupSelectionKey", pointerRow.modelData.key)
     }
     function test_catchup_refresh_and_progress_preserve_manual_scroll() {
         watch(-20)

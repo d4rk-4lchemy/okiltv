@@ -1782,6 +1782,26 @@ void MultiViewController::handlePrimaryChannelChanged()
     emitTilesChanged();
 }
 
+void MultiViewController::runStartupPlayerCleanup()
+{
+    if (m_startupPlayerCleanupAttempted) {
+        return;
+    }
+    m_startupPlayerCleanupAttempted = true;
+    auto player = std::make_unique<MpvPlayer>();
+    configureSecondaryPlayer(*player);
+    player->setAudioEnabled(false);
+    player->setVolume(0);
+    const auto initialized = player->ensureInitialized();
+    Core::DebugLogger::instance().log(
+        QStringLiteral("multiview.startup-cleanup"),
+        QStringLiteral("Startup PiP cleanup experiment: backend initialized=%1; retiring through PiP cleanup.")
+            .arg(initialized));
+    // Exercise the same deferred backend teardown as Close PiP, without taking
+    // ownership of any playback session, opening a stream, or changing the layout.
+    retireDetachedPlayer(std::move(player));
+}
+
 void MultiViewController::retireDetachedPlayer(std::unique_ptr<MpvPlayer> player)
 {
     if (!player) {

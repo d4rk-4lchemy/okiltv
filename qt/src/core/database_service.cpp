@@ -1,13 +1,18 @@
 #include "database_service.h"
 
 #include "appdatapaths.h"
+#include "secretprotection.h"
+#include "debuglogger.h"
 
 #include <QCryptographicHash>
+#include <QFile>
+#include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QSet>
 #include <QTimeZone>
 #include <QVariant>
 
@@ -31,6 +36,10 @@ public:
                 QStringLiteral("Failed to open SQLite database %1: %2")
                     .arg(databaseFilePath, m_database.lastError().text())
                     .toStdString());
+        }
+        if (!QFile::setPermissions(databaseFilePath, QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
+            m_database.close();
+            throw std::runtime_error("Cannot restrict database file permissions.");
         }
     }
 
@@ -211,19 +220,19 @@ Channel channelFromQuery(const QSqlQuery &query, const QUuid &profileId)
     channel.id = query.value(QStringLiteral("id")).toInt();
     channel.profileId = profileId;
     channel.name = query.value(QStringLiteral("name")).toString();
-    channel.streamUrl = query.value(QStringLiteral("stream_url")).toString();
+    channel.streamUrl = unprotectSecret(query.value(QStringLiteral("stream_url")).toString());
     channel.categoryId = normalizeChannelCategoryId(query.value(QStringLiteral("category_id")).toString());
     channel.categoryName = query.value(QStringLiteral("category_name")).toString();
     channel.tvgId = query.value(QStringLiteral("tvg_id")).toString();
     channel.tvgName = query.value(QStringLiteral("tvg_name")).toString();
-    channel.iconUrl = query.value(QStringLiteral("icon_url")).toString();
+    channel.iconUrl = unprotectSecret(query.value(QStringLiteral("icon_url")).toString());
     channel.cachedIconPath = query.value(QStringLiteral("cached_icon")).toString();
     channel.source = channelSourceFromString(query.value(QStringLiteral("source")).toString());
     channel.sortOrder = query.value(QStringLiteral("sort_order")).toInt();
     channel.catchupSupported = query.value(QStringLiteral("catchup_supported")).toBool();
     channel.catchupWindowHours = std::max(0, query.value(QStringLiteral("catchup_window_hours")).toInt());
     channel.catchupMode = query.value(QStringLiteral("catchup_mode")).toString();
-    channel.catchupSourceTemplate = query.value(QStringLiteral("catchup_source_template")).toString();
+    channel.catchupSourceTemplate = unprotectSecret(query.value(QStringLiteral("catchup_source_template")).toString());
     return channel;
 }
 
@@ -241,10 +250,10 @@ EpgEntry epgEntryFromQuery(const QSqlQuery &query)
 
 } // namespace
 
-DatabaseService::DatabaseService(QString databaseFilePath)
+DatabaseService::DatabaseService(QString databaseFilePath, const RebuildStarted &rebuildStarted)
     : m_databaseFilePath(databaseFilePath.isEmpty() ? AppDataPaths::databaseFile() : std::move(databaseFilePath))
 {
-    ensureSchema();
+    ensureSchema(rebuildStarted);
 }
 
 QString DatabaseService::databaseFilePath() const
@@ -252,10 +261,130 @@ QString DatabaseService::databaseFilePath() const
     return m_databaseFilePath;
 }
 
-void DatabaseService::ensureSchema() const
+void DatabaseService::ensureSchema(const RebuildStarted &rebuildStarted) const
+{
+    bool rebuildReported = false;
+    const auto reportRebuild = [&]() {
+        if (!rebuildReported) {
+            rebuildReported = true;
+            if (rebuildStarted) rebuildStarted();
+        }
+    };
+    QElapsedTimer elapsed;
+    elapsed.start();
+    const auto logStage = [&elapsed](const QString &stage) {
+        DebugLogger::instance().log(QStringLiteral("database-startup"),
+            QStringLiteral("%1; elapsedMs=%2").arg(stage).arg(elapsed.elapsed()));
+    };
+    logStage(QStringLiteral("Opening SQLite connection"));
+    ScopedConnection connection(m_databaseFilePath);
+    logStage(QStringLiteral("Ensuring schema"));
+    auto &database = schemaReadyDatabase(connection);
+    QSqlQuery secure(database);
+    if (!secure.exec(QStringLiteral("PRAGMA secure_delete=ON"))) throw std::runtime_error("Cannot enable database cleanup.");
+    secure.finish();
+    if (!database.transaction()) throw std::runtime_error("Cannot begin credential migration.");
+    bool changed = false;
+    try {
+        QSqlQuery marker(database);
+        if (!marker.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS security_migrations (name TEXT PRIMARY KEY)"))) {
+            throw std::runtime_error("Cannot track credential migration cleanup.");
+        }
+        QSqlQuery rows(database);
+        logStage(QStringLiteral("Scanning channel protection state"));
+        if (!rows.exec(QStringLiteral("SELECT id, profile_id, stream_url, icon_url, catchup_source_template FROM channels"))) {
+            throw std::runtime_error("Cannot read channels for credential migration.");
+        }
+        struct Row { int id; QString profile; QString stream; QString icon; QString catchup; };
+        QList<Row> pending;
+        while (rows.next()) {
+            const auto stream = rows.value(2).toString();
+            const auto icon = rows.value(3).toString();
+            const auto catchup = rows.value(4).toString();
+            if ((!stream.isEmpty() && !isProtectedSecret(stream))
+                || (!icon.isEmpty() && !isProtectedSecret(icon))
+                || (!catchup.isEmpty() && !isProtectedSecret(catchup))) {
+                pending.push_back({ rows.value(0).toInt(), rows.value(1).toString(), stream, icon, catchup });
+            }
+        }
+        rows.finish();
+        if (!pending.isEmpty()) reportRebuild();
+        logStage(QStringLiteral("Legacy channels requiring protection: %1").arg(pending.size()));
+        QElapsedTimer progressTimer;
+        progressTimer.start();
+        qsizetype completed = 0;
+        const auto migrate = [](const QString &value) {
+            if (value.isEmpty() || isProtectedSecret(value)) return value;
+            const auto encrypted = protectSecret(value);
+            if (unprotectSecret(encrypted) != value) throw std::runtime_error("Channel protection verification failed.");
+            return encrypted;
+        };
+        for (const auto &row : pending) {
+            QSqlQuery update(database);
+            update.prepare(QStringLiteral("UPDATE channels SET stream_url=?, icon_url=?, catchup_source_template=? WHERE id=? AND profile_id=?"));
+            update.addBindValue(migrate(row.stream));
+            update.addBindValue(migrate(row.icon));
+            update.addBindValue(migrate(row.catchup));
+            update.addBindValue(row.id);
+            update.addBindValue(row.profile);
+            execOrThrow(update, QStringLiteral("Protect cached channel"));
+            ++completed;
+            if (progressTimer.elapsed() >= 1000 || completed == pending.size()) {
+                logStage(QStringLiteral("Protected channels: %1/%2").arg(completed).arg(pending.size()));
+                progressTimer.restart();
+            }
+        }
+        if (!pending.isEmpty() && !marker.exec(QStringLiteral("INSERT OR IGNORE INTO security_migrations VALUES ('channel-cleanup-v1')"))) {
+            throw std::runtime_error("Cannot track credential migration cleanup.");
+        }
+        if (!marker.exec(QStringLiteral("SELECT name FROM security_migrations WHERE name='channel-cleanup-v1'"))) {
+            throw std::runtime_error("Cannot read credential migration state.");
+        }
+        changed = marker.next();
+        marker.finish();
+        if (!database.commit()) throw std::runtime_error("Cannot commit credential migration.");
+    } catch (...) {
+        database.rollback();
+        throw;
+    }
+    if (changed) {
+        reportRebuild(); // Also show progress when resuming interrupted cleanup.
+        logStage(QStringLiteral("Checkpointing migrated database"));
+        QSqlQuery cleanup(database);
+        if (!cleanup.exec(QStringLiteral("PRAGMA wal_checkpoint(TRUNCATE)"))
+            || (cleanup.next() && cleanup.value(0).toInt() != 0)) {
+            throw std::runtime_error("Protected channels were saved, but database checkpoint must be retried.");
+        }
+        cleanup.finish();
+        logStage(QStringLiteral("Vacuuming migrated database"));
+        if (!cleanup.exec(QStringLiteral("VACUUM"))
+            || !cleanup.exec(QStringLiteral("DELETE FROM security_migrations WHERE name='channel-cleanup-v1'"))) {
+            throw std::runtime_error("Protected channels were saved, but database cleanup must be retried.");
+        }
+    }
+    logStage(QStringLiteral("Database ready"));
+}
+
+void DatabaseService::removeProfileData(const QUuid &profileId) const
 {
     ScopedConnection connection(m_databaseFilePath);
-    schemaReadyDatabase(connection);
+    auto &database = schemaReadyDatabase(connection);
+    QSqlQuery secure(database);
+    if (!secure.exec(QStringLiteral("PRAGMA secure_delete=ON"))) throw std::runtime_error("Cannot enable database cleanup.");
+    secure.finish();
+    if (!database.transaction()) throw std::runtime_error("Cannot begin source removal.");
+    try {
+        for (const auto *table : { "channels", "epg_entries", "channel_watch_stats", "catchup_progress" }) {
+            QSqlQuery query(database);
+            query.prepare(QStringLiteral("DELETE FROM %1 WHERE profile_id=?").arg(QString::fromLatin1(table)));
+            query.addBindValue(guidToString(profileId));
+            execOrThrow(query, QStringLiteral("Remove source data"));
+        }
+        if (!database.commit()) throw std::runtime_error("Cannot commit source removal.");
+    } catch (...) {
+        database.rollback();
+        throw;
+    }
 }
 
 void DatabaseService::upsertChannels(const QList<Channel> &channels) const
@@ -296,14 +425,14 @@ void DatabaseService::upsertChannels(const QList<Channel> &channels) const
             query.bindValue(QStringLiteral(":id"), channel.id);
             query.bindValue(QStringLiteral(":profile_id"), guidToString(channel.profileId));
             query.bindValue(QStringLiteral(":name"), channel.name);
-            query.bindValue(QStringLiteral(":stream_url"), channel.streamUrl);
+            query.bindValue(QStringLiteral(":stream_url"), protectSecret(channel.streamUrl));
             query.bindValue(QStringLiteral(":category_id"), normalizeChannelCategoryId(channel.categoryId));
             query.bindValue(
                 QStringLiteral(":category_name"),
                 channel.categoryName.isNull() ? QStringLiteral("") : channel.categoryName);
             query.bindValue(QStringLiteral(":tvg_id"), channel.tvgId.isNull() ? QStringLiteral("") : channel.tvgId);
             query.bindValue(QStringLiteral(":tvg_name"), channel.tvgName.isNull() ? QStringLiteral("") : channel.tvgName);
-            query.bindValue(QStringLiteral(":icon_url"), channel.iconUrl.isEmpty() ? QVariant {} : QVariant(channel.iconUrl));
+            query.bindValue(QStringLiteral(":icon_url"), channel.iconUrl.isEmpty() ? QVariant {} : QVariant(protectSecret(channel.iconUrl)));
             query.bindValue(QStringLiteral(":source"), channelSourceToString(channel.source));
             query.bindValue(QStringLiteral(":sort_order"), channel.sortOrder);
             query.bindValue(QStringLiteral(":catchup_supported"), channel.catchupSupported);
@@ -315,7 +444,7 @@ void DatabaseService::upsertChannels(const QList<Channel> &channels) const
                 QStringLiteral(":catchup_source_template"),
                 channel.catchupSourceTemplate.trimmed().isEmpty()
                     ? QStringLiteral("")
-                    : channel.catchupSourceTemplate.trimmed());
+                    : protectSecret(channel.catchupSourceTemplate.trimmed()));
             execOrThrow(query, QStringLiteral("Upsert channel"));
         }
 
@@ -375,14 +504,14 @@ void DatabaseService::replaceChannelsForProfile(const QUuid &profileId, const QL
             query.bindValue(QStringLiteral(":id"), channel.id);
             query.bindValue(QStringLiteral(":profile_id"), guidToString(channel.profileId));
             query.bindValue(QStringLiteral(":name"), channel.name);
-            query.bindValue(QStringLiteral(":stream_url"), channel.streamUrl);
+            query.bindValue(QStringLiteral(":stream_url"), protectSecret(channel.streamUrl));
             query.bindValue(QStringLiteral(":category_id"), normalizeChannelCategoryId(channel.categoryId));
             query.bindValue(
                 QStringLiteral(":category_name"),
                 channel.categoryName.isNull() ? QStringLiteral("") : channel.categoryName);
             query.bindValue(QStringLiteral(":tvg_id"), channel.tvgId.isNull() ? QStringLiteral("") : channel.tvgId);
             query.bindValue(QStringLiteral(":tvg_name"), channel.tvgName.isNull() ? QStringLiteral("") : channel.tvgName);
-            query.bindValue(QStringLiteral(":icon_url"), channel.iconUrl.isEmpty() ? QVariant {} : QVariant(channel.iconUrl));
+            query.bindValue(QStringLiteral(":icon_url"), channel.iconUrl.isEmpty() ? QVariant {} : QVariant(protectSecret(channel.iconUrl)));
             query.bindValue(QStringLiteral(":source"), channelSourceToString(channel.source));
             query.bindValue(QStringLiteral(":sort_order"), channel.sortOrder);
             query.bindValue(QStringLiteral(":catchup_supported"), channel.catchupSupported);
@@ -394,7 +523,7 @@ void DatabaseService::replaceChannelsForProfile(const QUuid &profileId, const QL
                 QStringLiteral(":catchup_source_template"),
                 channel.catchupSourceTemplate.trimmed().isEmpty()
                     ? QStringLiteral("")
-                    : channel.catchupSourceTemplate.trimmed());
+                    : protectSecret(channel.catchupSourceTemplate.trimmed()));
             execOrThrow(query, QStringLiteral("Upsert channel"));
         }
 
@@ -425,6 +554,27 @@ void DatabaseService::replaceChannelsForProfile(const QUuid &profileId, const QL
     }
 }
 
+QStringList DatabaseService::loadChannelGroupIds(const QUuid &profileId) const
+{
+    ScopedConnection connection(m_databaseFilePath);
+    auto &database = schemaReadyDatabase(connection);
+    QSqlQuery query(database);
+    query.prepare(QStringLiteral("SELECT category_id FROM channels WHERE profile_id = :profile_id ORDER BY sort_order"));
+    query.bindValue(QStringLiteral(":profile_id"), guidToString(profileId));
+    execOrThrow(query, QStringLiteral("Load channel group IDs"));
+
+    QStringList groups;
+    QSet<QString> seen;
+    while (query.next()) {
+        const auto group = normalizeChannelCategoryId(query.value(0).toString());
+        if (!seen.contains(group)) {
+            seen.insert(group);
+            groups.push_back(group);
+        }
+    }
+    return groups;
+}
+
 QList<Channel> DatabaseService::loadChannels(const QUuid &profileId) const
 {
     ScopedConnection connection(m_databaseFilePath);
@@ -437,7 +587,13 @@ QList<Channel> DatabaseService::loadChannels(const QUuid &profileId) const
 
     QList<Channel> channels;
     while (query.next()) {
-        channels.push_back(channelFromQuery(query, profileId));
+        try {
+            channels.push_back(channelFromQuery(query, profileId));
+        } catch (const std::exception &) {
+            DebugLogger::instance().log(QStringLiteral("storage"),
+                QStringLiteral("Cannot unlock cached channel URLs; preserved the database. Re-enter source credentials or unlock the original secret store."));
+            return {};
+        }
     }
 
     return channels;

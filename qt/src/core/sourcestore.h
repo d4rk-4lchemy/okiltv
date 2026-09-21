@@ -12,12 +12,14 @@ namespace OKILTV::Core {
 class SourceStore
 {
 public:
-    explicit SourceStore(QString summariesFilePath = {}, QString sourceDetailsDirectory = {});
+    explicit SourceStore(QString summariesFilePath = {}, const QString &sourceDetailsDirectory = {});
 
     QList<SourceSummary> loadSummaries() const;
     bool saveSummaries(const QList<SourceSummary> &summaries, QString *errorText = nullptr) const;
 
     std::optional<ServerProfile> loadDetail(const QUuid &profileId) const;
+    void migrateLegacyDetails() const;
+    bool detailIsProtected(const QUuid &profileId) const;
     bool saveDetail(const ServerProfile &profile, QString *errorText = nullptr) const;
 
     bool removeDetail(const QUuid &profileId, QString *errorText = nullptr) const;

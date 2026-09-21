@@ -1101,6 +1101,10 @@ QJsonArray UiTestBridge::buildVisibleTextInventory() const
                 { QStringLiteral("objectName"), object->objectName() }
             };
             if (auto *item = qobject_cast<QQuickItem *>(object)) {
+                record.insert(QStringLiteral("enabled"), item->isEnabled());
+                if (object->metaObject()->indexOfProperty("hovered") >= 0) {
+                    record.insert(QStringLiteral("hovered"), object->property("hovered").toBool());
+                }
                 const auto scenePosition = item->mapToScene(QPointF(0.0, 0.0));
                 record.insert(
                     QStringLiteral("bounds"),
@@ -1302,40 +1306,12 @@ QJsonArray UiTestBridge::currentNetworkMap() const
 
 QJsonValue UiTestBridge::redactedJsonValue(const QJsonValue &value) const
 {
-    if (value.isString()) {
-        return QJsonValue(Core::redactSensitiveText(value.toString()));
-    }
-    if (value.isArray()) {
-        QJsonArray redactedArray;
-        for (const auto &entry : value.toArray()) {
-            redactedArray.push_back(redactedJsonValue(entry));
-        }
-        return redactedArray;
-    }
-    if (value.isObject()) {
-        QJsonObject redactedObject;
-        const auto object = value.toObject();
-        for (auto it = object.constBegin(); it != object.constEnd(); ++it) {
-            redactedObject.insert(it.key(), redactedJsonValue(it.value()));
-        }
-        return redactedObject;
-    }
-    return value;
+    return Core::redactSensitiveJson(value);
 }
 
 QVariantMap UiTestBridge::redactedVariantMap(const QVariantMap &value) const
 {
-    QVariantMap redacted = value;
-    for (auto it = redacted.begin(); it != redacted.end(); ++it) {
-        if (it->typeId() == QMetaType::QString) {
-            it.value() = Core::redactSensitiveText(it->toString());
-            continue;
-        }
-        if (it->typeId() == QMetaType::QVariantMap) {
-            it.value() = redactedVariantMap(it->toMap());
-        }
-    }
-    return redacted;
+    return Core::redactSensitiveJson(QJsonValue::fromVariant(value)).toObject().toVariantMap();
 }
 
 QString UiTestBridge::captureOutputPathForRequest(const QJsonObject &requestBody, QString *labelOut) const

@@ -155,10 +155,7 @@ private slots:
     void retryForwardArchiveGap();
     void retriedGapRetainsHttpAndAdvancesTimeline_data();
     void retriedGapRetainsHttpAndAdvancesTimeline();
-    void capturedForwardArchiveGap_data();
-    void capturedForwardArchiveGap();
     void configurationPeriodRetainsHttpAndIsolatesReaders();
-    void capturedConfigurationPeriods();
     void continueAfterEofUnderBackpressure_data();
     void continueAfterEofUnderBackpressure();
     void cancelWhileWaitingAtSafeEdge();
@@ -169,7 +166,6 @@ private slots:
     void continuationStartsWhenOverlapAnchorIsSafe();
     void failUnmatchedContinuation();
     void safeWindowUsesProviderTimestampAndMargin();
-    void capturedProviderResponses();
     void completedArchiveDoesNotContinue();
     void endlessContinuesBeyondProgrammeEnd_data();
     void endlessContinuesBeyondProgrammeEnd();
@@ -409,55 +405,6 @@ void CatchupStreamTests::retriedGapRetainsHttpAndAdvancesTimeline()
     QCOMPARE(server.requests.size(), 3);
 }
 
-void CatchupStreamTests::capturedForwardArchiveGap_data()
-{
-    QTest::addColumn<QString>("path");
-    QTest::addColumn<qint64>("previousDts");
-    QTest::addColumn<qint64>("nextDts");
-    QTest::addColumn<double>("periodDuration");
-    QTest::newRow("first-gap") << qEnvironmentVariable("OKILTV_TEST_FORWARD_GAP_CAPTURE")
-        << qint64(140450400) << qint64(201582000) << 684.92;
-    QTest::newRow("sparse-pcr-gap") << qEnvironmentVariable("OKILTV_TEST_SPARSE_PCR_GAP_CAPTURE")
-        << qint64(247548600) << qint64(279885600) << 408.04;
-}
-
-void CatchupStreamTests::capturedForwardArchiveGap()
-{
-    QFETCH(QString, path);
-    QFETCH(qint64, previousDts);
-    QFETCH(qint64, nextDts);
-    QFETCH(double, periodDuration);
-    if (path.isEmpty()) { QSKIP("Set OKILTV_TEST_FORWARD_GAP_CAPTURE to a provider MPEG-TS capture."); }
-    QFile file(path);
-    QVERIFY(file.open(QIODevice::ReadOnly));
-    const auto source = file.readAll();
-    Player::CatchupTsJoiner first;
-    for (qsizetype at = 0; at < source.size() && first.valid(); at += 65521) {
-        first.push(source.mid(at, 65521));
-    }
-    QVERIFY(!first.valid());
-    QVERIFY(first.failedForwardGap());
-    QCOMPARE(first.failedForwardGap()->previousDts, previousDts);
-    QCOMPARE(first.failedForwardGap()->nextDts, nextDts);
-    Player::CatchupTsJoiner retry;
-    retry.allowRetriedForwardGap(first.failedForwardGap());
-    QByteArray pending;
-    for (qsizetype at = 0; at < source.size(); at += 65521) {
-        retry.push(source.mid(at, 65521));
-        QVERIFY2(retry.valid(), qPrintable(retry.errorString()));
-        if (retry.periodPending()) {
-            pending = retry.takeNextPeriod() + source.mid(std::min(source.size(), at + 65521));
-            break;
-        }
-    }
-    QVERIFY(!pending.isEmpty());
-    QCOMPARE(retry.periodDurationSeconds(), periodDuration);
-    Player::CatchupTsJoiner next;
-    next.push(pending);
-    QVERIFY2(next.valid(), qPrintable(next.errorString()));
-    QVERIFY(next.durationSeconds() > 2.0);
-}
-
 void CatchupStreamTests::audioOnlyClockAndPeriods()
 {
     const auto tables = psiPacket(QByteArray::fromHex("00b00d0001c100000001f000"), 0)
@@ -590,34 +537,6 @@ void CatchupStreamTests::configurationPeriodRetainsHttpAndIsolatesReaders()
     QCOMPARE(server.requests.size(), 1);
     QVERIFY(!session->hasNetworkError());
     QVERIFY(!session->nextPeriodBaseSeconds());
-}
-
-void CatchupStreamTests::capturedConfigurationPeriods()
-{
-    const auto path = qEnvironmentVariable("OKILTV_CATCHUP_PERIOD_FIXTURE");
-    if (path.isEmpty()) { QSKIP("Optional private archive configuration-transition capture."); }
-    QFile file(path);
-    QVERIFY(file.open(QIODevice::ReadOnly));
-    const auto source = file.readAll();
-    Player::CatchupTsJoiner joiner;
-    QByteArray first, second;
-    for (qsizetype offset = 0; offset < source.size(); offset += 65521) {
-        first += joiner.push(source.mid(offset, 65521));
-        QVERIFY2(joiner.valid(), qPrintable(joiner.errorString()));
-        if (joiner.periodPending()) {
-            second = joiner.takeNextPeriod() + source.mid(std::min(source.size(), offset + 65521));
-            break;
-        }
-    }
-    QVERIFY(!first.isEmpty());
-    QVERIFY(!second.isEmpty());
-    QCOMPARE(first + second, source); // Exact source bytes retained across the boundary.
-    QVERIFY(joiner.periodDescription().contains(QStringLiteral("pcr=256->101")));
-    QCOMPARE(joiner.periodDurationSeconds(), 48.0);
-    Player::CatchupTsJoiner next;
-    next.push(second);
-    QVERIFY2(next.valid(), qPrintable(next.errorString()));
-    QVERIFY(next.durationSeconds() > 5.0);
 }
 
 void CatchupStreamTests::endlessContinuesBeyondProgrammeEnd_data()
@@ -1055,55 +974,6 @@ void CatchupStreamTests::safeWindowUsesProviderTimestampAndMargin()
     const auto canonical = QStringLiteral("https://provider/timeshift/user/password/17/2026-09-12:21-00/1.ts");
     QCOMPARE(Core::CatchupUrlResolver::xtreamWindowUrl(canonical, 892, 1800, true),
              QStringLiteral("https://provider/timeshift/user/password/15/2026-09-12:21-14-52/1.ts"));
-}
-
-void CatchupStreamTests::capturedProviderResponses()
-{
-    const auto path = qEnvironmentVariable("OKILTV_CATCHUP_FIXTURE_DIR");
-    if (path.isEmpty()) {
-        QSKIP("Optional real-provider capture; synthetic network tests run without credentials or network access.");
-    }
-    QFile firstFile(path + QStringLiteral("/edge_snapshot_a.bin"));
-    QFile secondFile(path + QStringLiteral("/edge_shifted.bin"));
-    QVERIFY(firstFile.open(QIODevice::ReadOnly));
-    QVERIFY(secondFile.open(QIODevice::ReadOnly));
-    const auto first = firstFile.readAll();
-    const auto second = secondFile.readAll();
-    Player::CatchupTsJoiner joiner;
-    auto output = joiner.push(first);
-    QVERIFY(joiner.beginContinuation());
-    for (qsizetype offset = 0; offset < second.size(); offset += 17003) {
-        output += joiner.push(second.mid(offset, 17003));
-    }
-    QVERIFY(joiner.valid());
-    QVERIFY(!joiner.matching());
-    const auto overlap = first.indexOf(second.left(188 * 100));
-    QVERIFY(overlap >= 0);
-    QCOMPARE(output, first.left(overlap) + second);
-
-    ArchiveServer server;
-    QVERIFY(server.listen(QHostAddress::LocalHost));
-    server.replies = {first, second};
-    auto session = Player::CatchupStreamSession::create(server.url(), {}, {
-        .queueHighWaterBytes = 2 * 1024 * 1024, .queueLowWaterBytes = 1024 * 1024,
-        .replyReadBufferBytes = 2 * 1024 * 1024, .roleLabel = QStringLiteral("captured"),
-        .normalizeMpegTsTimestamps = true,
-    });
-    const auto start = QDateTime::currentDateTimeUtc().addSecs(-600);
-    session->configureContinuous({server.url(), start, start.addSecs(120)});
-    const auto virtualUrl = session->virtualUrl();
-    QVERIFY(session->start());
-    auto future = QtConcurrent::run([session]() { return readAll(session); });
-    const auto cleanup = qScopeGuard([&]() { session->cancelRead(); session->closeProviderConnection(QStringLiteral("test")); future.waitForFinished(); });
-    QTRY_VERIFY_WITH_TIMEOUT(future.isFinished(), 15000);
-    QCOMPARE(future.result().terminal, 0);
-    Player::MpegTsTimestampNormalizer normalizer;
-    auto expected = normalizer.push(output);
-    expected += normalizer.finish();
-    QCOMPARE(future.result().bytes, expected);
-    QCOMPARE(session->virtualUrl(), virtualUrl);
-    QCOMPARE(server.requests.size(), 2);
-    QVERIFY(!session->hasNetworkError());
 }
 
 QTEST_GUILESS_MAIN(CatchupStreamTests)

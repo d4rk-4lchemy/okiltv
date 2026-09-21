@@ -65,6 +65,7 @@ public:
     QObject *pipControllerObject() const;
     PlayerController *prepareCatchupPictureInPicture();
     void shutdownPlaybackSessions();
+    void runStartupPlayerCleanup();
     quint64 pipRevision() const { return m_pipRevision; }
     bool isActive() const;
     bool focusedTileIsPrimary() const;
@@ -206,6 +207,7 @@ private:
     bool m_swappingPrimaryAndSecondary { false };
     bool m_skipPrimaryAutoPromotionOnce { false };
     std::vector<std::unique_ptr<Player::MpvPlayer>> m_retiredPlayers;
+    bool m_startupPlayerCleanupAttempted { false };
 };
 
 } // namespace OKILTV::App

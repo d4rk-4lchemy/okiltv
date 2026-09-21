@@ -1,0 +1,157 @@
+name: Release packages
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-packages-${{ github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate:
+    if: github.event_name != 'release' || !startsWith(github.event.release.tag_name, 'deps-')
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.sha }}
+          persist-credentials: false
+      - name: Validate application version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: python3 scripts/ci/validate_release.py
+
+  build:
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows, linux]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      OKILTV_BUILD_MAX_JOBS: '4'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Install common build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build p7zip-full ripgrep libgl1-mesa-dev libegl1-mesa-dev \
+            libxkbcommon-dev libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 \
+            libxcb-image0 libxcb-render-util0 libdbus-1-dev zlib1g-dev libssl-dev
+          source scripts/ci/dependencies.env
+          python -m pip install "aqtinstall==$AQT_VERSION"
+          {
+            echo "QT_VERSION=$QT_VERSION"
+            echo "QT_LINUX_SDK_ROOT=$RUNNER_TEMP/Qt/$QT_VERSION/gcc_64"
+            echo "QT_HOST_PATH=$RUNNER_TEMP/Qt/$QT_VERSION/gcc_64"
+            echo "QT_WIN_SDK_ROOT=$RUNNER_TEMP/Qt/$QT_VERSION/mingw_64"
+          } >> "$GITHUB_ENV"
+      - name: Install Qt Linux SDK and host tools
+        run: |
+          python -m aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 \
+            --outputdir "$RUNNER_TEMP/Qt" --modules qtshadertools qtimageformats
+          echo "$QT_HOST_PATH/bin" >> "$GITHUB_PATH"
+          echo "CMAKE_PREFIX_PATH=$QT_HOST_PATH" >> "$GITHUB_ENV"
+
+      - name: Install Windows cross-build dependencies
+        if: matrix.platform == 'windows'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            g++-mingw-w64-x86-64-posix wine64 wine nsis xvfb xauth
+          python -m aqt install-qt windows desktop "$QT_VERSION" win64_mingw \
+            --outputdir "$RUNNER_TEMP/Qt" --modules qtshadertools qtimageformats
+      - name: Download pinned mpv DLL
+        if: matrix.platform == 'windows'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source scripts/ci/dependencies.env
+          mkdir -p build/mpv
+          gh release download "$MPV_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern mpv-2.dll --dir build/mpv
+          printf '%s  %s\n' "$MPV_DLL_SHA256" build/mpv/mpv-2.dll | sha256sum --check
+      - name: Build Windows installer and portable ZIP
+        if: matrix.platform == 'windows'
+        env:
+          WINEARCH: win64
+          WINEDEBUG: '-all'
+        run: xvfb-run -a bash ./build_windows.sh
+
+      - name: Install Linux runtime and packaging dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            libmpv2 libsecret-1-0 ffmpeg imagemagick patchelf desktop-file-utils
+      - name: Build and test Linux
+        if: matrix.platform == 'linux'
+        run: |
+          bash ./build_linux.sh
+          ctest --test-dir qt/out/build/qt-linux-release --output-on-failure --no-tests=error --timeout 600
+      - name: Package Linux AppImage
+        if: matrix.platform == 'linux'
+        run: |
+          bash scripts/package_linux_appimage.sh
+          python3 scripts/ci/check_appdir.py qt/out/package/qt-linux-release/AppDir
+      - name: Record checksums
+        working-directory: publish
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          shopt -s nullglob
+          files=(*.exe *.zip *.AppImage)
+          test "${#files[@]}" -gt 0
+          sha256sum "${files[@]}" > "SHA256SUMS-$PLATFORM.txt"
+      - name: Save packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: okiltv-${{ matrix.platform }}-${{ needs.validate.outputs.version }}
+          path: publish/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  publish:
+    if: github.event_name == 'release'
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified build outputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: okiltv-*-${{ needs.validate.outputs.version }}
+          merge-multiple: true
+          path: publish
+      - name: Attach packages to the triggering release
+        working-directory: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          sha256sum --check SHA256SUMS-windows.txt
+          sha256sum --check SHA256SUMS-linux.txt
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            ./*.exe ./*.zip ./*.AppImage ./SHA256SUMS-*.txt --clobber

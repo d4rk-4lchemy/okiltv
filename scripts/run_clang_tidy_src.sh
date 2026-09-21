@@ -62,9 +62,7 @@ raw_log="$(mktemp "${TMPDIR:-/tmp}/okiltv-clang-tidy-raw.XXXXXX.log")"
 findings_log="$(mktemp "${TMPDIR:-/tmp}/okiltv-clang-tidy-findings.XXXXXX.log")"
 
 status=0
-if ! clang-tidy -p "$tmpdir" "${files[@]}" --quiet >"$raw_log" 2>&1; then
-    status=$?
-fi
+clang-tidy -p "$tmpdir" "${files[@]}" --quiet >"$raw_log" 2>&1 || status=$?
 
 awk '/^\/.*(warning|error|note): / {print}' "$raw_log" >"$findings_log"
 

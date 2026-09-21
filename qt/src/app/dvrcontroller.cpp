@@ -613,6 +613,13 @@ void DvrController::loadSchedulesFromSettings()
     });
 }
 
+void DvrController::removeSourceSchedules(const QString &profileId)
+{
+    m_schedules.removeIf([&profileId](const DvrScheduleEntry &entry) { return entry.profileId == profileId; });
+    persistSchedules();
+    tick();
+}
+
 void DvrController::persistSchedules()
 {
     m_settings->current().dvrSchedules = m_schedules;
