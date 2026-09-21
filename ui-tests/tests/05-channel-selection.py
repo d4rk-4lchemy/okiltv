@@ -106,16 +106,24 @@ def main():
         time.sleep(.3)
 
     def row(number):
-        # A keyboard tune hides chrome. Reveal it explicitly and wait for the
-        # slide to finish before sending the hover/click to a row: pointer
-        # activity during the transition is deliberately ignored by the app.
+        # A snapshot can still show the pane just as auto-hide starts. Move
+        # inside to keep it open, then await effective input readiness: geometry
+        # alone does not mean the chrome's slide/opacity animations have ended.
         state = runner.read_state()
         if not visible(state):
             move(700, 450)
             runner.xdotool("click", "1")
             state = wait("channel panel ready for pointer input", visible)
         bounds = next(r for r in state["regions"] if r["name"] == "left_pane")
-        move(100, bounds["y"] + 16 + 42 + 8 + 31 + (number - 1) * 64)
+        y = bounds["y"] + 16 + 42 + 8 + 31 + (number - 1) * 64
+        move(100, y)
+        wait("left panel accepts pointer input", lambda s: visible(s) and any(
+            i.get("enabled", False) and 0 <= i.get("bounds", {}).get("x", -1) < 340
+            and bounds["y"] <= i["bounds"]["y"] < bounds["y"] + bounds["height"]
+            for i in s["inventory"]))
+        # Reapply hover after the transition; the first move may have reached
+        # a disabled delegate and therefore could not preview the channel.
+        move(101, y)
 
     def outside():
         move(710, 450)
