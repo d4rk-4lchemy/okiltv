@@ -18,6 +18,8 @@
 #include <optional>
 #include <utility>
 
+namespace OKILTV::Core { class SettingsManager; }
+
 namespace OKILTV::App {
 
 class TimeshiftController;
@@ -83,6 +85,7 @@ class PlayerController final : public QObject
 
 public:
     explicit PlayerController(QObject *parent = nullptr);
+    void setTrackPreferenceSettings(Core::SettingsManager *settings);
 
     bool isPlaying() const;
     bool isLoading() const;
@@ -260,6 +263,8 @@ signals:
     void playbackError(const QString &message);
 
 private:
+    void configurePlaybackTrackPreferences(Player::MpvPlayer *player, bool discardMissing = true);
+    Core::SettingsManager *m_trackPreferenceSettings { nullptr };
     enum class StartupPolicy
     {
         StrictBuffered,

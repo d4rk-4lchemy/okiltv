@@ -223,7 +223,7 @@ QJsonObject toJson(const ServerProfile &profile)
     object.insert(QStringLiteral("xtreamUsername"), profile.xtreamUsername);
     object.insert(QStringLiteral("xtreamPassword"), profile.xtreamPassword);
     object.insert(QStringLiteral("xtreamServerTimezone"), profile.xtreamServerTimezone);
-    object.insert(QStringLiteral("catchupSafetyMinutes"), std::clamp(profile.catchupSafetyMinutes, 3, 30));
+    object.insert(QStringLiteral("catchupSafetyMinutes"), std::clamp(profile.catchupSafetyMinutes, 0, 30));
     object.insert(QStringLiteral("m3UUrl"), profile.m3uUrl);
     object.insert(QStringLiteral("m3UFilePath"), profile.m3uFilePath);
     object.insert(QStringLiteral("xmltvUrl"), profile.xmltvUrl);
@@ -249,7 +249,7 @@ ServerProfile serverProfileFromJson(const QJsonObject &object)
     profile.xtreamUsername = object.value(QStringLiteral("xtreamUsername")).toString();
     profile.xtreamPassword = object.value(QStringLiteral("xtreamPassword")).toString();
     profile.xtreamServerTimezone = object.value(QStringLiteral("xtreamServerTimezone")).toString().trimmed();
-    profile.catchupSafetyMinutes = std::clamp(object.value(QStringLiteral("catchupSafetyMinutes")).toInt(3), 3, 30);
+    profile.catchupSafetyMinutes = std::clamp(object.value(QStringLiteral("catchupSafetyMinutes")).toInt(3), 0, 30);
     profile.m3uUrl = object.value(QStringLiteral("m3UUrl")).toString();
     profile.m3uFilePath = object.value(QStringLiteral("m3UFilePath")).toString();
     profile.xmltvUrl = object.value(QStringLiteral("xmltvUrl")).toString();
@@ -334,6 +334,7 @@ QJsonObject toJson(const AppSettings &settings)
     object.insert(
         QStringLiteral("playerBufferSeconds"),
         normalizePlayerBufferSeconds(settings.playerBufferSeconds));
+    object.insert(QStringLiteral("playerVolume"), std::clamp(settings.playerVolume, 0.0, 100.0));
     object.insert(QStringLiteral("playerUserAgent"), settings.playerUserAgent);
     object.insert(QStringLiteral("timeshiftEnabled"), settings.timeshiftEnabled);
     object.insert(
@@ -373,6 +374,7 @@ QJsonObject toJson(const AppSettings &settings)
     }
     object.insert(QStringLiteral("dvrSchedules"), dvrSchedules);
     object.insert(QStringLiteral("lastCatchupSession"), settings.lastCatchupSession);
+    object.insert(QStringLiteral("channelTrackPreferences"), settings.channelTrackPreferences);
     object.insert(QStringLiteral("lastWatchedChannelId"), intMapToJson(settings.lastWatchedChannelId));
     object.insert(
         QStringLiteral("favoriteChannelIdsByProfile"),
@@ -436,9 +438,14 @@ AppSettings appSettingsFromJson(const QJsonObject &object)
                                               .toBool(settings.playerImageSmoothingEnabled);
     settings.playerDeinterlaceEnabled = object.value(QStringLiteral("playerDeinterlaceEnabled"))
                                             .toBool(settings.playerDeinterlaceEnabled);
+    settings.playerVolume = std::clamp(
+        object.value(QStringLiteral("playerVolume")).toDouble(settings.playerVolume), 0.0, 100.0);
     settings.playerBufferSeconds = normalizePlayerBufferSeconds(
         object.value(QStringLiteral("playerBufferSeconds")).toDouble(settings.playerBufferSeconds));
-    settings.playerUserAgent = object.value(QStringLiteral("playerUserAgent")).toString().trimmed();
+    const auto playerUserAgent = object.value(QStringLiteral("playerUserAgent"));
+    if (!playerUserAgent.isUndefined()) {
+        settings.playerUserAgent = playerUserAgent.toString().trimmed();
+    }
     settings.timeshiftEnabled = object.value(QStringLiteral("timeshiftEnabled")).toBool(settings.timeshiftEnabled);
     settings.timeshiftWindowMinutes = normalizeTimeshiftWindowMinutes(
         object.value(QStringLiteral("timeshiftWindowMinutes")).toInt(settings.timeshiftWindowMinutes));
@@ -498,6 +505,7 @@ AppSettings appSettingsFromJson(const QJsonObject &object)
         settings.dvrSchedules.push_back(entry);
     }
     settings.lastCatchupSession = object.value(QStringLiteral("lastCatchupSession")).toObject();
+    settings.channelTrackPreferences = object.value(QStringLiteral("channelTrackPreferences")).toObject();
     settings.lastWatchedChannelId =
         intMapFromJson(object.value(QStringLiteral("lastWatchedChannelId")).toObject());
     settings.favoriteChannelIdsByProfile = intListMapFromJson(

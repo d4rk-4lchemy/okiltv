@@ -3,6 +3,8 @@
 #include <QTemporaryDir>
 
 #include <QMap>
+#include <QJsonObject>
+#include <QSet>
 #include <QList>
 #include <QObject>
 #include <QPointer>
@@ -108,8 +110,11 @@ public:
     bool deinterlaceEnabled() const;
 
     QVariantList trackList() const;
-    void selectAudioTrack(int id);
-    void selectSubtitleTrack(int id);
+    void selectAudioTrack(int id, bool remember = false);
+    void selectSubtitleTrack(int id, bool remember = false);
+    void configureTrackPreferences(const QString &profileId, const QString &channelKey,
+                                   const QJsonObject &preferences, bool discardMissing = true);
+    bool managesTrackPreferences() const;
 
     void detectAndApplyDeinterlace();
 
@@ -123,6 +128,9 @@ public:
     qint64 lastRenderUpdateTimestampMs() const;
 
 signals:
+    void trackListReady(quint64 generation, const QVariantList &tracks);
+    void trackPreferenceChanged(const QString &profileId, const QString &channelKey,
+                                const QString &type, const QJsonObject &preference);
     void fileLoaded();
     void liveMediaPeriodChanged();
     void videoReconfigured();
@@ -134,6 +142,28 @@ signals:
     void errorOccurred(const QString &message);
 
 private:
+    void beginTrackLoad(const QString &url);
+    QString trackLoadOptions(const QString &options) const;
+    void acceptTrackSnapshot(quint64 generation, const QString &path, const QVariantList &tracks);
+    bool prepareRememberedTrack(const QString &type, int id);
+    void updateTrackPreference(const QString &type, const QJsonObject &preference);
+    std::atomic<quint64> m_trackGeneration { 0 };
+    std::atomic<quint64> m_tracksLoadedGeneration { 0 };
+    quint64 m_readyTrackGeneration { 0 };
+    QString m_trackExpectedPath;
+    QString m_trackProfileId;
+    QString m_trackChannelKey;
+    QJsonObject m_trackPreferences;
+    bool m_discardMissingTrackPreferences { true };
+    QVariantList m_readyTracks;
+    QMap<QString, int> m_defaultTrackIds;
+    QSet<QString> m_restoredTrackTypes;
+    struct PendingTrackChoice {
+        int id;
+        QJsonObject preference;
+    };
+    QMap<QString, PendingTrackChoice> m_pendingTrackChoices;
+    bool m_stopSubmitted = false;
     void applyPicturePresetLocked();
     struct CachedTelemetry
     {

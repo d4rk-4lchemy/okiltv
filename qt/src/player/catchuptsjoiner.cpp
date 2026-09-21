@@ -215,6 +215,7 @@ void CatchupTsJoiner::inspectSection(const QByteArray &section)
     m_candidate.streams.clear();
     qsizetype i = 12 + static_cast<qsizetype>(((byteAt(section, 10) & 15U) << 8) | byteAt(section, 11));
     bool hasVideo = false;
+    m_candidate.audioClockPid = -1;
     while (i + 5 <= section.size() - 4) {
         const auto type = static_cast<int>(byteAt(section, i));
         const auto pid = static_cast<int>(((byteAt(section, i + 1) & 31U) << 8) | byteAt(section, i + 2));
@@ -224,11 +225,17 @@ void CatchupTsJoiner::inspectSection(const QByteArray &section)
         }
         m_candidate.streams.insert(pid, type);
         hasVideo = hasVideo || type == 0x1b || type == 0x24 || type == 0x02;
+        if (m_candidate.audioClockPid < 0
+            && (type == 0x03 || type == 0x04 || type == 0x0f || type == 0x11
+                || type == 0x81 || type == 0x87)) {
+            m_candidate.audioClockPid = pid;
+        }
         i += 5 + length;
     }
-    if (i != section.size() - 4 || !hasVideo) {
+    if (i != section.size() - 4 || (!hasVideo && m_candidate.audioClockPid < 0)) {
         return;
     }
+    if (hasVideo) { m_candidate.audioClockPid = -1; }
     m_lastPmtSection = section;
     m_lastPmt = m_sectionPackets;
     if (m_configuration && *m_configuration != m_candidate && m_firstPts.has_value()) {
@@ -468,7 +475,9 @@ void CatchupTsJoiner::observe(const QByteArray &data)
         if (start && (flags & 0x10U) != 0 && payload + 14 <= offset + kPacketBytes
             && byteAt(m_packets, payload) == 0 && byteAt(m_packets, payload + 1) == 0
             && byteAt(m_packets, payload + 2) == 1
-            && (byteAt(m_packets, payload + 3) & 0xf0U) == 0xe0U
+            && (m_configuration && m_configuration->audioClockPid >= 0
+                ? pid == m_configuration->audioClockPid
+                : (byteAt(m_packets, payload + 3) & 0xf0U) == 0xe0U)
             && (byteAt(m_packets, payload + 7) & 0x80U) != 0) {
             const auto p = payload + 9;
             const auto pts = static_cast<qint64>(
@@ -495,9 +504,9 @@ void CatchupTsJoiner::observe(const QByteArray &data)
             }
             if (unwrapped < m_maxPts - 10 * 90000LL || unwrapped > m_maxPts + 60 * 90000LL) {
                 m_valid = false;
-                m_error = QStringLiteral("video clock discontinuity: delta=%1s pid=%2 previousPid=%3 rawPts=%4 previousRawPts=%5 unwrappedPts=%6 maxPts=%7 epoch=%8 previousEpoch=%9 packet=%10 cc=%11 discontinuity=%12 randomAccess=%13 transportError=%14 adaptationLength=%15 verifiedDuration=%16s")
+                m_error = QStringLiteral("media clock discontinuity: delta=%1s pid=%2 previousPid=%3 rawPts=%4 previousRawPts=%5 unwrappedPts=%6 maxPts=%7 epoch=%8 previousEpoch=%9 packet=%10 cc=%11 discontinuity=%12 randomAccess=%13 transportError=%14 adaptationLength=%15 verifiedDuration=%16s")
                     .arg(static_cast<double>(unwrapped - m_maxPts) / 90000.0, 0, 'f', 3)
-                    .arg(pid).arg(m_lastVideoPid).arg(pts).arg(previousPts.value_or(-1))
+                    .arg(pid).arg(m_lastMediaPid).arg(pts).arg(previousPts.value_or(-1))
                     .arg(unwrapped).arg(m_maxPts).arg(m_clockEpoch).arg(previousEpoch)
                     .arg(m_packetCount).arg(flags & 0x0fU)
                     .arg((adaptationFlags & 0x80U) != 0).arg((adaptationFlags & 0x40U) != 0)
@@ -508,7 +517,7 @@ void CatchupTsJoiner::observe(const QByteArray &data)
             if (unwrapped > m_maxPts && unwrapped - m_maxPts <= 9000) {
                 m_frameStep = unwrapped - m_maxPts;
             }
-            m_lastVideoPid = pid;
+            m_lastMediaPid = pid;
             m_maxPts = std::max(m_maxPts, unwrapped);
         }
         offset += kPacketBytes;

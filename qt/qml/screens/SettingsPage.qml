@@ -357,7 +357,7 @@ Item {
                     Layout.alignment: Qt.AlignHCenter
                     iconSource: root.iconPath("close.svg")
                     glyph: "X"
-                    caption: "Close without saving"
+                    caption: "Close"
                     activeFillColor: root.activeTabSurface
                     hoverFillColor: root.hoverTabSurface
                     onClicked: root.requestClose()
@@ -627,13 +627,6 @@ Item {
                     }
                 }
 
-                Text {
-                    Layout.fillWidth: true
-                    text: "100% keeps the default transparency; 0% makes UI backgrounds opaque. Preview updates immediately. Save to keep changes."
-                    color: Theme.textSecondary
-                    font.pixelSize: 12
-                    wrapMode: Text.Wrap
-                }
             }
 
             OverlaySectionPanel {
@@ -661,14 +654,6 @@ Item {
                     onActivated: root.settings.dateOrder = ["system", "dmy", "mdy"][currentIndex]
                 }
                 Text {
-                    Layout.fillWidth: true
-                    text: "Changes the day/month order while keeping each view's date style."
-                    color: Theme.textSecondary
-                    font.pixelSize: 12
-                    wrapMode: Text.Wrap
-                }
-
-                Text {
                     text: "Time format"
                     color: Theme.textPrimary
                     font.pixelSize: 14
@@ -686,13 +671,6 @@ Item {
                     text: "Preview: " + root.dateTime.preview(root.settings.dateOrder, root.settings.timeFormat)
                     color: Theme.textPrimary
                     font.pixelSize: 14
-                    wrapMode: Text.Wrap
-                }
-                Text {
-                    Layout.fillWidth: true
-                    text: "Applies throughout the app after Save. Day and month names are in English. System preferences are read at startup."
-                    color: Theme.textSecondary
-                    font.pixelSize: 12
                     wrapMode: Text.Wrap
                 }
             }
@@ -1593,7 +1571,7 @@ Item {
 
                             Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
                             Layout.preferredWidth: Math.max(260, root.numericFieldWidth + 140)
-                            placeholderText: "Default mpv User-Agent"
+                            placeholderText: "Default OKILTV User-Agent"
                             onTextEdited: root.settings.playerUserAgent = text
 
                             Binding {
@@ -1601,6 +1579,7 @@ Item {
                                 property: "text"
                                 value: root.settings.playerUserAgent
                                 when: !playerUserAgentField.activeFocus
+                                restoreMode: Binding.RestoreNone
                             }
                         }
                     }

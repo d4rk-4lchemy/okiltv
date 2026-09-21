@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(OKILTVQt VERSION 0.5.1 LANGUAGES CXX)
+project(OKILTVQt VERSION 0.5.2 LANGUAGES CXX)
+
+# Keep runtime identification independent of packaging metadata.  Core code also
+# uses this in tests, where QCoreApplication may not have an application version.
+add_compile_definitions(OKILTV_APP_VERSION="${PROJECT_VERSION}")
 
 option(OKILTV_BUILD_TESTS "Build Qt test targets" ON)
 
@@ -159,6 +163,8 @@ qt_add_resources(OKILTVQt app_assets
         resources/icons/next-channel.svg
         resources/icons/on-top.svg
         resources/icons/pause.svg
+        resources/icons/pip-close.svg
+        resources/icons/pip-switch.svg
         resources/icons/play.svg
         resources/icons/player.svg
         resources/icons/previous-channel.svg
@@ -239,6 +245,7 @@ set(OKILTV_QML_FILES
     qml/components/FormSpinBox.qml
     qml/components/FormSwitch.qml
     qml/components/FormTextField.qml
+    qml/components/ProgrammeTimelineState.qml
     qml/components/EpgTimeline.qml
     qml/components/EpgHoverBubble.qml
     qml/components/GlassPanel.qml

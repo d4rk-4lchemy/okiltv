@@ -150,6 +150,7 @@ private slots:
     void rejectChangedMuxAndClock();
     void preserveTimestampWrap();
     void splitConfigurationPeriods();
+    void audioOnlyClockAndPeriods();
     void repairIsolatedVideoClock();
     void retryForwardArchiveGap();
     void retriedGapRetainsHttpAndAdvancesTimeline_data();
@@ -455,6 +456,44 @@ void CatchupStreamTests::capturedForwardArchiveGap()
     next.push(pending);
     QVERIFY2(next.valid(), qPrintable(next.errorString()));
     QVERIFY(next.durationSeconds() > 2.0);
+}
+
+void CatchupStreamTests::audioOnlyClockAndPeriods()
+{
+    const auto tables = psiPacket(QByteArray::fromHex("00b00d0001c100000001f000"), 0)
+        + psiPacket(QByteArray::fromHex("02b0120001c10000e100f0000fe100f000"), 4096);
+    auto audio = transport(200, (1LL << 33) - 180000);
+    for (qsizetype i = 0; i < audio.size(); i += 188) { audio[i + 7] = char(0xc0); }
+    const auto first = tables + audio;
+    const auto second = periodTransport(true);
+    for (const qsizetype chunk : {1, 187, 4096}) {
+        Player::CatchupTsJoiner joiner;
+        QByteArray output;
+        for (qsizetype i = 0; i < first.size(); i += chunk) {
+            output += joiner.push(first.mid(i, chunk));
+        }
+        QCOMPARE(output, first);
+        QVERIFY(joiner.valid());
+        QCOMPARE(joiner.periodDurationSeconds(), 4.0);
+        QVERIFY(joiner.beginContinuation());
+        // Byte-identical overlap remains valid when the clock source is audio.
+        QCOMPARE(joiner.push(first), QByteArray());
+        QVERIFY(!joiner.matching());
+        QCOMPARE(joiner.push(second), QByteArray());
+        QVERIFY(joiner.valid());
+        QVERIFY(joiner.periodPending());
+        QCOMPARE(joiner.takeNextPeriod(), second);
+        Player::CatchupTsJoiner backToRadio;
+        QCOMPARE(backToRadio.push(second + first), second);
+        QVERIFY(backToRadio.periodPending());
+        QCOMPARE(backToRadio.takeNextPeriod(), first);
+    }
+    Player::CatchupTsJoiner discontinuity;
+    QCOMPARE(discontinuity.push(first), first);
+    auto jumped = transport(10, 100 * 90000LL);
+    for (qsizetype i = 0; i < jumped.size(); i += 188) { jumped[i + 7] = char(0xc0); }
+    discontinuity.push(jumped);
+    QVERIFY(!discontinuity.valid());
 }
 
 void CatchupStreamTests::splitConfigurationPeriods()
@@ -1007,8 +1046,10 @@ void CatchupStreamTests::safeWindowUsesProviderTimestampAndMargin()
 {
     const auto now = QDateTime::fromString(QStringLiteral("2026-09-12T19:20:00Z"), Qt::ISODate);
     QCOMPARE(Core::CatchupUrlResolver::availableEdge(now.addSecs(2400), 180, now), now.addSecs(-180));
-    QCOMPARE(Core::CatchupUrlResolver::availableEdge(now.addSecs(2400), 60, now), now.addSecs(-180));
-    QCOMPARE(Core::CatchupUrlResolver::availableEdge(now.addSecs(2400), 120, now), now.addSecs(-180));
+    QCOMPARE(Core::CatchupUrlResolver::availableEdge(now.addSecs(2400), 0, now), now);
+    QCOMPARE(Core::CatchupUrlResolver::availableEdge(now.addSecs(2400), -60, now), now);
+    QCOMPARE(Core::CatchupUrlResolver::availableEdge(now.addSecs(2400), 60, now), now.addSecs(-60));
+    QCOMPARE(Core::CatchupUrlResolver::availableEdge(now.addSecs(2400), 120, now), now.addSecs(-120));
     QCOMPARE(Core::CatchupUrlResolver::availableEdge(now.addSecs(-60), 180, now), now.addSecs(-180));
     QCOMPARE(Core::CatchupUrlResolver::availableEdge(now.addSecs(-600), 180, now), now.addSecs(-600));
     const auto canonical = QStringLiteral("https://provider/timeshift/user/password/17/2026-09-12:21-00/1.ts");

@@ -97,7 +97,7 @@ QString ProfilesModel::addXtreamProfile(
     profile.xtreamBaseUrl = baseUrl.trimmed();
     profile.xtreamUsername = username.trimmed();
     profile.xtreamPassword = password.trimmed();
-    profile.catchupSafetyMinutes = std::clamp(catchupSafetyMinutes, 3, 30);
+    profile.catchupSafetyMinutes = std::clamp(catchupSafetyMinutes, 0, 30);
     profile.xmltvUrl = xmltvUrl.trimmed();
     profile.autoRefreshIntervalHours = normalizeAutoRefreshIntervalHours(autoRefreshIntervalHours);
 
@@ -192,7 +192,7 @@ bool ProfilesModel::replaceProfile(const QString &profileId, const QVariantMap &
         profile.xtreamServerTimezone = changes.value(QStringLiteral("xtreamServerTimezone")).toString().trimmed();
     }
     if (changes.contains(QStringLiteral("catchupSafetyMinutes"))) {
-        profile.catchupSafetyMinutes = std::clamp(changes.value(QStringLiteral("catchupSafetyMinutes")).toInt(), 3, 30);
+        profile.catchupSafetyMinutes = std::clamp(changes.value(QStringLiteral("catchupSafetyMinutes")).toInt(), 0, 30);
     }
     if (changes.contains(QStringLiteral("m3UUrl"))) {
         profile.m3uUrl = changes.value(QStringLiteral("m3UUrl")).toString().trimmed();

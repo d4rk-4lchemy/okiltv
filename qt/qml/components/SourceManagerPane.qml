@@ -87,7 +87,7 @@ Item {
             "m3UUrl": normalizedText(profile.m3UUrl),
             "m3UFilePath": normalizedText(profile.m3UFilePath),
             "xmltvUrl": normalizedText(profile.xmltvUrl),
-            "catchupSafetyMinutes": Number(profile.catchupSafetyMinutes || 3),
+            "catchupSafetyMinutes": Number(profile.catchupSafetyMinutes ?? 3),
             "autoRefreshIntervalHours": normalizedAutoRefreshIntervalHours(profile.autoRefreshIntervalHours)
         }
     }
@@ -135,7 +135,7 @@ Item {
             && normalizedText(left.m3UUrl) === normalizedText(right.m3UUrl)
             && normalizedText(left.m3UFilePath) === normalizedText(right.m3UFilePath)
             && normalizedText(left.xmltvUrl) === normalizedText(right.xmltvUrl)
-            && Number(left.catchupSafetyMinutes || 3) === Number(right.catchupSafetyMinutes || 3)
+            && Number(left.catchupSafetyMinutes ?? 3) === Number(right.catchupSafetyMinutes ?? 3)
             && normalizedAutoRefreshIntervalHours(left.autoRefreshIntervalHours)
                 === normalizedAutoRefreshIntervalHours(right.autoRefreshIntervalHours)
     }
@@ -162,7 +162,7 @@ Item {
                 || normalizedText(draft.xtreamBaseUrl).length > 0
                 || normalizedText(draft.xtreamUsername).length > 0
                 || normalizedText(draft.xtreamPassword).length > 0
-                || Number(draft.catchupSafetyMinutes || 3) !== 3
+                || Number(draft.catchupSafetyMinutes ?? 3) !== 3
                 || normalizedAutoRefreshIntervalHours(draft.autoRefreshIntervalHours) !== 24
         }
         if (normalizedType === 1) {
@@ -224,7 +224,7 @@ Item {
         m3uUrlField.text = draft.m3UUrl || ""
         m3uFileField.text = draft.m3UFilePath || ""
         xmltvField.text = draft.xmltvUrl || ""
-        catchupSafetyMinutesField.value = Number(draft.catchupSafetyMinutes || 3)
+        catchupSafetyMinutesField.value = Number(draft.catchupSafetyMinutes ?? 3)
         autoRefreshIntervalHoursField.value = normalizedAutoRefreshIntervalHours(draft.autoRefreshIntervalHours)
     }
 
@@ -1129,7 +1129,7 @@ Item {
                         FormSpinBox {
                             id: catchupSafetyMinutesField
                             Layout.preferredWidth: root.shell.layoutBand === "compact" ? 174 : 192
-                            from: 3
+                            from: 0
                             to: 30
                             value: 3
                         }

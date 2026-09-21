@@ -2,6 +2,7 @@
 
 #include "../core/models.h"
 #include "../core/settingsmanager.h"
+#include "../core/processutils.h"
 
 #include <QDateTime>
 #include <QList>
@@ -80,6 +81,9 @@ private:
     struct Session
     {
         MergedWindow window;
+#if defined(Q_OS_WIN)
+        Core::WindowsProcessJob ingestJob;
+#endif
         std::unique_ptr<QProcess> ingestProcess;
         SessionState state { SessionState::Starting };
         QString tapUrl;
@@ -94,7 +98,6 @@ private:
         bool finishedSignaled { false };
         int lastExitCode { 0 };
         QProcess::ExitStatus lastExitStatus { QProcess::NormalExit };
-        int orphanSweepRetriesRemaining { 0 };
         QDateTime startRequestedAt;
         QString stopReason;
     };
@@ -127,7 +130,6 @@ private:
     void scheduleRestartForWindow(const QString &windowId, const QString &reason);
     void forceStopSessionProcess(const QString &sessionId, int retriesLeft);
     void reconcileStoppingSession(const QString &sessionId, const QString &reason);
-    void sweepWindowsOrphanFfmpeg(const Session &session) const;
     Session *sessionByChannel(const QString &profileId, int channelId) const;
     void maybeStartRemux(const Session &session);
     void scheduleDeleteTempRecording(const QString &path, int retriesLeft) const;

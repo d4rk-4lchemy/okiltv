@@ -7,6 +7,8 @@
 #include "../core/debuglogger.h"
 #include "../core/processutils.h"
 #include "../core/redaction.h"
+#include "../core/settingsmanager.h"
+#include "../core/trackpreferences.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -551,6 +553,23 @@ PlayerController::PlayerController(QObject *parent)
     m_positionTimer.start();
 }
 
+void PlayerController::setTrackPreferenceSettings(Core::SettingsManager *settings)
+{
+    m_trackPreferenceSettings = settings;
+}
+
+void PlayerController::configurePlaybackTrackPreferences(Player::MpvPlayer *player, const bool discardMissing)
+{
+    if (!m_trackPreferenceSettings || !m_currentChannel || !player) {
+        return;
+    }
+    const auto profileId = Core::guidToString(m_currentChannel->profileId);
+    const auto channelKey = Core::trackPreferenceChannelKey(*m_currentChannel);
+    player->configureTrackPreferences(profileId, channelKey,
+        m_trackPreferenceSettings->channelTrackPreferences(profileId, channelKey),
+        discardMissing && !timeshiftActive() && !timeshiftPreparing());
+}
+
 void PlayerController::ensurePlaybackSignalConnections(Player::MpvPlayer *player)
 {
     if (player == nullptr || player->property(kPlaybackSignalsConnectedProperty).toBool()) {
@@ -558,6 +577,12 @@ void PlayerController::ensurePlaybackSignalConnections(Player::MpvPlayer *player
     }
 
     player->setProperty(kPlaybackSignalsConnectedProperty, true);
+    connect(player, &Player::MpvPlayer::trackPreferenceChanged, this,
+        [this](const QString &profileId, const QString &channelKey, const QString &type, const QJsonObject &preference) {
+            if (m_trackPreferenceSettings) {
+                m_trackPreferenceSettings->setChannelTrackPreference(profileId, channelKey, type, preference);
+            }
+        });
     connect(player, &Player::MpvPlayer::liveMediaPeriodChanged, this, [this, player]() {
         if (playbackPlayer() != player) {
             return;
@@ -1312,6 +1337,7 @@ QVariantList PlayerController::audioTracks()
         entry[QStringLiteral("id")]       = tm.value(QStringLiteral("id"));
         entry[QStringLiteral("name")]     = QStringLiteral("Audio #%1").arg(displayIndex++);
         entry[QStringLiteral("subtitle")] = trackSubtitle(tm);
+        entry[QStringLiteral("selected")] = tm.value(QStringLiteral("selected")).toBool();
         result.append(entry);
     }
     return result;
@@ -1324,10 +1350,12 @@ QVariantList PlayerController::subtitleTracks()
     none[QStringLiteral("id")]       = 0;
     none[QStringLiteral("name")]     = QStringLiteral("Subtitle #0");
     none[QStringLiteral("subtitle")] = QStringLiteral("None");
+    const auto tracks = activePlayer->trackList();
+    none[QStringLiteral("selected")] = Core::selectedTrackId(tracks, QStringLiteral("sub")) == 0;
     QVariantList result;
     result.append(none);
     int displayIndex = 1;
-    for (const auto &t : activePlayer->trackList()) {
+    for (const auto &t : tracks) {
         const auto tm = t.toMap();
         if (tm.value(QStringLiteral("type")).toString() != QLatin1String("sub")) {
             continue;
@@ -1336,6 +1364,7 @@ QVariantList PlayerController::subtitleTracks()
         entry[QStringLiteral("id")]       = tm.value(QStringLiteral("id"));
         entry[QStringLiteral("name")]     = QStringLiteral("Subtitle #%1").arg(displayIndex++);
         entry[QStringLiteral("subtitle")] = trackSubtitle(tm);
+        entry[QStringLiteral("selected")] = tm.value(QStringLiteral("selected")).toBool();
         result.append(entry);
     }
     return result;
@@ -1347,7 +1376,7 @@ void PlayerController::selectAudioTrack(const int id)
     if (!activePlayer->isAvailable()) {
         return;
     }
-    activePlayer->selectAudioTrack(id);
+    activePlayer->selectAudioTrack(id, true);
 }
 
 void PlayerController::selectSubtitleTrack(const int id)
@@ -1356,7 +1385,7 @@ void PlayerController::selectSubtitleTrack(const int id)
     if (!activePlayer->isAvailable()) {
         return;
     }
-    activePlayer->selectSubtitleTrack(id);
+    activePlayer->selectSubtitleTrack(id, true);
 }
 
 QString PlayerController::debugStreamHostFromUrl(const QString &url)
@@ -1905,6 +1934,7 @@ void PlayerController::handleReconnectAttemptTick()
         ? prepareCatchupStreamPlaybackUrl(activePlayer, url, false)
         : url;
     m_catchupProgressTransportReady = false;
+    configurePlaybackTrackPreferences(activePlayer);
     activePlayer->play(playbackUrl, loadfileOptions);
 }
 
@@ -2530,6 +2560,7 @@ void PlayerController::attachSharedPlayback(
     m_sharedPlaybackPlayer->setVolume(effectiveVolume);
     m_currentChannel = channel;
     const auto previousPlaybackUrl = m_currentPlaybackUrl;
+    configurePlaybackTrackPreferences(playbackPlayer());
     m_currentPlaybackUrl = channel.streamUrl;
     m_nowPlayingName = channel.name;
     setChannelLoadFailed(false);
@@ -2575,6 +2606,7 @@ void PlayerController::adoptExistingPlaybackChannel(const Channel &channel)
     syncIsPlayingFromBackend();
     m_currentChannel = channel;
     const auto previousPlaybackUrl = m_currentPlaybackUrl;
+    configurePlaybackTrackPreferences(playbackPlayer());
     m_currentPlaybackUrl = channel.streamUrl;
     m_nowPlayingName = channel.name;
     emit currentChannelChanged();
@@ -2788,6 +2820,7 @@ void PlayerController::startPlaybackRequest(
         QStringLiteral("Startup policy selected for tune: %1.")
             .arg(startupPolicyLabel(startupPolicy)));
     m_catchupProgressTransportReady = false;
+    configurePlaybackTrackPreferences(activePlayer);
     activePlayer->play(url, loadfileOptions);
 }
 
@@ -2934,7 +2967,7 @@ qint64 PlayerController::catchupTimelineEndEpochMs() const
     const auto stop = m_catchupEndless
         ? (m_catchupDisplayProgram.has_value() ? m_catchupDisplayProgram->stop : QDateTime::currentDateTimeUtc())
         : m_catchupProgramStopUtc;
-    return std::min(QDateTime::currentDateTimeUtc(), stop).toMSecsSinceEpoch();
+    return stop.toMSecsSinceEpoch();
 }
 
 double PlayerController::catchupTimelineDurationSeconds() const
@@ -3396,6 +3429,7 @@ bool PlayerController::launchSeamlessCatchupStandbyLoad(Player::MpvPlayer *stand
     standbyPlayer->setPaused(false);
     const auto standbyPlaybackUrl =
         prepareCatchupStreamPlaybackUrl(standbyPlayer, m_catchupSeamlessStandbyUrl, true);
+    configurePlaybackTrackPreferences(standbyPlayer, false);
     standbyPlayer->play(
         standbyPlaybackUrl,
         catchupLoadfileOptions(m_catchupSeamlessStandbyStreamBaseOffsetSeconds, true));
@@ -3768,6 +3802,7 @@ bool PlayerController::maybeCommitSeamlessCatchupCutover(const QString &reason, 
     setIsLoading(false);
     setChannelSwitchInProgress(false);
     applyActiveCatchupBufferingPolicy(standbyPlayer);
+    configurePlaybackTrackPreferences(standbyPlayer);
     setSharedPlaybackPlayer(standbyPlayer, false);
 
     const QPointer<Player::MpvPlayer> oldActivePlayer = activePlayer;
@@ -4353,6 +4388,7 @@ void PlayerController::runCatchupTimelineReload()
         }
         m_catchupContinuousRecoveryTarget.reset();
     }
+    configurePlaybackTrackPreferences(activePlayer);
     activePlayer->play(
         playbackUrl,
         catchupLoadfileOptions(m_catchupTimelineReloadStreamBaseOffsetSeconds));
@@ -4449,6 +4485,7 @@ bool PlayerController::hardRestoreCatchupAtCurrentTimelinePoint(const QString &r
     activePlayer->setPaused(false);
     const auto playbackUrl = prepareCatchupStreamPlaybackUrl(activePlayer, restoreUrl, false);
     m_catchupProgressTransportReady = false;
+    configurePlaybackTrackPreferences(activePlayer);
     activePlayer->play(playbackUrl, catchupLoadfileOptions(m_catchupStreamBaseOffsetSeconds));
     if (previousPlaybackUrl != m_currentPlaybackUrl) {
         emit currentPlaybackUrlChanged();
@@ -4866,7 +4903,7 @@ void PlayerController::playCatchupChannel(
         m_catchupActiveStreamSession->closeProviderConnection(QStringLiteral("new-catchup-programme"));
         m_catchupActiveStreamSession.reset();
     }
-    m_catchupSafetySeconds = std::clamp(safetySeconds, 180, 1800);
+    m_catchupSafetySeconds = std::clamp(safetySeconds, 0, 1800);
     m_catchupContinuousFallback = false;
     m_catchupRecoveryAlignmentActive = false;
     m_catchupPeriodReload = false;
@@ -5380,8 +5417,13 @@ void PlayerController::seekTimeshiftToFraction(const double fraction)
     if (inCatchupMode()) {
         const auto clamped = std::max(0.0, std::min(1.0, fraction));
         syncCatchupTimelineState();
-        seekCatchupToTimelinePosition(clamped * catchupTimelineDurationSeconds()
-            + static_cast<double>(catchupTimelineStartEpochMs() - m_catchupTimelineStartEpochMs) / 1000.0);
+        const auto targetMs = static_cast<double>(catchupTimelineStartEpochMs())
+            + clamped * catchupTimelineDurationSeconds() * 1000.0;
+        if (targetMs > static_cast<double>(QDateTime::currentDateTimeUtc().toMSecsSinceEpoch())) {
+            returnToLiveFromCatchup();
+            return;
+        }
+        seekCatchupToTimelinePosition((targetMs - static_cast<double>(m_catchupTimelineStartEpochMs)) / 1000.0);
         return;
     }
     if (timeshiftActive() && m_timeshiftController) {
@@ -5613,6 +5655,7 @@ void PlayerController::handleHwdecFallbackCheck()
         ? prepareCatchupStreamPlaybackUrl(playbackPlayer(), retryUrl, false)
         : retryUrl;
     m_catchupProgressTransportReady = false;
+    configurePlaybackTrackPreferences(playbackPlayer());
     playbackPlayer()->play(playbackUrl, retryLoadfileOptions);
 }
 

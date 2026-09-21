@@ -5,6 +5,7 @@
 
 #include "../core/debuglogger.h"
 #include "../core/settingsmanager.h"
+#include "../core/trackpreferences.h"
 #include "../player/mpvplayer.h"
 
 #include <QVariantMap>
@@ -147,6 +148,7 @@ MultiViewController::MultiViewController(
     , m_playerController(playerController)
     , m_originalController(playerController)
 {
+    m_playerController->setTrackPreferenceSettings(settings);
     m_decodePressureTimer.setInterval(kDecodePressurePollIntervalMs);
     connect(&m_decodePressureTimer, &QTimer::timeout, this, &MultiViewController::handleDecodePressureTick);
     m_audioOwnershipRefreshTimer.setSingleShot(true);
@@ -265,6 +267,7 @@ void MultiViewController::enablePipSessions()
     }
     if (!m_pipController) {
         m_pipController = std::make_unique<PlayerController>();
+        m_pipController->setTrackPreferenceSettings(m_settings);
         connectPlaybackSession(m_pipController.get());
         const auto &settings = m_settings->current();
         m_pipController->applySettings(settings.mpvDllPath, settings.mpvOptions,
@@ -1219,6 +1222,10 @@ bool MultiViewController::assignChannelToSecondarySlot(const int slotIndex, cons
     if (auto *slotPlayer = slot.playbackPlayer()) {
         slotPlayer->setAudioEnabled(true);
         slotPlayer->setVolume(0);
+        const auto profileId = guidToString(channel.profileId);
+        const auto channelKey = trackPreferenceChannelKey(channel);
+        slotPlayer->configureTrackPreferences(profileId, channelKey,
+            m_settings->channelTrackPreferences(profileId, channelKey));
         slotPlayer->play(channel.streamUrl);
     }
 
@@ -1584,6 +1591,10 @@ void MultiViewController::configureSecondaryPlayer(MpvPlayer &player) const
 
 void MultiViewController::connectSecondaryPlayerSignals(MpvPlayer *player, const int slotIndex)
 {
+    connect(player, &MpvPlayer::trackPreferenceChanged, this,
+        [this](const QString &profileId, const QString &channelKey, const QString &type, const QJsonObject &preference) {
+            m_settings->setChannelTrackPreference(profileId, channelKey, type, preference);
+        });
     connect(player, &MpvPlayer::fileLoaded, this, [this, player, slotIndex]() {
         updateSecondarySlotState(slotIndex, player, QStringLiteral("ready"));
     });

@@ -117,6 +117,8 @@ struct DvrScheduleEntry
     QDateTime createdAt;
 };
 
+QString defaultPlayerUserAgent();
+
 struct AppSettings
 {
     std::optional<QUuid> activeProfileId;
@@ -141,8 +143,9 @@ struct AppSettings
     bool playerDeinterlaceEnabled { true };
     bool playerImageSmoothingEnabled { false };
     QString playerPicturePreset { QStringLiteral("standard") };
+    double playerVolume { 100.0 };
     double playerBufferSeconds { 3.0 };
-    QString playerUserAgent;
+    QString playerUserAgent { defaultPlayerUserAgent() };
     bool timeshiftEnabled { false };
     int timeshiftWindowMinutes { 90 };
     int timeshiftSegmentSeconds { 2 };
@@ -170,6 +173,7 @@ struct AppSettings
     QList<DvrScheduleEntry> dvrSchedules;
 
     QJsonObject lastCatchupSession;
+    QJsonObject channelTrackPreferences; // profile UUID -> channel key -> audio/sub preference
     QMap<QString, int> lastWatchedChannelId;
     QMap<QString, QList<int>> favoriteChannelIdsByProfile;
     QMap<QString, QString> selectedGroupByProfile;

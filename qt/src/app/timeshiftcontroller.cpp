@@ -1066,6 +1066,12 @@ void TimeshiftController::restoreTrackPreferences()
     if (!m_session.has_value() || !m_session->pendingTrackRestore) {
         return;
     }
+    if (m_playerController->player()->managesTrackPreferences()) {
+        // The generation-tagged track snapshot restores persistent preferences
+        // after this attach. An older session snapshot must not overwrite them.
+        m_session->pendingTrackRestore = false;
+        return;
+    }
 
     const auto tracks = m_playerController->player()->trackList();
     const auto audioId = findTrackIdForPreference(tracks, QStringLiteral("audio"), m_session->preferredAudioTrack);
