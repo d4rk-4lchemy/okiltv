@@ -3,7 +3,9 @@
 #include "../core/models.h"
 #include "../player/catchupstreamsession.h"
 #include "../player/mpvplayer.h"
-#include "../player/livebuffertuner.h"
+#include "playback/playbackbuffering.h"
+#include "playback/playbackrecovery.h"
+#include "playback/catchupplaybacksession.h"
 
 #include <QObject>
 #include <QElapsedTimer>
@@ -198,7 +200,7 @@ public:
         int safetySeconds = 180,
         bool endless = false,
         std::optional<Core::EpgEntry> program = std::nullopt);
-    std::optional<Core::EpgEntry> validatedCatchupProgramme() const { return m_catchupValidatedProgram; }
+    std::optional<Core::EpgEntry> validatedCatchupProgramme() const { return m_catchupSession.validatedProgram(); }
     void updateCatchupProgramme(const std::optional<Core::EpgEntry> &program);
     void playCurrentPlaybackUrl(const QString &url, bool pauseWhenReady = false, const QString &loadfileOptions = {});
     void refreshCurrentChannelMetadata(const Core::Channel &channel);
@@ -265,12 +267,7 @@ signals:
 private:
     void configurePlaybackTrackPreferences(Player::MpvPlayer *player, bool discardMissing = true);
     Core::SettingsManager *m_trackPreferenceSettings { nullptr };
-    enum class StartupPolicy
-    {
-        StrictBuffered,
-        FastLive,
-        BestEffort,
-    };
+    using StartupPolicy = Playback::PlaybackBuffering::StartupPolicy;
 
     static int reconnectAttemptIntervalMs();
     void ensurePlaybackSignalConnections(Player::MpvPlayer *player);
@@ -389,37 +386,22 @@ private:
     Player::MpvPlayer *playbackPlayer();
     const Player::MpvPlayer *playbackPlayer() const;
 
+    Playback::PlaybackBuffering m_buffering;
+    Playback::PlaybackRecovery m_recovery;
+    Playback::CatchupPlaybackSession m_catchupSession;
     Player::MpvPlayer m_player;
     Player::MpvPlayer m_catchupStandbyPlayer;
     QPointer<Player::MpvPlayer> m_sharedPlaybackPlayer;
     bool m_sharedPlaybackProtected { false };
+    quint64 m_playbackGeneration { 0 };
     QTimer m_positionTimer;
     QTimer m_liveDeliveryTimer;
     QElapsedTimer m_liveDeliveryClock;
-    Player::LiveBufferTuner m_liveBufferTuner;
-    QElapsedTimer m_liveReserveTimer;
-    QElapsedTimer m_liveReserveRetryTimer;
-    bool m_liveReservePending { false };
-    double m_liveReserveTargetSeconds { 0.0 };
     QTimer m_pauseStateSyncTimer;
     QTimer m_loadingIndicatorDelayTimer;
-    QTimer m_startupBufferFallbackTimer;
-    QTimer m_startupBufferProbeTimer;
-    QTimer m_reconnectAttemptTimer;
-    QTimer m_catchupTimelineReloadAckTimer;
     QTimer m_catchupTimelineNoticeClearTimer;
-    QTimer m_catchupSeamlessFallbackTimer;
-    QTimer m_catchupSeamlessStandbyStopAckTimer;
-    QTimer m_catchupSeamlessStandbyVideoReadyTimeoutTimer;
-    QTimer m_catchupSeamlessFastRetryTimer;
-    QTimer m_catchupSeamlessPostCloseDelayTimer;
     QTimer m_hwdecFallbackTimer;
     QElapsedTimer m_tuneAttemptTimer;
-    QElapsedTimer m_reconnectAttemptIssuedTimer;
-    QElapsedTimer m_reconnectTransportStopIssuedTimer;
-    QElapsedTimer m_reconnectWatchdogCooldownTimer;
-    QElapsedTimer m_steadyStateBufferRetuneTimer;
-    QElapsedTimer m_catchupSeekSettleTimer;
     bool m_isPlaying { false };
     bool m_isLoading { false };
     bool m_loadingIndicatorPending { false };
@@ -429,48 +411,14 @@ private:
     bool m_channelSwitchInProgress { false };
     bool m_channelLoadFailed { false };
     bool m_backendBuffering { false };
-    bool m_playbackStalled { false };
-    bool m_resumePlaybackAfterLoad { false };
     double m_volume { 100.0 };
     bool m_muted { false };
     double m_lastNonZeroVolume { 100.0 };
-    double m_lastPlaybackPositionSeconds { -1.0 };
-    int m_stalledPlaybackTickCount { 0 };
     int m_pauseStateSyncRetriesRemaining { 0 };
-    bool m_reconnectReservePending { false };
-    bool m_reconnectReserveReady { false };
-    bool m_reconnectFileLoaded { false };
-    double m_reconnectReserveTargetSeconds { 0.0 };
-    double m_reconnectReserveHighWaterSeconds { 0.0 };
-    QElapsedTimer m_reconnectReserveProgressTimer;
-    QElapsedTimer m_reconnectTotalAttemptTimer;
-    bool m_reconnectActive { false };
-    bool m_reconnectAttemptInFlight { false };
-    bool m_reconnectStabilizing { false };
-    bool m_reconnectTransportStopIssued { false };
-    int m_reconnectAttemptCount { 0 };
-    int m_reconnectRecoveryHealthyTickCount { 0 };
-    int m_reconnectRecoveryUnhealthyTickCount { 0 };
-    int m_reconnectStabilizationRefillTickCount { 0 };
-    int m_noRefillConsecutiveCount { 0 };
-    int m_videoFreezeConsecutiveCount { 0 };
     bool m_pauseToggleRequested { false };
     bool m_userPausedManually { false };
-    bool m_catchupRebuffering { false };
-    QElapsedTimer m_catchupRebufferTimer;
-    bool m_startupBufferFallbackAppliedForTune { false };
-    double m_startupBufferFallbackTargetSeconds { 0.0 };
     double m_waitForDataStreamSeconds { 5.0 };
     bool m_hwdecFallbackApplied { false };
-    std::optional<double> m_lastObservedCacheDurationSeconds;
-    std::optional<double> m_lastReconnectStabilizationCacheDurationSeconds;
-    std::optional<double> m_lastDisplayedVideoFramePtsSeconds;
-    std::optional<double> m_averageBitrateBitsPerSecond;
-    std::deque<std::pair<qint64, double>> m_debugBitrateSamples;
-    double m_lastAdaptiveCacheLimitSeconds { -1.0 };
-    double m_lastAdaptiveCacheHysteresisSeconds { -1.0 };
-    qint64 m_lastAdaptiveDemuxerMaxBytes { -1 };
-    qint64 m_lastAdaptiveDemuxerMaxBackBytes { -1 };
     bool m_pauseAfterLoad { false };
     QString m_positionText { QStringLiteral("00:00") };
     QString m_nowPlayingName { QStringLiteral("No channel") };
@@ -480,76 +428,12 @@ private:
     QString m_currentLoadfileOptions;
     QString m_playbackMode { QStringLiteral("live") };
     Core::DateTimeFormatOptions m_dateTimeFormat;
-    QString m_catchupProgramLabel;
-    bool m_catchupEndless { false };
-    bool m_catchupPublicationWaiting { false };
-    QElapsedTimer m_catchupPublicationWaitTimer;
-    int m_catchupContinuationAttempts { 0 };
-    double m_catchupContinuationPosition { -1.0 };
     void publishCatchupProgress(double streamSeconds);
-    bool m_catchupProgressTransportReady { false };
-    std::optional<double> m_catchupProgressSeekTargetSeconds;
-    std::optional<Core::EpgEntry> m_catchupDisplayProgram;
-    std::optional<Core::EpgEntry> m_catchupValidatedProgram;
-    QString m_livePlaybackUrlBeforeCatchup;
-    QString m_catchupCanonicalPlaybackUrl;
-    QDateTime m_catchupProgramStartUtc;
-    QDateTime m_catchupProgramStopUtc;
-    bool m_catchupProgramBoundaryReached { false };
-    bool m_catchupActiveEofObserved { false };
-    double m_catchupStreamBaseOffsetSeconds { 0.0 };
-    int m_catchupSafetySeconds { 180 };
-    bool m_catchupContinuousFallback { false };
-    std::optional<double> m_catchupContinuousRecoveryTarget;
-    bool m_catchupStandbyAlignmentSeekIssued { false };
-    bool m_catchupRecoveryAlignmentActive { false };
-    bool m_catchupPeriodReload { false };
-    bool m_catchupRecoveryAlignmentSeekIssued { false };
-    double m_catchupDesiredDelaySeconds { 0.0 };
-    double m_catchupTransportEndTimelineSeconds { 0.0 };
-    std::optional<double> m_catchupPendingStreamRelativeSeekSeconds;
-    std::optional<double> m_catchupReconnectResumeStreamRelativeSeconds;
-    std::optional<double> m_catchupPendingInitialSeekSeconds;
-    bool m_catchupTimelineReloadInFlight { false };
-    QString m_catchupTimelineReloadUrl;
-    double m_catchupTimelineReloadStreamBaseOffsetSeconds { 0.0 };
-    std::optional<double> m_pendingCatchupTimelineReloadTargetSeconds;
-    bool m_catchupSeamlessPending { false };
-    bool m_catchupSeamlessStandbyLoadIssued { false };
-    bool m_catchupSeamlessStandbyReady { false };
-    bool m_catchupSeamlessStandbyVideoReady { false };
-    bool m_catchupSeamlessStandbyStopPending { false };
-    bool m_catchupSeamlessPostCloseDelayPending { false };
     QPointer<Player::MpvPlayer> m_catchupSeamlessStandbyPlayer;
     QPointer<Player::MpvPlayer> m_catchupSeamlessPrewarmPlayer;
     bool m_catchupSeamlessPrewarmActive { false };
-    QString m_catchupSeamlessStandbyUrl;
-    double m_catchupSeamlessStandbyStreamBaseOffsetSeconds { 0.0 };
-    bool m_catchupSeamlessFallbackDeferred { false };
-    bool m_catchupSeamlessFastRetryPending { false };
-    int m_catchupSeamlessFastRetryBudgetRemaining { 0 };
     Player::CatchupStreamSession::Ptr m_catchupActiveStreamSession;
     Player::CatchupStreamSession::Ptr m_catchupStandbyStreamSession;
-    QElapsedTimer m_catchupSeamlessLastStandbyAttemptTimer;
-    QElapsedTimer m_catchupSeamlessFastRetryWindowTimer;
-    QElapsedTimer m_catchupSeamlessLastStandbyFailureTimer;
-    int m_catchupNearZeroTickCount { 0 };
-    QElapsedTimer m_catchupRecoveryCooldownTimer;
-    QElapsedTimer m_catchupRollingRetryWindowTimer;
-    QElapsedTimer m_catchupLastRollingExtensionAttemptTimer;
-    int m_catchupRollingExtensionRetryCount { 0 };
-    QElapsedTimer m_catchupUrlLoadGuardTimer;
-    double m_catchupLastObservedStreamSeconds { -1.0 };
-    bool m_catchupRollbackGuardConsumed { false };
-    bool m_catchupRollbackInitialLoadContext { false };
-    bool m_catchupRollbackDeferredPending { false };
-    double m_catchupRollbackDeferredTargetSeconds { -1.0 };
-    QElapsedTimer m_catchupRollbackDeferredTimer;
-    qint64 m_catchupTimelineStartEpochMs { 0 };
-    qint64 m_catchupTimelineAvailableEdgeEpochMs { 0 };
-    double m_catchupTimelineAvailableSeconds { 0.0 };
-    double m_catchupTimelinePositionSeconds { 0.0 };
-    bool m_catchupTimelineAtLiveEdge { true };
     QString m_catchupTimelineNoticeText;
     QString m_catchupTimelineNoticeAutoClearText;
     bool m_liveBufferActive { false };

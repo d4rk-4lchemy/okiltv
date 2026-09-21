@@ -294,7 +294,7 @@ void DebugLogger::qtMessageHandler(QtMsgType type, const QMessageLogContext &con
     }
 
     if (previousHandler != nullptr) {
-        previousHandler(type, context, message);
+        previousHandler(type, context, redactSensitiveText(message));
         return;
     }
 

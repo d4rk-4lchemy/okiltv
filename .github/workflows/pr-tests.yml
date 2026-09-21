@@ -1,0 +1,153 @@
+name: PR tests
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-tests:
+    name: Tests / ${{ matrix.group }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: core
+            targets: OKILTVQtCoreTests OKILTVQtDatabaseStartupTests
+          - group: app
+            targets: OKILTVQtAppTests
+          - group: playback
+            targets: OKILTVQtPlaybackTests OKILTVQtCatchupTests
+          - group: qml
+            targets: ''
+          - group: ui
+            targets: OKILTVQt
+    defaults:
+      run:
+        shell: bash
+    env:
+      OKILTV_BUILD_MAX_JOBS: '4'
+      QT_QPA_PLATFORM: offscreen
+      TEST_GROUP: ${{ matrix.group }}
+      BUILD_TARGETS: ${{ matrix.targets }}
+    steps:
+      # On pull_request this checks out GitHub's merge commit with main.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Install Linux test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build libgl1-mesa-dev libegl1-mesa-dev libgl1-mesa-dri \
+            libxkbcommon-dev libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 \
+            libxcb-image0 libxcb-render-util0 libdbus-1-dev zlib1g-dev libssl-dev \
+            libmpv2 libsecret-1-0 ffmpeg xvfb xauth openbox xdotool x11-utils \
+            dbus-x11 gnome-keyring
+          source scripts/ci/dependencies.env
+          python -m pip install "aqtinstall==$AQT_VERSION"
+          python -m aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 \
+            --outputdir "$RUNNER_TEMP/Qt" --modules qtshadertools qtimageformats
+          echo "$RUNNER_TEMP/Qt/$QT_VERSION/gcc_64/bin" >> "$GITHUB_PATH"
+          echo "CMAKE_PREFIX_PATH=$RUNNER_TEMP/Qt/$QT_VERSION/gcc_64" >> "$GITHUB_ENV"
+          # Fail early rather than silently skipping real-backend test cases.
+          python -c 'import ctypes; ctypes.CDLL("libmpv.so.2")'
+          ffmpeg -version
+      - name: Configure tests
+        run: cmake --preset qt-linux-debug -DOKILTV_BUILD_UI_TESTS=ON
+      - name: Build group targets
+        if: matrix.targets != ''
+        run: |
+          read -r -a targets <<< "$BUILD_TARGETS"
+          cmake --build --preset qt-linux-debug --target "${targets[@]}" \
+            -j"$(scripts/build_jobs.sh)"
+      - name: Run ${{ matrix.group }} tests
+        run: |
+          mkdir -p reports
+          ctest --preset qt-linux-debug -L "^$TEST_GROUP$" --no-tests=error \
+            --output-on-failure --output-junit "$PWD/reports/$TEST_GROUP.xml"
+      - name: Save test reports and UI diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tests-${{ matrix.group }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            reports/*.xml
+            qt/out/build/qt-linux-debug/Testing/Temporary/*.log
+            qt/out/build/qt-linux-debug/ui-artifacts/**/*.log
+            qt/out/build/qt-linux-debug/ui-artifacts/**/*-result.json
+            qt/out/build/qt-linux-debug/ui-artifacts/**/failure.json
+            qt/out/build/qt-linux-debug/ui-artifacts/**/*.png
+
+  windows-tests:
+    name: Tests / windows
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Install Qt and MinGW
+        run: |
+          $versions = ConvertFrom-StringData (Get-Content scripts/ci/dependencies.env -Raw)
+          python -m pip install "aqtinstall==$($versions.AQT_VERSION)"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m aqt install-qt windows desktop $versions.QT_VERSION win64_mingw --outputdir "$env:RUNNER_TEMP/Qt"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m aqt install-tool windows desktop tools_mingw1310 qt.tools.win64_mingw1310 --outputdir "$env:RUNNER_TEMP/Qt"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          "$env:RUNNER_TEMP/Qt/$($versions.QT_VERSION)/mingw_64/bin" >> $env:GITHUB_PATH
+          "$env:RUNNER_TEMP/Qt/Tools/mingw1310_64/bin" >> $env:GITHUB_PATH
+          "CMAKE_PREFIX_PATH=$env:RUNNER_TEMP/Qt/$($versions.QT_VERSION)/mingw_64" >> $env:GITHUB_ENV
+      - name: Build Windows process and DVR tests
+        run: |
+          cmake -S . -B qt/out/build/windows-tests -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=g++ -DCMAKE_CXX_STANDARD=20 -DCMAKE_CXX_STANDARD_REQUIRED=ON -DOKILTV_BUILD_TESTS=ON
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build qt/out/build/windows-tests --target OKILTVQtAppTests --parallel 4
+      - name: Run native Windows tests
+        run: |
+          New-Item -ItemType Directory -Force reports | Out-Null
+          ctest --test-dir qt/out/build/windows-tests -L '^windows$' --no-tests=error --output-on-failure --output-junit "$env:GITHUB_WORKSPACE/reports/windows.xml"
+      - name: Save Windows reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tests-windows
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            reports/*.xml
+            qt/out/build/windows-tests/Testing/Temporary/*.log
+
+  tests-passed:
+    name: Tests passed
+    if: always()
+    needs: [linux-tests, windows-tests]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every test group to pass
+        env:
+          LINUX_RESULT: ${{ needs.linux-tests.result }}
+          WINDOWS_RESULT: ${{ needs.windows-tests.result }}
+        run: test "$LINUX_RESULT" = success && test "$WINDOWS_RESULT" = success

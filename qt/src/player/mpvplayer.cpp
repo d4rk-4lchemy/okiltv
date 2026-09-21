@@ -188,12 +188,9 @@ QString secondsOptionValue(const double value)
 }
 
 constexpr qint64 kMiB = 1024LL * 1024LL;
-constexpr qint64 kDemuxerMaxBytesFloor = 8 * kMiB;
 constexpr qint64 kDemuxerMaxBytesCeil = 8LL * 1024 * kMiB;
 constexpr qint64 kSteadyStateDemuxerMaxBytesFloor = 8 * kMiB;
 constexpr qint64 kSteadyStateDemuxerMaxBackBytesFloor = 8 * kMiB;
-constexpr double kDemuxerBytesPerSecond = 2.0 * static_cast<double>(kMiB);
-constexpr double kSteadyStateBackBufferSeconds = 30.0;
 constexpr double kMpvNetworkTimeoutFloorSeconds = 20.0;
 constexpr double kMpvNetworkTimeoutCeilSeconds = 300.0;
 constexpr double kMpvNetworkTimeoutWaitMultiplier = 6.0;
@@ -362,37 +359,6 @@ MpvPlayer::MpvPlayer(QObject *parent)
 MpvPlayer::~MpvPlayer()
 {
     unload();
-}
-
-qint64 MpvPlayer::demuxerMaxBytesForBufferSeconds(const double bufferSeconds)
-{
-    const auto normalizedBuffer = Core::normalizePlayerBufferSeconds(bufferSeconds);
-    const auto rawBytes = static_cast<qint64>(std::llround(normalizedBuffer * kDemuxerBytesPerSecond));
-    return std::clamp(rawBytes, kDemuxerMaxBytesFloor, kDemuxerMaxBytesCeil);
-}
-
-double MpvPlayer::cacheWindowSecondsForBufferTarget(const double bufferTargetSeconds)
-{
-    const auto normalizedTarget = Core::normalizePlayerBufferSeconds(bufferTargetSeconds);
-    return std::clamp(std::max(normalizedTarget * 3.0, normalizedTarget + 8.0), 10.0, 120.0);
-}
-
-double MpvPlayer::steadyStateBackBufferSeconds()
-{
-    return kSteadyStateBackBufferSeconds;
-}
-
-double MpvPlayer::steadyStateCacheLimitSecondsForBufferTarget(const double bufferTargetSeconds)
-{
-    // The playback reserve is not a download ceiling. Accept provider bursts
-    // beyond it, while keeping read-ahead bounded by time and byte budgets.
-    return cacheWindowSecondsForBufferTarget(bufferTargetSeconds);
-}
-
-double MpvPlayer::steadyStateCacheHysteresisSecondsForBufferTarget(const double /*bufferTargetSeconds*/)
-{
-    // Zero disables mpv's refill hysteresis: read whenever cache space opens.
-    return 0.0;
 }
 
 void MpvPlayer::configureLibraryPath(const QString &path)
@@ -828,6 +794,15 @@ bool MpvPlayer::ensureInitialized()
     }
     registerCatchupStreamProtocol();
 
+    // Focus/volume can be configured before a standby backend is needed.
+    // Restore explicit requests on initialization, including after reconfiguration.
+    if (m_volumeConfigured) {
+        applyOption("volume", QString::number(m_volumeRequested));
+    }
+    if (m_audioEnableConfigured) {
+        applyOption("aid", m_audioEnabledRequested ? QStringLiteral("auto") : QStringLiteral("no"));
+    }
+
     const auto initCode = m_api->initialize(m_state->handle);
     if (initCode < 0) {
         const auto error = QString::fromUtf8(m_api->errorString(initCode));
@@ -880,6 +855,7 @@ bool MpvPlayer::ensureInitialized()
     }
 
     m_state->initialized = true;
+    m_audioEnableApplied = m_audioEnableConfigured;
     m_appliedPictureShader.clear();
     applyPicturePresetLocked();
     m_diagnostics = QStringLiteral("Loaded mpv from %1").arg(m_api->library.fileName());
@@ -1154,7 +1130,7 @@ void MpvPlayer::stop()
     beginTrackLoad({});
     closeLiveStream(QStringLiteral("stop"));
     stopStreamRecord();
-    if (!ensureInitialized()) {
+    if (!m_state->initialized) {
         return;
     }
 
@@ -1246,6 +1222,10 @@ void MpvPlayer::setPaused(const bool paused)
 void MpvPlayer::setVolume(const int volume)
 {
     m_volumeRequested = std::clamp(volume, 0, 100);
+    m_volumeConfigured = true;
+    if (!m_state->initialized) {
+        return;
+    }
     auto value = static_cast<double>(m_volumeRequested);
     setPlaybackPropertyAsync("volume", kMpvFormatDouble, &value, kVolumePropertyRequest);
 }
@@ -1260,6 +1240,10 @@ void MpvPlayer::setAudioEnabled(const bool enabled)
         m_restoredTrackTypes.remove(QStringLiteral("audio"));
     }
     m_audioEnabledRequested = enabled;
+    m_audioEnableConfigured = true;
+    if (!m_state->initialized) {
+        return;
+    }
     const char *trackSelection = enabled ? "auto" : "no";
     m_audioEnableApplied = setPlaybackPropertyAsync(
         "aid", kMpvFormatString, static_cast<void *>(&trackSelection), kAudioPropertyRequest);

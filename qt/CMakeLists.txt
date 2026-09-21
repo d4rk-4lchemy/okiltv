@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(OKILTVQt VERSION 0.5.2 LANGUAGES CXX)
+project(OKILTVQt VERSION 0.5.3 LANGUAGES CXX)
 
 # Keep runtime identification independent of packaging metadata.  Core code also
 # uses this in tests, where QCoreApplication may not have an application version.
@@ -48,6 +48,14 @@ if (UNIX AND NOT APPLE)
     find_package(Qt6 REQUIRED COMPONENTS DBus)
 endif()
 
+# System-account protection: DPAPI on Windows, keyring-backed AES-GCM elsewhere.
+if (WIN32)
+    set(OKILTV_SECRET_LIB crypt32)
+else ()
+    find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+    set(OKILTV_SECRET_LIB OpenSSL::Crypto)
+endif ()
+
 qt_standard_project_setup()
 
 qt_add_executable(OKILTVQt
@@ -64,6 +72,8 @@ qt_add_executable(OKILTVQt
     src/app/guidestatemodel.cpp
     src/app/guidestatemodel.h
     src/app/main.cpp
+    src/app/databasestartup.cpp
+    src/app/databasestartup.h
     src/app/multiviewcontroller.cpp
     src/app/multiviewcontroller.h
     src/app/nownextmodel.cpp
@@ -72,6 +82,14 @@ qt_add_executable(OKILTVQt
     src/app/portableruntimecontroller.h
     src/app/profilesmodel.cpp
     src/app/profilesmodel.h
+    src/app/playback/playbackbuffering.cpp
+    src/app/playback/playbackbuffering.h
+    src/app/playback/playbackrecovery.cpp
+    src/app/playback/playbackrecovery.h
+    src/app/playback/catchupplaybacksession.cpp
+    src/app/playback/catchupplaybacksession.h
+    src/app/playback/catchupstandbytransition.cpp
+    src/app/playback/catchupstandbytransition.h
     src/app/playercontroller.cpp
     src/app/playercontroller.h
     src/app/datetimeformatter.cpp
@@ -123,6 +141,8 @@ qt_add_executable(OKILTVQt
     src/core/redaction.h
     src/core/settingsmanager.cpp
     src/core/settingsmanager.h
+    src/core/secretprotection.cpp
+    src/core/secretprotection.h
     src/core/sourcestore.cpp
     src/core/sourcestore.h
     src/core/xtreamservice.cpp
@@ -135,6 +155,7 @@ qt_add_executable(OKILTVQt
     src/player/mpegtstimestampnormalizer.h
     src/player/livebuffertuner.cpp
     src/player/livebuffertuner.h
+    src/player/cachepolicy.cpp
     src/player/mpvplayer.cpp
     src/player/mpvplayer.h
     src/player/mpvvideoitem.cpp
@@ -204,6 +225,7 @@ if (UNIX AND NOT APPLE)
 endif ()
 
 target_link_libraries(OKILTVQt PRIVATE
+    ${OKILTV_SECRET_LIB}
     Qt6::Concurrent
     Qt6::Core
     Qt6::Gui
@@ -225,7 +247,8 @@ if (MINGW)
 endif ()
 
 if (UNIX AND NOT APPLE)
-    target_link_libraries(OKILTVQt PRIVATE Qt6::DBus)
+    target_link_libraries(OKILTVQt PRIVATE
+    ${OKILTV_SECRET_LIB} Qt6::DBus)
 endif ()
 
 if (WIN32)

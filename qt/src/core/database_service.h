@@ -5,6 +5,7 @@
 #include <QHash>
 #include <QDateTime>
 #include <QString>
+#include <functional>
 
 namespace OKILTV::Core {
 
@@ -24,14 +25,18 @@ struct CatchupProgress
 class DatabaseService
 {
 public:
-    explicit DatabaseService(QString databaseFilePath = {});
+    using RebuildStarted = std::function<void()>;
+    explicit DatabaseService(QString databaseFilePath = {}, const RebuildStarted &rebuildStarted = {});
 
     QString databaseFilePath() const;
 
-    void ensureSchema() const;
+    void ensureSchema(const RebuildStarted &rebuildStarted = {}) const;
+    void removeProfileData(const QUuid &profileId) const;
     void upsertChannels(const QList<Channel> &channels) const;
     void replaceChannelsForProfile(const QUuid &profileId, const QList<Channel> &channels) const;
     QList<Channel> loadChannels(const QUuid &profileId) const;
+    // Normalized, unique groups in channel order; never reads protected URLs.
+    QStringList loadChannelGroupIds(const QUuid &profileId) const;
     void updateCachedIcon(int channelId, const QUuid &profileId, const QString &localPath) const;
     QHash<int, qint64> loadWatchSecondsByProfile(const QUuid &profileId) const;
     void incrementWatchSeconds(const QUuid &profileId, int channelId, qint64 deltaSeconds) const;

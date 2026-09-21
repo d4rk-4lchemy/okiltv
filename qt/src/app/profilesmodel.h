@@ -56,6 +56,7 @@ public:
     Q_INVOKABLE void reload();
 
 signals:
+    void profileRemoved(const QString &profileId);
     void activeProfileIdChanged();
     void profileSelectionRequested(const QString &profileId);
 

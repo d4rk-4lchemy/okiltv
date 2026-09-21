@@ -117,6 +117,7 @@ private:
     void updateChannelProgrammeMetadata();
     QList<Core::Channel> guideChannels() const;
     bool syncProfileGroupPreferences(const QUuid &profileId, const QList<Core::Channel> &channels);
+    bool syncProfileGroupIds(const QUuid &profileId, QStringList discoveredGroups);
     void beginWatchTrackingForCurrentChannel();
     void flushTrackedWatchSeconds();
     bool restoreStartupCatchup(const Core::Channel &channel);

@@ -1,4 +1,5 @@
 #include "appcontroller.h"
+#include "databasestartup.h"
 #include "channellistmodel.h"
 #include "displaysleepblocker.h"
 #include "dvrcontroller.h"
@@ -24,10 +25,12 @@
 #include "../core/networkaccess.h"
 #include "../core/portablebootstrap.h"
 #include "../core/settingsmanager.h"
+#include "../core/redaction.h"
 
 #include <QApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <QMessageBox>
 #include <QIcon>
 #include <QLibraryInfo>
 #include <QQmlApplicationEngine>
@@ -36,6 +39,7 @@
 #include <QQuickWindow>
 #include <QSqlDatabase>
 #include <QSurfaceFormat>
+#include <QTimer>
 
 #include <clocale>
 #include <exception>
@@ -206,6 +210,15 @@ struct CoreServices
     std::unique_ptr<OKILTV::Core::EpgService> epgService;
 };
 
+std::unique_ptr<OKILTV::Core::DatabaseService> loadStartupDatabase(const QString &path)
+{
+    std::unique_ptr<OKILTV::Core::DatabaseService> database;
+    OKILTV::App::runDatabaseStartup([&](const auto &rebuildStarted) {
+        database = std::make_unique<OKILTV::Core::DatabaseService>(path, rebuildStarted);
+    });
+    return database;
+}
+
 CoreServices constructCoreServices(const StartupLogFn &startupStep)
 {
     startupStep(QStringLiteral("Constructing core services."));
@@ -220,9 +233,27 @@ CoreServices constructCoreServices(const StartupLogFn &startupStep)
 
     startupStep(QStringLiteral("Available SQL drivers: %1").arg(QSqlDatabase::drivers().join(QStringLiteral(", "))));
     services.database = constructComponent<OKILTV::Core::DatabaseService>(startupStep, QStringLiteral("DatabaseService"), []() {
-        return std::make_unique<OKILTV::Core::DatabaseService>();
+        return loadStartupDatabase(OKILTV::Core::AppDataPaths::databaseFile());
     });
     startupStep(QStringLiteral("DatabaseService ready. Database=%1").arg(services.database->databaseFilePath()));
+
+    // The historical import copied files and left the old installation's data
+    // behind. Protect that retained copy as well; never delete it as a shortcut.
+    const auto appData = qEnvironmentVariable("APPDATA");
+    if (!appData.isEmpty()) {
+        const auto legacyRoot = QDir(appData).filePath(QStringLiteral("IptvPlayer"));
+        const auto legacySettings = QDir(legacyRoot).filePath(QStringLiteral("settings.json"));
+        if (QDir::cleanPath(legacySettings) != QDir::cleanPath(services.settings->settingsFilePath())
+            && QFileInfo::exists(legacySettings)) {
+            OKILTV::Core::SettingsManager legacy(legacySettings);
+            legacy.load();
+        }
+        const auto legacyDatabase = QDir(legacyRoot).filePath(QStringLiteral("iptv.db"));
+        if (QDir::cleanPath(legacyDatabase) != QDir::cleanPath(services.database->databaseFilePath())
+            && QFileInfo::exists(legacyDatabase)) {
+            const auto legacy = loadStartupDatabase(legacyDatabase);
+        }
+    }
 
     startupStep(QStringLiteral("Creating network access layer."));
     services.network = OKILTV::Core::makeDefaultNetworkAccess();
@@ -325,6 +356,8 @@ AppServices constructAppServices(
         [settings, &services]() {
             return std::make_unique<OKILTV::App::DvrController>(settings, services.playerController.get());
         });
+    QObject::connect(services.profilesModel.get(), &OKILTV::App::ProfilesModel::profileRemoved,
+        services.dvrController.get(), &OKILTV::App::DvrController::removeSourceSchedules);
     services.timeshiftController = constructComponent<OKILTV::App::TimeshiftController>(
         startupStep,
         QStringLiteral("TimeshiftController"),
@@ -671,6 +704,17 @@ int main(int argc, char *argv[])
 
         startupStep(QStringLiteral("Scheduling AppController initialization."));
         QMetaObject::invokeMethod(appController.get(), "initialize", Qt::QueuedConnection);
+        // Windows RAM experiment: exercise Close PiP's backend disposal once.
+        // An explicit 0 disables it; 1 also enables it on other platforms for tests.
+#if defined(Q_OS_WIN)
+        const auto startupPipCleanup = qEnvironmentVariable("OKILTV_STARTUP_PIP_CLEANUP") != QStringLiteral("0");
+#else
+        const auto startupPipCleanup = qEnvironmentVariable("OKILTV_STARTUP_PIP_CLEANUP") == QStringLiteral("1");
+#endif
+        if (startupPipCleanup) {
+            QTimer::singleShot(500, appServices.multiViewController.get(),
+                &OKILTV::App::MultiViewController::runStartupPlayerCleanup);
+        }
         startupStep(QStringLiteral("Entering event loop."));
         return application.exec();
     } catch (const std::exception &error) {
@@ -678,6 +722,10 @@ int main(int argc, char *argv[])
         OKILTV::Core::DebugLogger::instance().log(
             QStringLiteral("fatal"),
             QStringLiteral("Unhandled std::exception during startup: %1").arg(message));
+        if (!qEnvironmentVariableIsSet("OKILTV_HEADLESS_TEST")) {
+            QMessageBox::critical(nullptr, QStringLiteral("OKILTV — startup failed"),
+                OKILTV::Core::redactSensitiveText(message));
+        }
         return 2;
     } catch (...) {
         OKILTV::Core::DebugLogger::instance().log(

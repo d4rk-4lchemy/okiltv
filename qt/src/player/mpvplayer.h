@@ -251,8 +251,10 @@ private:
     std::optional<bool> m_sourceInterlaced;
     bool m_recording { false };
     bool m_audioEnabledRequested { true };
+    bool m_audioEnableConfigured { false };
     bool m_audioEnableApplied { false };
     int m_volumeRequested { 100 };
+    bool m_volumeConfigured { false };
     QString m_diagnostics;
     QPointer<QObject> m_updateTarget;
     std::atomic_bool m_frameUpdateQueued { false };
