@@ -19,6 +19,22 @@ double roundToSingleDecimal(const double value)
 
 } // namespace
 
+QString defaultPlayerUserAgent()
+{
+#if defined(Q_OS_WINDOWS)
+    constexpr auto platform = "Windows";
+#elif defined(Q_OS_MACOS)
+    constexpr auto platform = "MacOS";
+#elif defined(Q_OS_LINUX)
+    constexpr auto platform = "Linux";
+#else
+    constexpr auto platform = "Unknown";
+#endif
+
+    return QStringLiteral("OKILTV/%1 (%2)")
+        .arg(QStringLiteral(OKILTV_APP_VERSION), QString::fromLatin1(platform));
+}
+
 QString guidToString(const QUuid &value)
 {
     return normalizedGuid(value);

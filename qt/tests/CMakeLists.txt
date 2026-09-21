@@ -175,6 +175,16 @@ target_include_directories(OKILTVQtCatchupTests PRIVATE ${CMAKE_CURRENT_SOURCE_D
 target_link_libraries(OKILTVQtCatchupTests PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent Qt6::Test)
 add_test(NAME OKILTVQtCatchupTests COMMAND OKILTVQtCatchupTests)
 
+if (WIN32)
+    qt_add_executable(OKILTVQtWindowsProcessJobTests
+        tst_windowsprocessjob.cpp
+        ../src/core/processutils.cpp
+        ../src/core/processutils.h)
+    target_link_libraries(OKILTVQtWindowsProcessJobTests PRIVATE Qt6::Core Qt6::Test)
+    add_dependencies(OKILTVQtAppTests OKILTVQtWindowsProcessJobTests)
+    add_test(NAME OKILTVQtWindowsProcessJobTests COMMAND OKILTVQtWindowsProcessJobTests)
+endif ()
+
 # Component-level interaction tests run without provider credentials or media playback.
 # Cross builds cannot execute the target SDK's QML runner on the host.
 if (NOT CMAKE_CROSSCOMPILING)
@@ -183,6 +193,10 @@ if (NOT CMAKE_CROSSCOMPILING)
         add_test(NAME OKILTVQtUiTransparencyTests
             COMMAND "${OKILTV_QMLTESTRUNNER}" -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_uitransparency.qml")
         set_tests_properties(OKILTVQtUiTransparencyTests PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+        add_test(NAME OKILTVQtProgrammeTimelineTests
+            COMMAND "${OKILTV_QMLTESTRUNNER}" -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_programmetimeline.qml")
+        set_tests_properties(OKILTVQtProgrammeTimelineTests PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
         add_test(NAME OKILTVQtEpgTimelineTests
             COMMAND "${OKILTV_QMLTESTRUNNER}" -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_epgtimeline.qml")

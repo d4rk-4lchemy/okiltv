@@ -51,6 +51,7 @@ private:
         int pmtPid { -1 };
         int pcrPid { -1 };
         QMap<int, int> streams;
+        int audioClockPid { -1 }; // First audio PID, used only when no video is declared.
         bool operator==(const Configuration &) const = default;
     };
     std::optional<Configuration> m_configuration;
@@ -86,7 +87,7 @@ private:
     bool m_synchronized { false };
     std::optional<qint64> m_firstPts;
     std::optional<qint64> m_lastPts;
-    int m_lastVideoPid { -1 };
+    int m_lastMediaPid { -1 };
     quint64 m_packetCount { 0 };
     qint64 m_maxPts { 0 };
     qint64 m_clockEpoch { 0 };

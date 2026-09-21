@@ -205,7 +205,7 @@ CatchupUrlResolver::CatchupUrlResolver(std::optional<ServerProfile> profile)
 
 QDateTime CatchupUrlResolver::availableEdge(const QDateTime &stop, const int safetySeconds, const QDateTime &now)
 {
-    return std::min(stop.toUTC(), now.toUTC().addSecs(-std::clamp(safetySeconds, 180, 1800)));
+    return std::min(stop.toUTC(), now.toUTC().addSecs(-std::clamp(safetySeconds, 0, 1800)));
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters) -- Named range endpoints are checked before URL construction.
@@ -250,7 +250,7 @@ std::optional<CatchupPlaybackTarget> CatchupUrlResolver::resolve(
     };
     target.programStartUtc = program.start.toUTC();
     target.programStopUtc = program.stop.toUTC();
-    target.safetySeconds = 60 * std::clamp(m_profile.has_value() ? m_profile->catchupSafetyMinutes : 3, 3, 30);
+    target.safetySeconds = 60 * std::clamp(m_profile.has_value() ? m_profile->catchupSafetyMinutes : 3, 0, 30);
 
     if (!channel.catchupSupported) {
         return fail(QStringLiteral("Channel archive is unavailable."));

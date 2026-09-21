@@ -6,7 +6,11 @@ Build with `scripts/package_qt_win64.sh`. Test in a disposable Windows VM
 1. With no installation, install to a path containing spaces. Check that
    `OKILTV.exe` and `Uninstall.exe` exist and Apps & Features points to this folder.
    The finish-page **Run application** checkbox must be checked. Finish should
-   launch OKILTV; repeating with the box unchecked should not launch it.
+   launch OKILTV in front of other open applications, with keyboard focus;
+   repeating with the box unchecked should not launch it. Verify both normal
+   and saved maximized startup, with another application's window open behind
+   the installer. Clicking that other application afterward must still work
+   (OKILTV must not become permanently always-on-top).
 2. Install an older release in a non-default folder, then run the new installer.
    No uninstall prompt should appear at startup. After the license page, the
    maintenance page should display the old folder and default to updating.

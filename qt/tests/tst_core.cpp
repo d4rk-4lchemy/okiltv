@@ -8,6 +8,7 @@
 #include "../src/core/portablebootstrap.h"
 #include "../src/core/redaction.h"
 #include "../src/core/settingsmanager.h"
+#include "../src/core/trackpreferences.h"
 #include "../src/core/xtreamservice.h"
 
 #include <QDir>
@@ -22,7 +23,13 @@
 
 #include <cmath>
 #include <stdexcept>
+#if __has_include(<zlib.h>)
 #include <zlib.h>
+#elif __has_include(<QtZlib/zlib.h>)
+#include <QtZlib/zlib.h>
+#else
+#error "zlib headers are required for XMLTV gzip/zlib tests."
+#endif
 
 using namespace OKILTV::Core;
 
@@ -126,6 +133,8 @@ class CoreTests final : public QObject
     Q_OBJECT
 
 private slots:
+    void channelTrackPreferencesRoundTrip();
+    void trackPreferencesMatchIdentity();
     void uiTransparencySettingsCompatibility();
     void dateTimeFormatDetection_data();
     void dateTimeFormatDetection();
@@ -133,6 +142,7 @@ private slots:
     void dateTimeDisplayHonorsLocalDst();
     void dateTimeSettingsCompatibility();
     void settingsCompatibilityRoundTrips();
+    void settingsVolumeCompatibility();
     void settingsCompatibilityDefaultsNewPlayerTuningFields();
     void portableBootstrapRoundTripsIndependentOfSettings();
     void portableBootstrapDefaultsDataBesideMarker();
@@ -293,6 +303,84 @@ void CoreTests::uiTransparencySettingsCompatibility()
         settings.uiTransparency = value;
         QCOMPARE(appSettingsFromJson(toJson(settings)).uiTransparency, value);
     }
+}
+
+void CoreTests::settingsVolumeCompatibility()
+{
+    QCOMPARE(appSettingsFromJson(QJsonObject {}).playerVolume, 100.0);
+    QCOMPARE(appSettingsFromJson(QJsonObject { { QStringLiteral("playerVolume"), "invalid" } }).playerVolume, 100.0);
+    QCOMPARE(appSettingsFromJson(QJsonObject { { QStringLiteral("playerVolume"), -5.0 } }).playerVolume, 0.0);
+    QCOMPARE(appSettingsFromJson(QJsonObject { { QStringLiteral("playerVolume"), 150.0 } }).playerVolume, 100.0);
+    AppSettings settings;
+    settings.playerVolume = 37.5;
+    QCOMPARE(appSettingsFromJson(toJson(settings)).playerVolume, 37.5);
+}
+
+void CoreTests::channelTrackPreferencesRoundTrip()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const auto path = dir.filePath(QStringLiteral("settings.json"));
+    SettingsManager settings(path);
+    const auto profile = guidToString(QUuid::createUuid());
+    const auto otherProfile = guidToString(QUuid::createUuid());
+    const QJsonObject off { { QStringLiteral("mode"), QStringLiteral("off") } };
+    const QJsonObject audio { { QStringLiteral("mode"), QStringLiteral("track") },
+        { QStringLiteral("id"), 2 }, { QStringLiteral("lang"), QStringLiteral("eng") } };
+    settings.setChannelTrackPreference(profile, QStringLiteral("xtream:1"), QStringLiteral("audio"), audio);
+    settings.setChannelTrackPreference(profile, QStringLiteral("xtream:1"), QStringLiteral("sub"), off);
+    settings.setChannelTrackPreference(otherProfile, QStringLiteral("xtream:1"), QStringLiteral("sub"), off);
+    QVERIFY(settings.lastSaveError().isEmpty());
+    SettingsManager reloaded(path);
+    reloaded.load();
+    QCOMPARE(reloaded.channelTrackPreferences(profile, QStringLiteral("xtream:1"))
+                 .value(QStringLiteral("audio")).toObject(), audio);
+    QVERIFY(reloaded.channelTrackPreferences(profile, QStringLiteral("xtream:2")).isEmpty());
+    reloaded.setChannelTrackPreference(profile, QStringLiteral("xtream:1"), QStringLiteral("audio"), {});
+    reloaded.current().theme = QStringLiteral("Light");
+    reloaded.save();
+    SettingsManager again(path);
+    again.load();
+    const QJsonObject subtitlesOnly { { QStringLiteral("sub"), off } };
+    QCOMPARE(again.channelTrackPreferences(profile, QStringLiteral("xtream:1")), subtitlesOnly);
+    QCOMPARE(again.channelTrackPreferences(otherProfile, QStringLiteral("xtream:1")), subtitlesOnly);
+    QVERIFY(appSettingsFromJson(QJsonObject {}).channelTrackPreferences.isEmpty());
+
+    Channel channel;
+    channel.source = ChannelSource::M3U;
+    channel.streamUrl = QStringLiteral("https://example.test/private-user/secret.ts");
+    channel.id = 1;
+    const auto key = trackPreferenceChannelKey(channel);
+    channel.id = 50;
+    QCOMPARE(trackPreferenceChannelKey(channel), key);
+    QVERIFY(!key.contains(QStringLiteral("secret")));
+    channel.streamUrl += QStringLiteral("?other");
+    QVERIFY(trackPreferenceChannelKey(channel) != key);
+}
+
+void CoreTests::trackPreferencesMatchIdentity()
+{
+    const QString audio = QStringLiteral("audio");
+    const auto track = [&audio](int id, const QString &title, const QString &lang) -> QVariant {
+        return QVariantMap { { QStringLiteral("type"), audio }, { QStringLiteral("id"), id },
+            { QStringLiteral("title"), title }, { QStringLiteral("lang"), lang } };
+    };
+    const QVariantList original { track(1, QStringLiteral("Main"), QStringLiteral("pol")),
+        track(2, QStringLiteral(" Original "), QStringLiteral("ENG")) };
+    const auto preference = makeTrackPreference(original, audio, 2);
+    QCOMPARE(matchTrackPreference({ track(5, QStringLiteral("original"), QStringLiteral("eng")) }, audio, preference), 5);
+    QCOMPARE(matchTrackPreference({ track(2, QStringLiteral("Commentary"), QStringLiteral("eng")) }, audio, preference), -1);
+    QCOMPARE(matchTrackPreference({ track(3, QStringLiteral("Original"), QStringLiteral("eng")),
+        track(4, QStringLiteral("Original"), QStringLiteral("eng")) }, audio, preference), -1);
+    QCOMPARE(matchTrackPreference({ track(2, QStringLiteral("Original"), QStringLiteral("eng")),
+        track(4, QStringLiteral("Original"), QStringLiteral("eng")) }, audio, preference), 2);
+    const QVariantList anonymous { track(1, {}, {}), track(2, {}, {}) };
+    const auto unnamed = makeTrackPreference(anonymous, audio, 2);
+    QCOMPARE(matchTrackPreference(anonymous, audio, unnamed), 2);
+    QCOMPARE(matchTrackPreference({ track(2, {}, {}) }, audio, unnamed), -1);
+    QCOMPARE(matchTrackPreference({}, QStringLiteral("sub"), makeTrackPreference({}, QStringLiteral("sub"), 0)), 0);
+    QVERIFY(makeTrackPreference(original, audio, 99).isEmpty());
+    QCOMPARE(matchTrackPreference(original, audio, QJsonObject {}), -1);
 }
 
 void CoreTests::settingsCompatibilityRoundTrips()
@@ -523,7 +611,7 @@ void CoreTests::settingsCompatibilityDefaultsNewPlayerTuningFields()
     QCOMPARE(settings.current().playerPicturePreset, QStringLiteral("standard"));
     QCOMPARE(normalizePlayerPicturePreset(QStringLiteral("unknown")), QStringLiteral("standard"));
     QVERIFY(std::abs(settings.current().playerBufferSeconds - 3.0) < 0.0001);
-    QCOMPARE(settings.current().playerUserAgent, QStringLiteral(""));
+    QCOMPARE(settings.current().playerUserAgent, defaultPlayerUserAgent());
     QCOMPARE(settings.current().timeshiftEnabled, false);
     QCOMPARE(settings.current().timeshiftWindowMinutes, 90);
     QCOMPARE(settings.current().timeshiftStorageDirectory, QStringLiteral(""));
@@ -1468,10 +1556,13 @@ void CoreTests::catchupUrlResolverBuildsXtreamAndM3uTargets()
 {
     QCOMPARE(serverProfileFromJson(QJsonObject {}).catchupSafetyMinutes, 3);
     ServerProfile safetyProfile;
-    safetyProfile.catchupSafetyMinutes = 2;
-    QCOMPARE(serverProfileFromJson(toJson(safetyProfile)).catchupSafetyMinutes, 3);
-    QCOMPARE(serverProfileFromJson(QJsonObject {{ QStringLiteral("catchupSafetyMinutes"), 1 }}).catchupSafetyMinutes, 3);
-    QCOMPARE(serverProfileFromJson(QJsonObject {{ QStringLiteral("catchupSafetyMinutes"), 2 }}).catchupSafetyMinutes, 3);
+    for (const int minutes : {0, 1, 2, 3, 30}) {
+        safetyProfile.catchupSafetyMinutes = minutes;
+        QCOMPARE(serverProfileFromJson(toJson(safetyProfile)).catchupSafetyMinutes, minutes);
+    }
+    safetyProfile.catchupSafetyMinutes = -1;
+    QCOMPARE(serverProfileFromJson(toJson(safetyProfile)).catchupSafetyMinutes, 0);
+    QCOMPARE(serverProfileFromJson(QJsonObject {{ QStringLiteral("catchupSafetyMinutes"), -1 }}).catchupSafetyMinutes, 0);
     safetyProfile.catchupSafetyMinutes = 100;
     QCOMPARE(serverProfileFromJson(toJson(safetyProfile)).catchupSafetyMinutes, 30);
     Channel xtreamChannel;

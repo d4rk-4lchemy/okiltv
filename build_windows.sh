@@ -56,17 +56,15 @@ if [[ "$needs_reconfigure" -eq 1 ]]; then
     cmake --fresh --preset qt-win64-release
 fi
 
-cmake --build --preset qt-win64-release -j"$build_jobs"
+cmake --build --preset qt-win64-release --target OKILTVQt -j"$build_jobs"
 echo "Portable launcher icon: $portable_icon_path"
 APP_VERSION="$app_version" PORTABLE_APP_ICON_PATH="$portable_icon_path" "$package_script" "$build_dir"
 
 zip_path="$publish_dir/OKILTV-qt-win-x64-${app_version}.zip"
 setup_path="$publish_dir/OKILTV-qt-win-x64-setup-${app_version}.exe"
-portable_path="$publish_dir/OKILTV-qt-win-x64-portable-${app_version}.exe"
 
 test -f "$zip_path"
 test -f "$setup_path"
-test -f "$portable_path"
 
 7z l "$zip_path" | sed -n '1,24p'
-ls -lh "$zip_path" "$setup_path" "$portable_path"
+ls -lh "$zip_path" "$setup_path"

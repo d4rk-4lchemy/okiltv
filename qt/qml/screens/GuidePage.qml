@@ -14,6 +14,7 @@ Item {
     // qmllint enable unqualified
 
     signal collapseRequested()
+    signal pictureInPictureRequested(int channelId)
     signal playChannelRequested(int channelId)
     signal playCatchupRequested(var channel, var program)
     signal playCatchupFromBeginningRequested(var channel, var program)
@@ -27,7 +28,6 @@ Item {
     readonly property var dateTime: dateTimeFormatter
     readonly property var app: appController
     readonly property var player: multiViewController.primaryController
-    readonly property var multiView: multiViewController
     readonly property var dvr: dvrController
     // qmllint enable unqualified
     property real channelColumnWidth: root.shell.layoutBand === "compact" ? 246 : 284
@@ -1107,7 +1107,7 @@ Item {
                                     acceptedButtons: Qt.LeftButton | Qt.RightButton
                                     onClicked: function(mouse) {
                                         if (mouse.button === Qt.RightButton) {
-                                            root.multiView.assignChannelToPictureInPicture(timelineRow.channelId)
+                                            root.pictureInPictureRequested(timelineRow.channelId)
                                         } else if (mouse.button === Qt.LeftButton) {
                                             root.focusChannel(timelineRow.channelId, true)
                                         }

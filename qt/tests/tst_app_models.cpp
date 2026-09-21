@@ -35,6 +35,7 @@
 #include "../src/core/networkaccess.h"
 #include "../src/core/portablebootstrap.h"
 #include "../src/core/settingsmanager.h"
+#include "../src/core/trackpreferences.h"
 #define private public
 #include "../src/player/mpvplayer.h"
 #undef private
@@ -382,6 +383,9 @@ class AppModelTests final : public QObject
     Q_OBJECT
 
 private slots:
+    void trackPreferencesRejectStaleSnapshots();
+    void removingProfileClearsTrackPreferences();
+    void playerRemembersTracksAcrossRestartAndFallsBack();
     void profilesModelGetTracksActiveSource();
     void shellControllerRestoreLastViewClearsOverlayState();
     void shellControllerOpenOverlayPreservesOverlayStateExclusive();
@@ -389,10 +393,14 @@ private slots:
     void appControllerKeepsGuideOpenedDuringProfileLoad();
     void appControllerLoadProfileDoesNotAutoActivateInactiveProfile();
     void playerControllerMuteToggleRestoresPreviousVolume();
+    void appControllerRestoresVolumeAfterExit_data();
+    void appControllerRestoresVolumeAfterExit();
     void multiviewVolumeChangesPreserveSelectedAudioTrack();
     void mpvPlayerEmitsObservedPauseChanges();
     void mpvPlayerReopensAudioOutputOnStreamReplacement_data();
     void mpvPlayerReopensAudioOutputOnStreamReplacement();
+    void playerControllerPlaysAudioOnly_data();
+    void playerControllerPlaysAudioOnly();
     void mpvPlayerStartsAudioAcrossMpegTsTimestampWrap_data();
     void mpvPlayerStartsAudioAcrossMpegTsTimestampWrap();
     void mpegTsTimestampNormalizerPreservesSourceClocks();
@@ -463,7 +471,7 @@ private slots:
     void playerControllerCatchupSeamlessRejectsDeadStandbySession();
     void playerControllerCatchupReconnectWaitsForTransportSettleBeforeAttempt();
     void playerControllerCatchupReconnectAttemptLimitEscalatesToHardRestore();
-    void playerControllerCatchupTimelineShowsNowAndRejectsUnsafeSeeks();
+    void playerControllerCatchupTimelineShowsEpgEndAndReturnsLiveFromFuture();
     void playerControllerCatchupRefillsWithoutReplacingTransport();
     void playerControllerCatchupRefillTimeoutRequiresPlayableReserve();
     void playerControllerRecoversFailedContinuousAtWatchedPosition_data();
@@ -572,7 +580,8 @@ private slots:
     void dvrControllerToggleScheduleAndExitGuard();
     void dvrControllerFinalizeActiveWindowSchedulesRestart();
     void dvrControllerRestartStateMaintainedAndClearedByWindowState();
-    void dvrControllerWindowsCrashWithoutFinishedDefersFinalize();
+    void dvrControllerWindowsStoppedJobWithoutFinishedFinalizes();
+    void dvrControllerWindowsWaitsForDescendants();
     void dvrControllerRemuxDeletesTempWhenDurationMatchesRegardlessOfExitCode();
     void dvrControllerRemuxKeepsTempWhenDurationMismatched();
     void portableRuntimeControllerTracksPortableOverrideWithoutDirtyingSettings();
@@ -703,6 +712,190 @@ void AppModelTests::appControllerKeepsGuideOpenedDuringProfileLoad()
     QCOMPARE(harness.shellController->activeOverlay(), QStringLiteral("guide"));
     QVERIFY(harness.shellController->overlaysVisible());
     QCOMPARE(overlaySpy.count(), 0);
+}
+
+void AppModelTests::removingProfileClearsTrackPreferences()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    const auto profileId = harness.activeProfileId();
+    const auto profile = guidToString(profileId);
+    harness.settings->setChannelTrackPreference(profile, QStringLiteral("xtream:1"), QStringLiteral("sub"),
+        makeTrackPreference({}, QStringLiteral("sub"), 0));
+    QVERIFY(harness.settings->current().channelTrackPreferences.contains(profile));
+    QVERIFY(harness.settings->removeProfile(profileId));
+    QVERIFY(!harness.settings->current().channelTrackPreferences.contains(profile));
+    SettingsManager reloaded(harness.settings->settingsFilePath());
+    reloaded.load();
+    QVERIFY(!reloaded.current().channelTrackPreferences.contains(profile));
+}
+
+void AppModelTests::trackPreferencesRejectStaleSnapshots()
+{
+    OKILTV::Player::MpvPlayer player;
+    const QString audio = QStringLiteral("audio");
+    const QString sub = QStringLiteral("sub");
+    const QVariantList original {
+        QVariantMap { {QStringLiteral("type"), audio}, {QStringLiteral("id"), 2}, {QStringLiteral("lang"), QStringLiteral("eng")} }
+    };
+    const QJsonObject preferences { {audio, makeTrackPreference(original, audio, 2)},
+        {sub, makeTrackPreference({}, sub, 0)} };
+    const auto profile = guidToString(QUuid::createUuid());
+    player.configureTrackPreferences(profile, QStringLiteral("xtream:1"), preferences);
+    QSignalSpy changed(&player, &OKILTV::Player::MpvPlayer::trackPreferenceChanged);
+    player.beginTrackLoad(QStringLiteral("current"));
+    const auto oldGeneration = player.m_trackGeneration.load();
+    player.beginTrackLoad(QStringLiteral("current"));
+    const auto generation = player.m_trackGeneration.load();
+    const QVariantList missing {
+        QVariantMap { {QStringLiteral("type"), audio}, {QStringLiteral("id"), 1},
+            {QStringLiteral("lang"), QStringLiteral("pol")}, {QStringLiteral("selected"), true} }
+    };
+    player.acceptTrackSnapshot(generation, QStringLiteral("current"), missing); // Not loaded yet.
+    player.m_tracksLoadedGeneration.store(generation);
+    player.acceptTrackSnapshot(oldGeneration, QStringLiteral("current"), missing);
+    player.acceptTrackSnapshot(generation, QStringLiteral("previous"), missing);
+    player.acceptTrackSnapshot(generation, QStringLiteral("current"), {});
+    QCOMPARE(changed.count(), 0);
+    player.configureTrackPreferences(profile, QStringLiteral("xtream:1"), preferences, false);
+    player.acceptTrackSnapshot(generation, QStringLiteral("current"), missing);
+    QCOMPARE(changed.count(), 0); // A local remux may omit a provider track.
+    player.configureTrackPreferences(profile, QStringLiteral("xtream:1"), preferences, true);
+    player.acceptTrackSnapshot(generation, QStringLiteral("current"), missing);
+    QCOMPARE(changed.count(), 1);
+    QCOMPARE(changed.front().at(2).toString(), audio);
+    QVERIFY(changed.front().at(3).toJsonObject().isEmpty());
+    QCOMPARE(player.m_trackPreferences.value(sub), preferences.value(sub));
+    player.beginTrackLoad({});
+    player.acceptTrackSnapshot(generation, QStringLiteral("current"), missing);
+    QCOMPARE(changed.count(), 1);
+    QVERIFY(!player.prepareRememberedTrack(audio, 1));
+}
+
+void AppModelTests::playerRemembersTracksAcrossRestartAndFallsBack()
+{
+    const auto ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    if (ffmpeg.isEmpty()) { QSKIP("ffmpeg required for the multiple-track fixture."); }
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const auto subtitlePath = dir.filePath(QStringLiteral("captions.srt"));
+    QFile subtitles(subtitlePath);
+    QVERIFY(subtitles.open(QIODevice::WriteOnly));
+    subtitles.write("1\n00:00:00,000 --> 00:01:00,000\nFixture subtitles\n");
+    subtitles.close();
+    const auto media = dir.filePath(QStringLiteral("tracks.mkv"));
+    QProcess generator;
+    generator.start(ffmpeg, {QStringLiteral("-v"), QStringLiteral("error"),
+        QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"), QStringLiteral("sine=frequency=440:duration=60"),
+        QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"), QStringLiteral("sine=frequency=880:duration=60"),
+        QStringLiteral("-i"), subtitlePath,
+        QStringLiteral("-map"), QStringLiteral("0:a"), QStringLiteral("-map"), QStringLiteral("1:a"),
+        QStringLiteral("-map"), QStringLiteral("2:s"), QStringLiteral("-c:a"), QStringLiteral("pcm_s16le"),
+        QStringLiteral("-c:s"), QStringLiteral("srt"),
+        QStringLiteral("-metadata:s:a:0"), QStringLiteral("language=pol"),
+        QStringLiteral("-metadata:s:a:1"), QStringLiteral("language=eng"),
+        QStringLiteral("-disposition:a:0"), QStringLiteral("default"),
+        QStringLiteral("-disposition:a:1"), QStringLiteral("0"), media});
+    QVERIFY(generator.waitForFinished(30000));
+    QCOMPARE(generator.exitCode(), 0);
+    const auto single = dir.filePath(QStringLiteral("single.mkv"));
+    generator.start(ffmpeg, {QStringLiteral("-v"), QStringLiteral("error"), QStringLiteral("-i"), media,
+        QStringLiteral("-map"), QStringLiteral("0:a:0"), QStringLiteral("-c"), QStringLiteral("copy"), single});
+    QVERIFY(generator.waitForFinished(30000));
+    QCOMPARE(generator.exitCode(), 0);
+
+    const auto headless = qgetenv("OKILTV_HEADLESS_TEST");
+    const auto restore = qScopeGuard([&]() {
+        if (headless.isNull()) { qunsetenv("OKILTV_HEADLESS_TEST"); }
+        else { qputenv("OKILTV_HEADLESS_TEST", headless); }
+    });
+    qputenv("OKILTV_HEADLESS_TEST", "0");
+    Channel channel;
+    channel.id = 37;
+    channel.source = ChannelSource::Xtream;
+    channel.profileId = QUuid::createUuid();
+    channel.name = QStringLiteral("Track fixture");
+    channel.streamUrl = QUrl::fromLocalFile(media).toString();
+    const auto profile = guidToString(channel.profileId);
+    const auto key = trackPreferenceChannelKey(channel);
+    const auto settingsPath = dir.filePath(QStringLiteral("settings.json"));
+    const QMap<QString, QString> options {
+        {QStringLiteral("vo"), QStringLiteral("null")}, {QStringLiteral("ao"), QStringLiteral("null")},
+        {QStringLiteral("hwdec"), QStringLiteral("no")}, {QStringLiteral("sid"), QStringLiteral("no")}
+    };
+    {
+        SettingsManager settings(settingsPath);
+        PlayerController controller;
+        controller.setTrackPreferenceSettings(&settings);
+        controller.applySettings({}, options, 5.0, false, 1.0, QStringLiteral("test"));
+        controller.playChannel(channel);
+        auto *backend = controller.player();
+        QTRY_VERIFY2_WITH_TIMEOUT(backend->m_readyTrackGeneration != 0,
+            qPrintable(QStringLiteral("expected=%1 actual=%2 generation=%3 loaded=%4 tracks=%5 diagnostics=%6")
+                .arg(backend->m_trackExpectedPath, backend->propertyString("path").value_or(QString {}))
+                .arg(backend->m_trackGeneration.load()).arg(backend->m_tracksLoadedGeneration.load())
+                .arg(backend->trackList().size()).arg(backend->diagnostics())), 8000);
+        QCOMPARE(selectedTrackId(backend->m_readyTracks, QStringLiteral("audio")), 1);
+        QCOMPARE(selectedTrackId(backend->m_readyTracks, QStringLiteral("sub")), 0);
+        controller.selectAudioTrack(2);
+        controller.selectSubtitleTrack(1);
+        QTRY_COMPARE_WITH_TIMEOUT(settings.channelTrackPreferences(profile, key).size(), 2, 5000);
+        controller.stop();
+    }
+    SettingsManager settings(settingsPath);
+    settings.load();
+    PlayerController controller;
+    controller.setTrackPreferenceSettings(&settings);
+    controller.applySettings({}, options, 5.0, false, 1.0, QStringLiteral("test"));
+    controller.playChannel(channel);
+    auto *backend = controller.player();
+    QTRY_COMPARE_WITH_TIMEOUT(selectedTrackId(backend->m_readyTracks, QStringLiteral("audio")), 2, 8000);
+    QTRY_COMPARE_WITH_TIMEOUT(selectedTrackId(backend->m_readyTracks, QStringLiteral("sub")), 1, 5000);
+    controller.selectSubtitleTrack(0);
+    QTRY_COMPARE_WITH_TIMEOUT(settings.channelTrackPreferences(profile, key).value(QStringLiteral("sub"))
+        .toObject().value(QStringLiteral("mode")).toString(), QStringLiteral("off"), 5000);
+    backend->setPaused(true);
+    QTRY_VERIFY_WITH_TIMEOUT(backend->pauseState().value_or(false), 3000);
+    controller.selectAudioTrack(1);
+    QTRY_VERIFY_WITH_TIMEOUT(!settings.channelTrackPreferences(profile, key).contains(QStringLiteral("audio")), 5000);
+    controller.selectAudioTrack(2);
+    QTRY_VERIFY_WITH_TIMEOUT(settings.channelTrackPreferences(profile, key).contains(QStringLiteral("audio")), 5000);
+    controller.stop();
+    controller.playChannel(channel);
+    QTRY_COMPARE_WITH_TIMEOUT(selectedTrackId(backend->m_readyTracks, QStringLiteral("audio")), 2, 8000);
+    QCOMPARE(selectedTrackId(backend->m_readyTracks, QStringLiteral("sub")), 0);
+
+    auto other = channel;
+    other.profileId = QUuid::createUuid();
+    controller.playChannel(other);
+    QTRY_VERIFY_WITH_TIMEOUT(backend->m_readyTrackGeneration != 0, 8000);
+    QCOMPARE(selectedTrackId(backend->m_readyTracks, QStringLiteral("audio")), 1);
+    other.profileId = channel.profileId;
+    other.id = 38;
+    controller.playChannel(other);
+    QTRY_VERIFY_WITH_TIMEOUT(backend->m_readyTrackGeneration != 0, 8000);
+    QCOMPARE(selectedTrackId(backend->m_readyTracks, QStringLiteral("audio")), 1);
+    controller.playChannel(channel);
+    QTRY_COMPARE_WITH_TIMEOUT(selectedTrackId(backend->m_readyTracks, QStringLiteral("audio")), 2, 8000);
+    channel.streamUrl = QUrl::fromLocalFile(single).toString();
+    controller.playChannel(channel);
+    QTRY_VERIFY_WITH_TIMEOUT(backend->m_readyTrackGeneration != 0, 8000);
+    QTRY_VERIFY_WITH_TIMEOUT(!settings.channelTrackPreferences(profile, key).contains(QStringLiteral("audio")), 5000);
+    QCOMPARE(selectedTrackId(backend->m_readyTracks, QStringLiteral("audio")), 1);
+    QCOMPARE(settings.channelTrackPreferences(profile, key).value(QStringLiteral("sub"))
+        .toObject().value(QStringLiteral("mode")).toString(), QStringLiteral("off"));
+    channel.streamUrl = QUrl::fromLocalFile(media).toString();
+    controller.playChannel(channel);
+    QTRY_VERIFY_WITH_TIMEOUT(backend->m_readyTrackGeneration != 0, 8000);
+    QCOMPARE(selectedTrackId(backend->m_readyTracks, QStringLiteral("audio")), 1);
+    controller.selectSubtitleTrack(1);
+    QTRY_COMPARE_WITH_TIMEOUT(settings.channelTrackPreferences(profile, key).value(QStringLiteral("sub"))
+        .toObject().value(QStringLiteral("mode")).toString(), QStringLiteral("track"), 5000);
+    channel.streamUrl = QUrl::fromLocalFile(single).toString();
+    controller.playChannel(channel);
+    QTRY_VERIFY_WITH_TIMEOUT(backend->m_readyTrackGeneration != 0, 8000);
+    QTRY_VERIFY_WITH_TIMEOUT(settings.channelTrackPreferences(profile, key).isEmpty(), 5000);
+    controller.stop();
 }
 
 void AppModelTests::multiviewVolumeChangesPreserveSelectedAudioTrack()
@@ -847,6 +1040,22 @@ void AppModelTests::mpvPlayerReopensAudioOutputOnStreamReplacement()
         QTRY_COMPARE_WITH_TIMEOUT(audioOutputOpenCount(), overrideGapless ? 1 : index + 1, 2000);
         QCOMPARE(errors.count(), 0);
     }
+
+    // Closing PiP now queues stop without waiting for decoder teardown. Verify
+    // completion, and that a rapid Stop -> Play cannot stop the replacement.
+    QSignalSpy stopped(&player, &OKILTV::Player::MpvPlayer::playbackStopped);
+    player.stop();
+    QTRY_COMPARE_WITH_TIMEOUT(stopped.count(), 1, 5000);
+    for (const auto &channel : channels) {
+        const auto restartCount = restarted.count();
+        player.play(channel);
+        QTRY_COMPARE_WITH_TIMEOUT(restarted.count(), restartCount + 1, 5000);
+        player.stop();
+        player.play(channel);
+        QTRY_COMPARE_WITH_TIMEOUT(restarted.count(), restartCount + 2, 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(player.position() > 0.2, 5000);
+        QCOMPARE(errors.count(), 0);
+    }
 }
 
 void AppModelTests::mpegTsTimestampNormalizerPreservesSourceClocks()
@@ -937,16 +1146,112 @@ void AppModelTests::mpegTsTimestampNormalizerPreservesSourceClocks()
     }
 }
 
+void AppModelTests::playerControllerPlaysAudioOnly_data()
+{
+    QTest::addColumn<QString>("format");
+    QTest::addColumn<bool>("catchup");
+    QTest::newRow("mpeg-ts-radio") << QStringLiteral("ts") << false;
+    QTest::newRow("mp3-radio") << QStringLiteral("mp3") << false;
+    QTest::newRow("aac-adts-radio") << QStringLiteral("aac") << false;
+    QTest::newRow("mpeg-ts-radio-catchup") << QStringLiteral("ts") << true;
+}
+
+void AppModelTests::playerControllerPlaysAudioOnly()
+{
+    QFETCH(QString, format);
+    QFETCH(bool, catchup);
+    const auto ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    if (ffmpeg.isEmpty()) { QSKIP("ffmpeg needed to generate radio fixture."); }
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const auto path = directory.filePath(QStringLiteral("radio.") + format);
+    QProcess generator;
+    generator.start(ffmpeg, {QStringLiteral("-v"), QStringLiteral("error"),
+        QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"),
+        QStringLiteral("sine=frequency=440:sample_rate=48000:duration=30"),
+        QStringLiteral("-c:a"), format == QStringLiteral("mp3") ? QStringLiteral("libmp3lame") : QStringLiteral("aac"), path});
+    QVERIFY(generator.waitForFinished(15000));
+    QVERIFY2(generator.exitCode() == 0, generator.readAllStandardError().constData());
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto source = file.readAll();
+    QTcpServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost));
+    int requests = 0;
+    connect(&server, &QTcpServer::newConnection, &server, [&]() {
+        while (auto *socket = server.nextPendingConnection()) {
+            connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+            connect(socket, &QTcpSocket::readyRead, socket, [&, socket]() {
+                const auto request = socket->property("request").toByteArray() + socket->readAll();
+                socket->setProperty("request", request);
+                if (!request.contains("\r\n\r\n") || socket->property("sent").toBool()) { return; }
+                socket->setProperty("sent", true);
+                ++requests;
+                // Keep the live connection open after sending enough audio for the test.
+                socket->write("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + source);
+            });
+        }
+    });
+    const auto previousHeadless = qgetenv("OKILTV_HEADLESS_TEST");
+    const auto restore = qScopeGuard([&]() {
+        if (previousHeadless.isNull()) { qunsetenv("OKILTV_HEADLESS_TEST"); }
+        else { qputenv("OKILTV_HEADLESS_TEST", previousHeadless); }
+    });
+    qputenv("OKILTV_HEADLESS_TEST", "0");
+    PlayerController controller;
+    controller.applySettings({}, {{QStringLiteral("vo"), QStringLiteral("null")},
+        {QStringLiteral("ao"), QStringLiteral("null")}, {QStringLiteral("hwdec"), QStringLiteral("no")}},
+        5.0, false, 3.0, {});
+    Channel channel;
+    channel.id = 456;
+    channel.name = QStringLiteral("Radio");
+    channel.streamUrl = QStringLiteral("http://127.0.0.1:%1/timeshift/test/test/10/2026-09-20:00-00/456.%2").arg(server.serverPort()).arg(format);
+    auto *player = controller.playbackPlayer();
+    QSignalSpy errors(player, &OKILTV::Player::MpvPlayer::errorOccurred);
+    if (catchup) {
+        const auto start = QDateTime::currentDateTimeUtc().addSecs(-1200);
+        controller.playCatchupChannel(channel, channel.streamUrl, QStringLiteral("Radio programme"),
+            start, start.addSecs(600), channel.streamUrl);
+    } else {
+        controller.playChannel(channel);
+    }
+    const auto stop = qScopeGuard([&]() { controller.stop(); });
+    QTRY_VERIFY_WITH_TIMEOUT(player->propertyDouble("audio-pts").value_or(0.0) > 0.2, 8000);
+    QTRY_VERIFY(controller.isPlaying());
+    QTRY_VERIFY(!controller.isLoading());
+    QTRY_VERIFY(!controller.channelSwitchInProgress());
+    QVERIFY(!player->videoCodec().has_value());
+    QVERIFY(player->audioCodec().has_value());
+    controller.togglePause();
+    QTRY_VERIFY(!controller.isPlaying());
+    controller.togglePause();
+    QTRY_VERIFY(controller.isPlaying());
+    const auto position = player->position();
+    QTRY_VERIFY_WITH_TIMEOUT(player->position() > position + 1.0, 3000);
+    QVERIFY(!controller.channelLoadFailed());
+    QVERIFY(!controller.m_hwdecFallbackApplied);
+    QCOMPARE(requests, 1);
+    QCOMPARE(errors.count(), 0);
+}
+
 void AppModelTests::mpvPlayerStartsAudioAcrossMpegTsTimestampWrap_data()
 {
     QTest::addColumn<bool>("disableNormalization");
-    QTest::newRow("normalized-audio-starts-in-sync") << false;
-    QTest::newRow("original-timestamps-reproduce-silence") << true;
+    QTest::addColumn<QString>("userAgent");
+    QTest::newRow("normalized-audio-starts-in-sync") << false << QStringLiteral("OKILTV-regression");
+    QTest::newRow("original-timestamps-reproduce-silence") << true << QStringLiteral("OKILTV-regression");
+    QTest::newRow("empty-agent-uses-okiltv") << false << QString();
+    QTest::newRow("blank-agent-direct-mpv-uses-okiltv") << true << QStringLiteral("   ");
 }
 
 void AppModelTests::mpvPlayerStartsAudioAcrossMpegTsTimestampWrap()
 {
     QFETCH(bool, disableNormalization);
+    QFETCH(QString, userAgent);
+    const auto expectedUserAgent = userAgent.trimmed().isEmpty()
+        ? OKILTV::Core::defaultPlayerUserAgent() : userAgent.trimmed();
+    QVERIFY(OKILTV::Player::CatchupStreamSession::requestHeadersFromOptions(userAgent, {})
+                .contains(qMakePair(QByteArrayLiteral("User-Agent"), expectedUserAgent.toUtf8())));
     const auto ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
     if (ffmpeg.isEmpty()) {
         QSKIP("Requires ffmpeg to generate a synthetic MPEG-TS timestamp-wrap fixture.");
@@ -1024,7 +1329,7 @@ void AppModelTests::mpvPlayerStartsAudioAcrossMpegTsTimestampWrap()
                 socket->setProperty("sent", true);
                 ++requests;
                 headersForwarded = headersForwarded && request.contains("X-Player-Test: timestamp-wrap")
-                    && request.contains("User-Agent: OKILTV-regression");
+                    && request.contains("User-Agent: " + expectedUserAgent.toUtf8() + "\r\n");
                 // No Content-Length and no range support: exercise the live
                 // HTTP path, not file seeking or a fully downloaded clip.
                 socket->write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n");
@@ -1056,7 +1361,7 @@ void AppModelTests::mpvPlayerStartsAudioAcrossMpegTsTimestampWrap()
         { QStringLiteral("load-scripts"), QStringLiteral("no") },
     };
     options.insert(QStringLiteral("http-header-fields"), QStringLiteral("X-Player-Test: timestamp-wrap"));
-    player.configureUserAgent(QStringLiteral("OKILTV-regression"));
+    player.configureUserAgent(userAgent);
     player.configureOptions(options);
     QSignalSpy errors(&player, &OKILTV::Player::MpvPlayer::errorOccurred);
     const auto wrappedUrl = QStringLiteral("http://127.0.0.1:%1/wrapped.ts").arg(server.serverPort());
@@ -1165,6 +1470,30 @@ void AppModelTests::appControllerLoadProfileDoesNotAutoActivateInactiveProfile()
     QCOMPARE(harness.appController->activeProfileId(), activeProfile);
     QCOMPARE(harness.profilesModel->activeProfileId(), activeProfile);
     QCOMPARE(harness.channelListModel->activeProfileId(), activeProfile);
+}
+
+void AppModelTests::appControllerRestoresVolumeAfterExit_data()
+{
+    QTest::addColumn<double>("volume");
+    QTest::newRow("adjusted") << 37.0;
+    QTest::newRow("muted") << 0.0;
+    QTest::newRow("maximum") << 100.0;
+}
+
+void AppModelTests::appControllerRestoresVolumeAfterExit()
+{
+    QFETCH(double, volume);
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    harness.settings->setActiveProfileId(std::nullopt);
+    harness.playerController->setVolume(volume);
+    harness.appController->savePlaybackForApplicationExit();
+    harness.settings->load();
+    QCOMPARE(harness.settings->current().playerVolume, volume);
+    harness.playerController->setVolume(75.0);
+    harness.appController->initialize();
+    QCOMPARE(harness.playerController->volume(), volume);
+    QCOMPARE(harness.playerController->muted(), volume == 0.0);
 }
 
 void AppModelTests::playerControllerMuteToggleRestoresPreviousVolume()
@@ -4328,13 +4657,17 @@ void AppModelTests::playerControllerEndlessCatchupChangesEpgWithoutRetuning()
     controller->m_catchupTimelinePositionSeconds = 3601;
     controller->syncCatchupTimelineState();
     QCOMPARE(controller->catchupProgramLabel(), second.title);
-    controller->seekTimeshiftToFraction(0.5);
+    QCOMPARE(controller->catchupTimelineEndEpochMs(), second.stop.toMSecsSinceEpoch());
+    QCOMPARE(controller->catchupTimelineDurationSeconds(), 7200.0);
+    controller->seekTimeshiftToFraction(0.25);
     QVERIFY(std::abs(controller->m_catchupTimelinePositionSeconds - 5400.0) < 1.0);
     QVERIFY(controller->m_catchupTimelineReloadStreamBaseOffsetSeconds >= 5400.0);
     harness.epgService->clear();
     controller->syncCatchupTimelineState();
     QCOMPARE(controller->catchupProgramLabel(), QStringLiteral("Catch-up"));
     QVERIFY(controller->catchupCurrentProgram().isEmpty());
+    QVERIFY(std::abs(controller->catchupTimelineEndEpochMs()
+        - QDateTime::currentDateTimeUtc().toMSecsSinceEpoch()) < 1000);
     controller->returnToLiveFromCatchup();
     QVERIFY(!controller->m_catchupEndless);
     QCOMPARE(controller->currentPlaybackUrl(), channel.streamUrl);
@@ -4876,7 +5209,7 @@ void AppModelTests::playerControllerRecoveryWaitsForCachedResumePoint()
     controller.stop();
 }
 
-void AppModelTests::playerControllerCatchupTimelineShowsNowAndRejectsUnsafeSeeks()
+void AppModelTests::playerControllerCatchupTimelineShowsEpgEndAndReturnsLiveFromFuture()
 {
     PlayerController playerController;
 
@@ -4898,23 +5231,20 @@ void AppModelTests::playerControllerCatchupTimelineShowsNowAndRejectsUnsafeSeeks
     QVERIFY(QMetaObject::invokeMethod(playerController.player(), "fileLoaded", Qt::DirectConnection));
 
     playerController.m_catchupTimelinePositionSeconds = 0.0;
-    playerController.seekTimeshiftToFraction(0.95);
+    playerController.seekTimeshiftToFraction(38.0 / 60.0);
     QCOMPARE(playerController.m_catchupTimelinePositionSeconds, 0.0);
     QVERIFY(playerController.catchupTimelineNoticeText().contains(QStringLiteral("3 minutes")));
     QVERIFY(!playerController.m_catchupTimelineReloadInFlight);
-    QVERIFY(std::abs(playerController.catchupTimelineEndEpochMs()
-        - QDateTime::currentDateTimeUtc().toMSecsSinceEpoch()) < 1000);
-    QVERIFY(std::abs(playerController.catchupTimelineDurationSeconds() - 2400.0) < 1.0);
+    QCOMPARE(playerController.catchupTimelineEndEpochMs(), runningStopUtc.toMSecsSinceEpoch());
+    QVERIFY(std::abs(playerController.catchupTimelineDurationSeconds() - 3600.0) < 1.0);
     QVERIFY(playerController.catchupTimelineAvailableEdgeEpochMs()
         <= QDateTime::currentDateTimeUtc().addSecs(-180).toMSecsSinceEpoch());
 
-    playerController.seekTimeshiftToFraction(1.0);
-    QCOMPARE(playerController.m_catchupTimelinePositionSeconds, 0.0);
     playerController.seekTimeshiftRelative(2300.0);
     QCOMPARE(playerController.m_catchupTimelinePositionSeconds, 0.0);
 
     playerController.seekTimeshiftToFraction(0.50);
-    QVERIFY(std::abs(playerController.m_catchupTimelinePositionSeconds - 1200.0) < 1.0);
+    QVERIFY(std::abs(playerController.m_catchupTimelinePositionSeconds - 1800.0) < 1.0);
     QVERIFY(playerController.catchupTimelineNoticeText().isEmpty());
 
     // Respect source configuration, not a hardcoded three-minute exclusion.
@@ -4945,6 +5275,24 @@ void AppModelTests::playerControllerCatchupTimelineShowsNowAndRejectsUnsafeSeeks
     QVERIFY(playerController.m_catchupTimelinePositionSeconds > 0.0);
     QCOMPARE(playerController.catchupTimelineEndEpochMs(), playerController.m_catchupProgramStopUtc.toMSecsSinceEpoch());
     QVERIFY(playerController.catchupTimelineNoticeText().isEmpty());
+
+    // Endless sessions use the watched programme's full EPG end too. A future
+    // click must leave the archive and restore the exact saved live URL.
+    playerController.playCatchupChannel(
+        channel, QStringLiteral("http://127.0.0.1/catchup4603"),
+        QStringLiteral("Running Show"), runningStartUtc, runningStopUtc,
+        QStringLiteral("http://provider.example/timeshift/user/pass/61/2026-05-18:12-00/4601.ts"));
+    playerController.m_catchupEndless = true;
+    EpgEntry runningProgram;
+    runningProgram.start = runningStartUtc;
+    runningProgram.stop = runningStopUtc;
+    runningProgram.title = QStringLiteral("Running Show");
+    playerController.updateCatchupProgramme(runningProgram);
+    QCOMPARE(playerController.catchupTimelineEndEpochMs(), runningStopUtc.toMSecsSinceEpoch());
+    playerController.seekTimeshiftToFraction(0.9);
+    QCOMPARE(playerController.playbackMode(), QStringLiteral("live"));
+    QCOMPARE(playerController.currentPlaybackUrl(), channel.streamUrl);
+    QVERIFY(!playerController.catchupTimelineActive());
 }
 
 void AppModelTests::playerControllerSharedPrimarySignalsAndRetuneStayOnActivePlayer()
@@ -5821,7 +6169,7 @@ void AppModelTests::settingsControllerTracksDirtyStateForRegularSettings()
     QVERIFY(controller.dirty());
     controller.cancel();
     QVERIFY(!controller.dirty());
-    QCOMPARE(controller.playerUserAgent(), QStringLiteral(""));
+    QCOMPARE(controller.playerUserAgent(), OKILTV::Core::defaultPlayerUserAgent());
 
     controller.setTimeshiftEnabled(true);
     controller.setTimeshiftWindowMinutes(120);
@@ -6873,6 +7221,16 @@ void AppModelTests::appControllerSameChannelActivationSkipsRetuneWhileActiveOrIn
     QVERIFY(QMetaObject::invokeMethod(harness.playerController->player(), "playbackEnded", Qt::DirectConnection));
     QVERIFY(!harness.playerController->isPlaying());
 
+    // Unexpected EOF starts automatic recovery, so another activation must
+    // not replace the reconnect already in flight.
+    QVERIFY(harness.playerController->channelSwitchInProgress());
+    QVERIFY(harness.channelListModel->activateById(channelId));
+    QCOMPARE(playbackActivationSpy.count(), 0);
+
+    harness.playerController->stop();
+    QVERIFY(!harness.playerController->isPlaying());
+    QVERIFY(!harness.playerController->channelSwitchInProgress());
+
     QVERIFY(harness.channelListModel->activateById(channelId));
     QCOMPARE(playbackActivationSpy.count(), 1);
 }
@@ -7048,6 +7406,9 @@ void AppModelTests::appControllerPlayCatchupRejectsRunningProgramBeforeSourceMar
 void AppModelTests::appControllerPlayCatchupAllowsRunningProgramAfterSourceMargin_data()
 {
     appControllerPlayCatchupRejectsRunningProgramBeforeSourceMargin_data();
+    QTest::newRow("zero-minutes") << 0;
+    QTest::newRow("one-minute") << 1;
+    QTest::newRow("two-minutes") << 2;
 }
 
 void AppModelTests::appControllerPlayCatchupAllowsRunningProgramAfterSourceMargin()
@@ -7089,6 +7450,10 @@ void AppModelTests::appControllerPlayCatchupAllowsRunningProgramAfterSourceMargi
     harness.appController->playCatchup(channelVariant, programVariant);
 
     QCOMPARE(harness.playerController->playbackMode(), QStringLiteral("catchup"));
+    QCOMPARE(harness.playerController->m_catchupSafetySeconds, marginMinutes * 60);
+    const auto action = harness.appController->catchupActionState(channelVariant, programVariant);
+    QVERIFY(action.value(QStringLiteral("enabled")).toBool());
+    QCOMPARE(action.value(QStringLiteral("safetySeconds")).toInt(), marginMinutes * 60);
 }
 
 void AppModelTests::appControllerPlayCatchupRejectsProgrammeChannelMismatch()
@@ -9077,10 +9442,10 @@ void AppModelTests::dvrControllerRestartStateMaintainedAndClearedByWindowState()
     QVERIFY(!dvrController.m_restartNotBeforeByWindowId.contains(windowId));
 }
 
-void AppModelTests::dvrControllerWindowsCrashWithoutFinishedDefersFinalize()
+void AppModelTests::dvrControllerWindowsStoppedJobWithoutFinishedFinalizes()
 {
 #if !defined(Q_OS_WIN)
-    QSKIP("Windows-specific DVR orphan-process reconciliation path.");
+    QSKIP("Windows-specific DVR job reconciliation path.");
 #else
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -9099,7 +9464,6 @@ void AppModelTests::dvrControllerWindowsCrashWithoutFinishedDefersFinalize()
     session->stopRequested = true;
     session->recordingStarted = false;
     session->finishedSignaled = false;
-    session->orphanSweepRetriesRemaining = 1;
     session->ingestProcess = std::make_unique<QProcess>();
 
     const auto sessionId = session->window.id;
@@ -9108,12 +9472,46 @@ void AppModelTests::dvrControllerWindowsCrashWithoutFinishedDefersFinalize()
     QSignalSpy stateSpy(&dvrController, &DvrController::stateChanged);
 
     dvrController.reconcileStoppingSession(sessionId, QStringLiteral("unit-test"));
-    QVERIFY2(
-        dvrController.m_sessions.find(sessionId) != dvrController.m_sessions.end(),
-        "session finalized too early; expected deferred finalize until orphan sweep pass");
-
-    QTRY_VERIFY_WITH_TIMEOUT(dvrController.m_sessions.find(sessionId) == dvrController.m_sessions.end(), 3000);
+    QVERIFY(dvrController.m_sessions.find(sessionId) == dvrController.m_sessions.end());
     QVERIFY(stateSpy.count() > 0);
+#endif
+}
+
+void AppModelTests::dvrControllerWindowsWaitsForDescendants()
+{
+#if !defined(Q_OS_WIN)
+    QSKIP("Windows-specific DVR job reconciliation path.");
+#else
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    SettingsManager settings(tempDir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    PlayerController playerController;
+    DvrController controller(&settings, &playerController);
+    controller.m_tickTimer.stop();
+
+    auto session = std::make_unique<DvrController::Session>();
+    session->window.id = QStringLiteral("owned-tree");
+    session->state = DvrController::SessionState::Stopping;
+    session->stopRequested = true;
+    session->ingestProcess = std::make_unique<QProcess>();
+    auto *process = session->ingestProcess.get();
+    QString error;
+    QVERIFY2(session->ingestJob.configure(*process, &error), qPrintable(error));
+    process->start(QDir(QCoreApplication::applicationDirPath()).filePath(
+                       QStringLiteral("OKILTVQtWindowsProcessJobTests.exe")),
+                   { QStringLiteral("--tree-exit") });
+    QVERIFY2(process->waitForStarted(5000), qPrintable(process->errorString()));
+    QVERIFY(process->waitForReadyRead(5000));
+    QVERIFY(process->waitForFinished(5000));
+    // No finished signal is connected to the controller, and the direct PID is
+    // gone. Its child still belongs to the job and must be stopped before removal.
+    QVERIFY(session->ingestJob.hasActiveProcesses());
+    const auto id = session->window.id;
+    controller.m_sessions.insert_or_assign(id, std::move(session));
+    controller.reconcileStoppingSession(id, QStringLiteral("test-parent-exit"));
+    QVERIFY(controller.m_sessions.contains(id));
+    QTRY_VERIFY_WITH_TIMEOUT(!controller.m_sessions.contains(id), 5000);
 #endif
 }
 

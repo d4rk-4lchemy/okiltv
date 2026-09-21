@@ -284,7 +284,7 @@ CatchupValidation validateCatchupRequest(
     if (settingsManager != nullptr) {
         validation.profile = settingsManager->profileById(resolvedChannel->profileId);
     }
-    const auto safetySeconds = 60 * std::clamp(validation.profile.has_value() ? validation.profile->catchupSafetyMinutes : 3, 3, 30);
+    const auto safetySeconds = 60 * std::clamp(validation.profile.has_value() ? validation.profile->catchupSafetyMinutes : 3, 0, 30);
     if (CatchupUrlResolver::availableEdge(program.stop, safetySeconds, now) <= program.start) {
         validation.reason = QStringLiteral("Catch-up becomes available after %1 minutes of programme runtime (source archive safety margin).")
                                 .arg(safetySeconds / 60);
@@ -668,6 +668,8 @@ void AppController::initialize()
         m_settings->current().remuxRecordingsToMkv,
         m_settings->current().playerImageSmoothingEnabled,
         m_settings->current().playerPicturePreset);
+
+    m_playerController->setVolume(m_settings->current().playerVolume);
 
     auto preferencesChanged = false;
     for (const auto &summary : m_settings->sourceSummaries()) {
@@ -1452,6 +1454,7 @@ void AppController::savePlaybackForApplicationExit()
 {
     m_playerController->checkpointCatchupProgress();
     auto &settings = m_settings->current();
+    settings.playerVolume = m_playerController->volume();
     settings.lastCatchupSession = {};
     const auto channel = m_playerController->currentChannelValue();
     if (channel.has_value()) {
@@ -1649,7 +1652,7 @@ void AppController::pruneCatchupProgress()
 QVariantMap AppController::catchupActionState(const QVariantMap &channel, const QVariantMap &program) const
 {
     const auto validation = validateCatchupRequest(m_settings, m_settings->current(), m_channelListModel, channel, program);
-    const auto safetySeconds = 60 * std::clamp(validation.profile.has_value() ? validation.profile->catchupSafetyMinutes : 3, 3, 30);
+    const auto safetySeconds = 60 * std::clamp(validation.profile.has_value() ? validation.profile->catchupSafetyMinutes : 3, 0, 30);
     qint64 resumeSeconds = 0;
     const auto resolvedChannel = validation.channel;
     const auto resolvedProgram = validation.program;
@@ -1729,7 +1732,7 @@ void AppController::playCatchupAtOffsetInternal(
     CatchupUrlResolver resolver(validation.profile);
     QString catchupResolveReason;
     const auto now = QDateTime::currentDateTimeUtc();
-    const auto safetySeconds = 60 * std::clamp(validation.profile ? validation.profile->catchupSafetyMinutes : 3, 3, 30);
+    const auto safetySeconds = 60 * std::clamp(validation.profile ? validation.profile->catchupSafetyMinutes : 3, 0, 30);
     const auto safeEdge = CatchupUrlResolver::availableEdge(now, safetySeconds, now);
     const auto target = resolver.resolveWindow(validation.channel.value(), validation.program->start, safeEdge, &catchupResolveReason);
     if (!target.has_value()) {

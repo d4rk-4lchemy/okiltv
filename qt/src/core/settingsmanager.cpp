@@ -102,6 +102,41 @@ void SettingsManager::load()
     }
 }
 
+QJsonObject SettingsManager::channelTrackPreferences(const QString &profileId, const QString &channelKey) const
+{
+    return m_current.channelTrackPreferences.value(profileId).toObject().value(channelKey).toObject();
+}
+
+void SettingsManager::setChannelTrackPreference(const QString &profileId, const QString &channelKey,
+                                               const QString &type, const QJsonObject &preference)
+{
+    if (parseGuid(profileId).isNull() || channelKey.isEmpty()
+        || (type != QLatin1String("audio") && type != QLatin1String("sub"))) {
+        return;
+    }
+    auto profile = m_current.channelTrackPreferences.value(profileId).toObject();
+    auto channel = profile.value(channelKey).toObject();
+    if (channel.value(type).toObject() == preference) {
+        return;
+    }
+    if (preference.isEmpty()) {
+        channel.remove(type);
+    } else {
+        channel.insert(type, preference);
+    }
+    if (channel.isEmpty()) {
+        profile.remove(channelKey);
+    } else {
+        profile.insert(channelKey, channel);
+    }
+    if (profile.isEmpty()) {
+        m_current.channelTrackPreferences.remove(profileId);
+    } else {
+        m_current.channelTrackPreferences.insert(profileId, profile);
+    }
+    save();
+}
+
 void SettingsManager::save() const
 {
     m_lastSaveError.clear();
@@ -294,6 +329,7 @@ bool SettingsManager::removeProfile(const QUuid &id)
     }
 
     m_sourceSummaries.removeAt(index);
+    m_current.channelTrackPreferences.remove(guidToString(id));
     clearProfileDetailCache(id);
     if (!m_sourceStore.removeDetail(id, &m_lastSaveError)) {
         return false;

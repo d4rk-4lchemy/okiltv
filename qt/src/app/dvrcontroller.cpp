@@ -11,6 +11,7 @@
 #include <QFileInfo>
 #include <QHostAddress>
 #include <QProcess>
+#include <QPointer>
 #include <QRegularExpression>
 #include <QSet>
 #include <QUdpSocket>
@@ -18,12 +19,7 @@
 #include <algorithm>
 #include <cmath>
 
-#if defined(Q_OS_WIN)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#else
+#if !defined(Q_OS_WIN)
 #include <cerrno>
 #include <csignal>
 #include <sys/types.h>
@@ -43,8 +39,6 @@ constexpr int kProcessTerminateTimeoutMs = 1500;
 constexpr int kProcessKillTimeoutMs = 1200;
 constexpr int kProcessForceKillRetryMs = 500;
 constexpr int kProcessForceKillRetries = 10;
-constexpr int kWindowsOrphanSweepDelayMs = 500;
-constexpr int kWindowsOrphanSweepRetries = 12;
 constexpr int kTempDeleteRetryDelayMs = 1000;
 constexpr int kTempDeleteMaxRetries = 90;
 constexpr int kRemuxProbeStartTimeoutMs = 3000;
@@ -82,25 +76,16 @@ QString processErrorText(const QProcess::ProcessError error)
     }
 }
 
+#if !defined(Q_OS_WIN)
 bool isProcessAlive(const qint64 pid)
 {
     if (pid <= 0) {
         return false;
     }
-#if defined(Q_OS_WIN)
-    const auto handle = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
-    if (handle == nullptr) {
-        return false;
-    }
-
-    const auto waitResult = WaitForSingleObject(handle, 0);
-    CloseHandle(handle);
-    return waitResult == WAIT_TIMEOUT;
-#else
     const auto result = ::kill(static_cast<pid_t>(pid), 0);
     return result == 0 || errno == EPERM;
-#endif
 }
+#endif
 
 std::optional<double> probeMediaDurationSeconds(const QString &path, QString *errorText = nullptr)
 {
@@ -336,6 +321,17 @@ void DvrController::shutdownForApplicationExit()
 
         auto *process = entry.second->ingestProcess.get();
         process->disconnect(this);
+#if defined(Q_OS_WIN)
+        // Kill the complete owned tree even if the direct child has already exited.
+        QString errorText;
+        if (!entry.second->ingestJob.terminate(&errorText)) {
+            DebugLogger::instance().log(QStringLiteral("dvr"), errorText);
+        }
+        if (process->state() != QProcess::NotRunning) {
+            process->kill();
+            process->waitForFinished(kProcessKillTimeoutMs);
+        }
+#else
         if (process->state() == QProcess::NotRunning) {
             continue;
         }
@@ -345,6 +341,7 @@ void DvrController::shutdownForApplicationExit()
             process->kill();
             process->waitForFinished(kProcessKillTimeoutMs);
         }
+#endif
     }
 }
 
@@ -776,6 +773,15 @@ bool DvrController::startSession(const MergedWindow &window)
     session->remuxToMkv = m_settings->current().dvrRemuxToMkv && Core::ffmpegToolsAvailable();
     session->ingestProcess = std::make_unique<QProcess>();
     session->ingestProcess->setProcessChannelMode(QProcess::MergedChannels);
+#if defined(Q_OS_WIN)
+    QString jobError;
+    if (!session->ingestJob.configure(*session->ingestProcess, &jobError)) {
+        DebugLogger::instance().log(
+            QStringLiteral("dvr"),
+            QStringLiteral("Cannot contain DVR process for %1: %2").arg(window.id, jobError));
+        return false;
+    }
+#endif
 
     const auto outputDir = recordingOutputDirectory();
     QDir().mkpath(outputDir);
@@ -864,12 +870,12 @@ bool DvrController::startSession(const MergedWindow &window)
         }
         DebugLogger::instance().log(
             QStringLiteral("dvr"),
-            QStringLiteral("DVR ffmpeg error for %1: %2")
-                .arg(sessionId, processErrorText(error)));
+                QStringLiteral("DVR ffmpeg error for %1: %2 (%3)")
+                .arg(sessionId, processErrorText(error), it->second->ingestProcess->errorString()));
         if (error == QProcess::FailedToStart) {
             DebugLogger::instance().log(
                 QStringLiteral("dvr"),
-                QStringLiteral("DVR ffmpeg failed to start for %1. This usually means ffmpeg is missing; scheduler will retry while window stays active.")
+                QStringLiteral("DVR ffmpeg failed to start for %1; scheduler will retry while window stays active.")
                     .arg(sessionId));
         }
         if (stopping) {
@@ -969,9 +975,6 @@ void DvrController::requestStopSession(const QString &sessionId, const QString &
     session->stopRequested = true;
     session->state = SessionState::Stopping;
     session->stopReason = reason.trimmed().isEmpty() ? QStringLiteral("no-reason") : reason.trimmed();
-#if defined(Q_OS_WIN)
-    session->orphanSweepRetriesRemaining = kWindowsOrphanSweepRetries;
-#endif
     DebugLogger::instance().log(
         QStringLiteral("dvr"),
         QStringLiteral("Stopping DVR session %1 (%2).")
@@ -984,9 +987,10 @@ void DvrController::requestStopSession(const QString &sessionId, const QString &
     }
 
     process->terminate();
-    QTimer::singleShot(kProcessTerminateTimeoutMs, this, [this, sessionId]() {
+    QTimer::singleShot(kProcessTerminateTimeoutMs, this, [this, sessionId, expectedProcess = QPointer(process)]() {
         auto it = m_sessions.find(sessionId);
-        if (it == m_sessions.end() || !it->second || !it->second->ingestProcess) {
+        if (it == m_sessions.end() || !it->second || !expectedProcess
+            || it->second->ingestProcess.get() != expectedProcess) {
             return;
         }
 
@@ -1026,28 +1030,40 @@ void DvrController::forceStopSessionProcess(const QString &sessionId, int retrie
     if (pid <= 0 && process != nullptr) {
         pid = static_cast<qint64>(process->processId());
     }
+#if defined(Q_OS_WIN)
+    const auto aliveBeforeSignal = session->ingestJob.hasActiveProcesses();
+#else
     const auto aliveBeforeSignal = isProcessAlive(pid);
+#endif
     if (!aliveBeforeSignal && (process == nullptr || process->state() == QProcess::NotRunning)) {
         reconcileStoppingSession(sessionId, QStringLiteral("force-stop-already-dead"));
         return;
     }
 
-    if (pid > 0) {
 #if defined(Q_OS_WIN)
-        QProcess::startDetached(
-            QStringLiteral("taskkill"),
-            { QStringLiteral("/PID"), QString::number(pid), QStringLiteral("/T"), QStringLiteral("/F") });
+    QString errorText;
+    if (!session->ingestJob.terminate(&errorText)) {
+        DebugLogger::instance().log(QStringLiteral("dvr"), errorText);
+    }
+    if (process != nullptr && process->state() != QProcess::NotRunning) {
+        process->kill();
+    }
 #else
+    if (pid > 0) {
         ::kill(static_cast<pid_t>(pid), SIGKILL);
-#endif
     } else {
         if (process != nullptr && process->state() != QProcess::NotRunning) {
             process->kill();
         }
     }
+#endif
 
     if (retriesLeft <= 0) {
+#if defined(Q_OS_WIN)
+        const auto aliveAfterRetries = session->ingestJob.hasActiveProcesses();
+#else
         const auto aliveAfterRetries = isProcessAlive(pid);
+#endif
         if (aliveAfterRetries) {
             DebugLogger::instance().log(
                 QStringLiteral("dvr"),
@@ -1060,50 +1076,14 @@ void DvrController::forceStopSessionProcess(const QString &sessionId, int retrie
         return;
     }
 
-    QTimer::singleShot(kProcessForceKillRetryMs, this, [this, sessionId, retriesLeft]() {
+    QTimer::singleShot(kProcessForceKillRetryMs, this, [this, sessionId, retriesLeft, expectedProcess = QPointer(process)]() {
+        const auto it = m_sessions.find(sessionId);
+        if (it == m_sessions.end() || !it->second || !expectedProcess
+            || it->second->ingestProcess.get() != expectedProcess) {
+            return;
+        }
         forceStopSessionProcess(sessionId, retriesLeft - 1);
     });
-}
-
-void DvrController::sweepWindowsOrphanFfmpeg(const Session &session) const
-{
-#if defined(Q_OS_WIN)
-    const auto fileMarker = QFileInfo(session.recordTempPath).fileName().trimmed();
-    const auto tapMarker = QStringLiteral("udp://127.0.0.1:%1?pkt_size=1316").arg(session.tapPort).trimmed();
-    if (fileMarker.isEmpty() || tapMarker.isEmpty()) {
-        return;
-    }
-
-    auto escapedFileMarker = fileMarker;
-    auto escapedTapMarker = tapMarker;
-    escapedFileMarker.replace(QStringLiteral("'"), QStringLiteral("''"));
-    escapedTapMarker.replace(QStringLiteral("'"), QStringLiteral("''"));
-    const auto script = QStringLiteral(
-                            "$fileNeedle='%1'; "
-                            "$tapNeedle='%2'; "
-                            "Get-CimInstance Win32_Process -Filter \"Name='ffmpeg.exe'\" | "
-                            "Where-Object { "
-                            "$_.CommandLine -and "
-                            "$_.CommandLine -like ('*' + $fileNeedle + '*') -and "
-                            "$_.CommandLine -like ('*' + $tapNeedle + '*') "
-                            "} | "
-                            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
-                            .arg(escapedFileMarker, escapedTapMarker);
-    const auto started = QProcess::startDetached(
-        QStringLiteral("powershell.exe"),
-        { QStringLiteral("-NoProfile"),
-          QStringLiteral("-NonInteractive"),
-          QStringLiteral("-ExecutionPolicy"),
-          QStringLiteral("Bypass"),
-          QStringLiteral("-Command"),
-          script });
-    DebugLogger::instance().log(
-        QStringLiteral("dvr"),
-        QStringLiteral("Windows orphan ffmpeg sweep by markers file='%1' tap='%2' started=%3")
-            .arg(fileMarker, tapMarker, started ? QStringLiteral("true") : QStringLiteral("false")));
-#else
-    Q_UNUSED(session);
-#endif
 }
 
 void DvrController::reconcileStoppingSession(const QString &sessionId, const QString &reason)
@@ -1121,28 +1101,15 @@ void DvrController::reconcileStoppingSession(const QString &sessionId, const QSt
     }
 
     const auto qtRunning = process != nullptr && process->state() != QProcess::NotRunning;
+#if defined(Q_OS_WIN)
+    const auto osRunning = session->ingestJob.hasActiveProcesses();
+#else
     const auto osRunning = isProcessAlive(pid);
+#endif
     if (qtRunning || osRunning) {
         forceStopSessionProcess(sessionId, kProcessForceKillRetries);
         return;
     }
-
-#if defined(Q_OS_WIN)
-    if (!session->finishedSignaled && session->orphanSweepRetriesRemaining > 0) {
-        session->orphanSweepRetriesRemaining -= 1;
-        DebugLogger::instance().log(
-            QStringLiteral("dvr"),
-            QStringLiteral("No finished signal for stopped DVR session %1; running orphan sweep (%2 retries left).")
-                .arg(sessionId)
-                .arg(session->orphanSweepRetriesRemaining));
-        sweepWindowsOrphanFfmpeg(*session);
-        QTimer::singleShot(kWindowsOrphanSweepDelayMs, this, [this, sessionId]() {
-            reconcileStoppingSession(sessionId, QStringLiteral("windows-orphan-sweep"));
-        });
-        return;
-    }
-#endif
-
     const auto exitCode = session->finishedSignaled ? session->lastExitCode : -1;
     const auto exitStatus = session->finishedSignaled ? session->lastExitStatus : QProcess::CrashExit;
     DebugLogger::instance().log(
@@ -1166,8 +1133,26 @@ void DvrController::finalizeStopSession(const QString &sessionId, const int exit
         return;
     }
 
+#if defined(Q_OS_WIN)
+    // The direct child may exit while a descendant still holds the recording open.
+    // Do not remux, delete, or restart this window until the whole job is empty.
+    if (it->second->ingestJob.hasActiveProcesses()) {
+        it->second->state = SessionState::Stopping;
+        it->second->stopRequested = true;
+        forceStopSessionProcess(sessionId, kProcessForceKillRetries);
+        return;
+    }
+#endif
+
     auto session = std::move(it->second);
     m_sessions.erase(it);
+    if (session && session->ingestProcess) {
+        // Finalization can run inside QProcess::finished/errorOccurred.
+        // Let Qt finish emitting its signal before destroying the sender.
+        auto *process = session->ingestProcess.release();
+        process->disconnect(this);
+        process->deleteLater();
+    }
     if (!session) {
         emitRecordingChannelsChanged();
         emit stateChanged();

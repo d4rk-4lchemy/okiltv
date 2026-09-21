@@ -2,6 +2,7 @@
 
 #include "../core/models.h"
 #include "../core/debuglogger.h"
+#include "../core/trackpreferences.h"
 #include "catchupstreamsession.h"
 
 #include <QCoreApplication>
@@ -39,6 +40,7 @@ constexpr int kMpvEventNone = 0;
 constexpr int kMpvEventShutdown = 1;
 constexpr int kMpvEventLogMessage = 2;
 constexpr int kMpvEventSetPropertyReply = 4;
+constexpr int kMpvEventCommandReply = 5;
 constexpr int kMpvEventPropertyChange = 22; // MPV_EVENT_PROPERTY_CHANGE; 16 is CLIENT_MESSAGE.
 constexpr int kMpvEventEndFile = 7;
 constexpr int kMpvEventFileLoaded = 8;
@@ -283,6 +285,8 @@ struct MpvPlayer::Api
     using TerminateDestroyFn = void (*)(mpv_handle *);
     using SetOptionStringFn = int (*)(mpv_handle *, const char *, const char *);
     using CommandFn = int (*)(mpv_handle *, const char *const[]);
+    using CommandAsyncFn = int (*)(mpv_handle *, quint64, const char *const[]);
+    using WaitAsyncRequestsFn = void (*)(mpv_handle *);
     using CommandStringFn = int (*)(mpv_handle *, const char *);
     using SetPropertyFn = int (*)(mpv_handle *, const char *, int, void *);
     using SetPropertyAsyncFn = int (*)(mpv_handle *, quint64, const char *, int, void *);
@@ -307,6 +311,8 @@ struct MpvPlayer::Api
     TerminateDestroyFn terminateDestroy = nullptr;
     SetOptionStringFn setOptionString = nullptr;
     CommandFn command = nullptr;
+    CommandAsyncFn commandAsync = nullptr;
+    WaitAsyncRequestsFn waitAsyncRequests = nullptr;
     CommandStringFn commandString = nullptr;
     SetPropertyFn setProperty = nullptr;
     SetPropertyAsyncFn setPropertyAsync = nullptr;
@@ -708,7 +714,10 @@ QString MpvPlayer::diagnostics() const
 
 bool MpvPlayer::isAvailable() const
 {
-    return QFileInfo::exists(resolvedLibraryPath()) || QFileInfo::exists(QCoreApplication::applicationDirPath() + u'/' + kLibraryName);
+    // A system-installed libmpv can be loaded by soname without a file next to
+    // the executable. Runtime track selection must also work in that case.
+    return m_api->library.isLoaded() || QFileInfo::exists(resolvedLibraryPath())
+        || QFileInfo::exists(QCoreApplication::applicationDirPath() + u'/' + kLibraryName);
 }
 
 bool MpvPlayer::catchupStreamProtocolAvailable() const
@@ -810,9 +819,7 @@ bool MpvPlayer::ensureInitialized()
         "cache-pause-wait",
         m_startupBufferingStrictMode ? secondsOptionValue(m_bufferSeconds) : QStringLiteral("0.0"));
     applyOption("network-timeout", secondsOptionValue(networkTimeoutSeconds));
-    if (!m_userAgent.isEmpty()) {
-        applyOption("user-agent", m_userAgent);
-    }
+    applyOption("user-agent", m_userAgent.isEmpty() ? Core::defaultPlayerUserAgent() : m_userAgent);
     // Deinterlacing is controlled directly by the user setting. mpv/yadif decides per-frame
     // handling internally; app logic does not gate filter activation by source scan type.
     applyOption("deinterlace", m_deinterlaceEnabled ? QStringLiteral("yes") : QStringLiteral("no"));
@@ -961,6 +968,13 @@ bool MpvPlayer::registerCatchupStreamProtocol()
 
 void MpvPlayer::play(const QString &url, const QString &loadfileOptions)
 {
+    beginTrackLoad({});
+    if (m_stopSubmitted) {
+        // libmpv may reorder async commands against a synchronous loadfile.
+        // Only reuse of this stopped player needs a fence; closing PiP does not.
+        m_api->waitAsyncRequests(m_state->handle);
+        m_stopSubmitted = false;
+    }
     closeLiveStream(QStringLiteral("channel-switch"));
     if (m_reinitializePending) {
         Core::DebugLogger::instance().log(
@@ -1036,10 +1050,12 @@ void MpvPlayer::play(const QString &url, const QString &loadfileOptions)
             ? QStringLiteral("loadfile %1").arg(url)
             : QStringLiteral("loadfile %1 (%2)").arg(url, loadfileOptions));
 
+    m_trackExpectedPath = transportUrl;
+    const auto effectiveLoadfileOptions = trackLoadOptions(loadfileOptions);
     int commandCode = 0;
     if (m_api->command != nullptr) {
         const auto urlUtf8 = transportUrl.toUtf8();
-        const auto optionsUtf8 = loadfileOptions.toUtf8();
+        const auto optionsUtf8 = effectiveLoadfileOptions.toUtf8();
         if (optionsUtf8.isEmpty()) {
             const char *arguments[] = { "loadfile", urlUtf8.constData(), "replace", nullptr };
             commandCode = m_api->command(m_state->handle, arguments);
@@ -1055,10 +1071,10 @@ void MpvPlayer::play(const QString &url, const QString &loadfileOptions)
             commandCode = m_api->command(m_state->handle, arguments);
         }
     } else {
-        const auto command = loadfileOptions.trimmed().isEmpty()
+        const auto command = effectiveLoadfileOptions.trimmed().isEmpty()
             ? QStringLiteral("loadfile %1 replace").arg(escapeArg(transportUrl))
             : QStringLiteral("loadfile %1 replace -1 %2")
-                  .arg(escapeArg(transportUrl), escapeArg(loadfileOptions));
+                  .arg(escapeArg(transportUrl), escapeArg(effectiveLoadfileOptions));
         commandCode = m_api->commandString(m_state->handle, command.toUtf8().constData());
     }
 
@@ -1092,8 +1108,11 @@ bool MpvPlayer::advanceLiveMediaPeriod()
     Core::DebugLogger::instance().log(QStringLiteral("mpv"),
         QStringLiteral("Live MPEG-TS configuration cutover: generation=%1; replacing demuxer/decoders on the same HTTP response.")
             .arg(m_liveStream->readGeneration()));
-    const auto command = QStringLiteral("loadfile %1 replace")
-        .arg(escapeArg(m_liveStream->virtualUrl()));
+    beginTrackLoad(m_liveStream->virtualUrl());
+    const auto options = trackLoadOptions({});
+    const auto command = options.isEmpty()
+        ? QStringLiteral("loadfile %1 replace").arg(escapeArg(m_liveStream->virtualUrl()))
+        : QStringLiteral("loadfile %1 replace -1 %2").arg(escapeArg(m_liveStream->virtualUrl()), escapeArg(options));
     const auto result = m_api->commandString(m_state->handle, command.toUtf8().constData());
     if (result < 0) {
         closeLiveStream(QStringLiteral("period-load-failed"));
@@ -1132,13 +1151,22 @@ void MpvPlayer::releaseRetiredLiveStreams()
 
 void MpvPlayer::stop()
 {
+    beginTrackLoad({});
     closeLiveStream(QStringLiteral("stop"));
     stopStreamRecord();
     if (!ensureInitialized()) {
         return;
     }
 
-    m_api->commandString(m_state->handle, "stop");
+    // Decoder/VO shutdown can wait for rendering. Blocking the GUI thread here
+    // also prevents Qt Quick from advancing the other (primary) video surface.
+    const char *args[] = { "stop", nullptr };
+    const auto result = m_api->commandAsync(m_state->handle, 0, args);
+    m_stopSubmitted = m_stopSubmitted || result >= 0;
+    if (result < 0) {
+        queueError(QStringLiteral("Unable to stop playback: %1")
+                       .arg(QString::fromUtf8(m_api->errorString(result))));
+    }
 }
 
 void MpvPlayer::setHwdec(const QString &mode)
@@ -1227,6 +1255,9 @@ void MpvPlayer::setAudioEnabled(const bool enabled)
     // Volume/focus changes must not reset an explicitly selected track to "auto".
     if (m_audioEnableApplied && m_audioEnabledRequested == enabled) {
         return;
+    }
+    if (enabled && !m_audioEnabledRequested) {
+        m_restoredTrackTypes.remove(QStringLiteral("audio"));
     }
     m_audioEnabledRequested = enabled;
     const char *trackSelection = enabled ? "auto" : "no";
@@ -1366,6 +1397,7 @@ void MpvPlayer::refreshCachedTelemetryFast()
 
 void MpvPlayer::refreshCachedTelemetrySlow(const bool refreshTracks)
 {
+    const auto trackGeneration = m_trackGeneration.load();
     CachedTelemetry telemetry;
     {
         QMutexLocker locker(&m_state->mutex);
@@ -1396,8 +1428,18 @@ void MpvPlayer::refreshCachedTelemetrySlow(const bool refreshTracks)
         telemetry.trackList = queryTrackList();
     }
 
-    QMutexLocker locker(&m_state->mutex);
-    m_cachedTelemetry = std::move(telemetry);
+    const auto publishTracks = refreshTracks && trackGeneration != 0 && m_tracksLoadedGeneration.load() == trackGeneration;
+    const auto tracks = publishTracks ? telemetry.trackList : QVariantList {};
+    const auto path = publishTracks ? propertyString("path").value_or(QString {}) : QString {};
+    {
+        QMutexLocker locker(&m_state->mutex);
+        m_cachedTelemetry = std::move(telemetry);
+    }
+    if (publishTracks) {
+        QMetaObject::invokeMethod(this, [this, trackGeneration, path, tracks]() {
+            acceptTrackSnapshot(trackGeneration, path, tracks);
+        }, Qt::QueuedConnection);
+    }
 }
 
 QVariantList MpvPlayer::queryTrackList() const
@@ -1596,23 +1638,193 @@ QVariantList MpvPlayer::trackList() const
     return m_cachedTelemetry.trackList;
 }
 
-void MpvPlayer::selectAudioTrack(const int id)
+void MpvPlayer::configureTrackPreferences(const QString &profileId, const QString &channelKey,
+                                        const QJsonObject &preferences, const bool discardMissing)
 {
+    if (m_trackProfileId != profileId || m_trackChannelKey != channelKey) {
+        beginTrackLoad({});
+        m_trackProfileId = profileId;
+        m_trackChannelKey = channelKey;
+    }
+    for (const auto &type : { QStringLiteral("audio"), QStringLiteral("sub") }) {
+        if (m_trackPreferences.value(type) != preferences.value(type)
+            || (!m_discardMissingTrackPreferences && discardMissing)) {
+            m_restoredTrackTypes.remove(type);
+        }
+    }
+    m_trackPreferences = preferences;
+    m_discardMissingTrackPreferences = discardMissing;
+    m_trackListRefreshPending.store(true);
+}
+
+bool MpvPlayer::managesTrackPreferences() const
+{
+    return !Core::parseGuid(m_trackProfileId).isNull() && !m_trackChannelKey.isEmpty();
+}
+
+void MpvPlayer::beginTrackLoad(const QString &url)
+{
+    ++m_trackGeneration;
+    m_tracksLoadedGeneration.store(0);
+    m_readyTrackGeneration = 0;
+    m_trackExpectedPath = url;
+    m_readyTracks.clear();
+    m_defaultTrackIds.clear();
+    m_restoredTrackTypes.clear();
+    m_pendingTrackChoices.clear();
+}
+
+QString MpvPlayer::trackLoadOptions(const QString &options) const
+{
+    if (!managesTrackPreferences()) {
+        return options;
+    }
+    auto result = options.trimmed();
+    for (const auto &name : { QStringLiteral("aid"), QStringLiteral("sid") }) {
+        auto value = m_options.value(name, QStringLiteral("auto")).trimmed();
+        bool numeric = false;
+        value.toInt(&numeric);
+        if (!numeric && value != QLatin1String("auto") && value != QLatin1String("no")) {
+            value = QStringLiteral("auto");
+        }
+        if (name == QLatin1String("aid") && !m_audioEnabledRequested) {
+            value = QStringLiteral("no");
+        }
+        if (!result.isEmpty()) {
+            result += QLatin1Char(',');
+        }
+        result += name + QLatin1Char('=') + value;
+    }
+    return result;
+}
+
+void MpvPlayer::updateTrackPreference(const QString &type, const QJsonObject &preference)
+{
+    if (preference.isEmpty()) {
+        m_trackPreferences.remove(type);
+    } else {
+        m_trackPreferences.insert(type, preference);
+    }
+    emit trackPreferenceChanged(m_trackProfileId, m_trackChannelKey, type, preference);
+}
+
+void MpvPlayer::acceptTrackSnapshot(const quint64 generation, const QString &path, const QVariantList &tracks)
+{
+    // A cached/queued predecessor snapshot, stop or failed load cannot erase a
+    // preference. FILE_LOADED and the current path must both agree with it.
+    const auto normalizedPath = [](const QString &value) {
+        const QUrl url(value);
+        return url.isLocalFile() ? url.toLocalFile() : value;
+    };
+    if (generation != m_trackGeneration.load() || generation != m_tracksLoadedGeneration.load()
+        || m_trackExpectedPath.isEmpty() || normalizedPath(path) != normalizedPath(m_trackExpectedPath) || tracks.isEmpty()) {
+        return;
+    }
+    m_readyTrackGeneration = generation;
+    m_readyTracks = tracks;
+    emit trackListReady(generation, tracks);
+    if (!managesTrackPreferences()) {
+        return;
+    }
+    for (const auto &type : { QStringLiteral("audio"), QStringLiteral("sub") }) {
+        const auto selected = Core::selectedTrackId(tracks, type);
+        // Audio can be temporarily disabled by multiview ownership. Wait for
+        // its automatic selection before capturing a baseline or restoring it.
+        if (type == QLatin1String("audio") && (!m_audioEnabledRequested
+            || (!m_defaultTrackIds.contains(type) && selected == 0
+                && m_options.value(QStringLiteral("aid")) != QLatin1String("no")
+                && !Core::trackLayout(tracks, type).isEmpty()))) {
+            continue;
+        }
+        if (!m_defaultTrackIds.contains(type)) {
+            m_defaultTrackIds.insert(type, selected);
+        }
+        const auto pending = m_pendingTrackChoices.constFind(type);
+        if (pending != m_pendingTrackChoices.cend()) {
+            if (selected == pending->id) {
+                const auto preference = pending->preference;
+                m_pendingTrackChoices.remove(type);
+                m_restoredTrackTypes.insert(type);
+                updateTrackPreference(type, preference);
+            }
+            continue;
+        }
+        if (m_restoredTrackTypes.contains(type)) {
+            continue;
+        }
+        m_restoredTrackTypes.insert(type);
+        const auto preference = m_trackPreferences.value(type).toObject();
+        auto target = preference.isEmpty() ? m_defaultTrackIds.value(type, 0)
+            : Core::matchTrackPreference(tracks, type, preference);
+        if (target < 0) {
+            if (m_discardMissingTrackPreferences) {
+                updateTrackPreference(type, {});
+            }
+            target = m_defaultTrackIds.value(type, 0);
+        }
+        if (target != selected) {
+            if (type == QLatin1String("audio")) {
+                if (target > 0) {
+                    selectAudioTrack(target);
+                } else {
+                    const char *no = "no";
+                    setPlaybackPropertyAsync("aid", kMpvFormatString, static_cast<void *>(&no), kAudioPropertyRequest);
+                }
+            } else if (type == QLatin1String("sub")) {
+                selectSubtitleTrack(target);
+            }
+        }
+    }
+}
+
+bool MpvPlayer::prepareRememberedTrack(const QString &type, const int id)
+{
+    if (!managesTrackPreferences()) {
+        return true;
+    }
+    if (m_readyTrackGeneration == 0 || m_readyTrackGeneration != m_trackGeneration.load()) {
+        return false;
+    }
+    auto preference = Core::makeTrackPreference(m_readyTracks, type, id);
+    if (preference.isEmpty()) {
+        return false;
+    }
+    if (id > 0 && m_defaultTrackIds.value(type, -1) == id) {
+        preference = {}; // Explicitly choosing the baseline cancels the override.
+    }
+    m_pendingTrackChoices.insert(type, { id, preference });
+    return true;
+}
+
+void MpvPlayer::selectAudioTrack(const int id, const bool remember)
+{
+    if (remember && !prepareRememberedTrack(QStringLiteral("audio"), id)) {
+        return;
+    }
     qint64 v = id;
     if (setPlaybackPropertyAsync("aid", kMpvFormatInt64, &v, kAudioPropertyRequest)) {
         m_audioEnabledRequested = true;
         m_audioEnableApplied = true;
+    } else if (remember) {
+        m_pendingTrackChoices.remove(QStringLiteral("audio"));
     }
 }
 
-void MpvPlayer::selectSubtitleTrack(const int id)
+void MpvPlayer::selectSubtitleTrack(const int id, const bool remember)
 {
+    if (remember && !prepareRememberedTrack(QStringLiteral("sub"), id)) {
+        return;
+    }
+    bool submitted = false;
     if (id == 0) {
         const char *no = "no";
-        setPlaybackPropertyAsync("sid", kMpvFormatString, static_cast<void *>(&no), kSubtitlePropertyRequest);
+        submitted = setPlaybackPropertyAsync("sid", kMpvFormatString, static_cast<void *>(&no), kSubtitlePropertyRequest);
     } else {
         qint64 v = id;
-        setPlaybackPropertyAsync("sid", kMpvFormatInt64, &v, kSubtitlePropertyRequest);
+        submitted = setPlaybackPropertyAsync("sid", kMpvFormatInt64, &v, kSubtitlePropertyRequest);
+    }
+    if (!submitted && remember) {
+        m_pendingTrackChoices.remove(QStringLiteral("sub"));
     }
 }
 
@@ -1795,6 +2007,7 @@ void MpvPlayer::unload()
     m_retiredLiveStreams.clear();
 
     m_state->initialized = false;
+    m_stopSubmitted = false;
     m_audioEnableApplied = false;
     m_cachedTelemetry = {};
     m_trackListRefreshPending.store(false);
@@ -1825,6 +2038,8 @@ bool MpvPlayer::loadApi()
         && resolve(m_api->initialize, "mpv_initialize")
         && resolve(m_api->terminateDestroy, "mpv_terminate_destroy")
         && resolve(m_api->setOptionString, "mpv_set_option_string")
+        && resolve(m_api->commandAsync, "mpv_command_async")
+        && resolve(m_api->waitAsyncRequests, "mpv_wait_async_requests")
         && resolve(m_api->setProperty, "mpv_set_property")
         && resolve(m_api->setPropertyAsync, "mpv_set_property_async")
         && resolve(m_api->getProperty, "mpv_get_property")
@@ -1942,6 +2157,12 @@ void MpvPlayer::processEvents()
         }
 
         switch (event->event_id) {
+        case kMpvEventCommandReply:
+            if (event->error < 0) {
+                queueError(QStringLiteral("Unable to stop playback: %1")
+                               .arg(QString::fromUtf8(m_api->errorString(event->error))));
+            }
+            break;
         case kMpvEventSetPropertyReply:
             if (event->error < 0) {
                 Core::DebugLogger::instance().log(
@@ -1974,6 +2195,7 @@ void MpvPlayer::processEvents()
             }
             break;
         case kMpvEventFileLoaded:
+            m_tracksLoadedGeneration.store(m_trackGeneration.load());
             Core::DebugLogger::instance().log(QStringLiteral("mpv"), QStringLiteral("Received MPV_EVENT_FILE_LOADED."));
             m_trackListRefreshPending.store(true);
             m_slowTelemetryRefreshPending.store(true);

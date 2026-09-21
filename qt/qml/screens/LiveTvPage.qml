@@ -36,6 +36,10 @@ Item {
     property date currentClockTime: new Date()
     readonly property string currentClockText: Qt.locale("en_US").toString(root.currentClockTime, root.dateTime.clockPattern)
     property bool hasPlaybackChannel: root.player.currentChannel.id !== undefined
+    property int transportAudioTrackCount: 0
+    property int transportSubtitleTrackCount: 0
+    readonly property bool transportTracksReady: root.hasPlaybackChannel
+        && !root.player.channelSwitchInProgress && !root.player.channelLoadFailed
     property bool showPlaybackSpinner: (root.player.isLoading
             || root.player.isBuffering
             || root.player.timeshiftPreparing)
@@ -83,7 +87,7 @@ Item {
     property string groupPickerHighlightedId: ""
     property bool groupPickerKeyboardNavigation: false
     property point groupKeyboardPointerPosition: Qt.point(-1, -1)
-    readonly property int leftPaneViewSwitchWidth: 88
+    readonly property int leftPaneViewSwitchWidth: 78
     property bool sourcePickerOpen: false
     property string sourcePickerSearchText: ""
     property string sourcePickerHighlightedId: ""
@@ -295,6 +299,24 @@ Item {
     readonly property bool transportTimelineUsingTimeshift: root.transportTimelineMode === "timeshift"
     readonly property bool transportTimelineUsingLiveProgram: root.transportTimelineMode === "liveProgram"
     readonly property bool transportTimelineUsingLiveProgress: root.transportTimelineMode === "liveProgress"
+    readonly property bool programmeTimelineActive: root.transportTimelineUsingCatchup || root.transportTimelineUsingLiveProgram
+
+    ProgrammeTimelineState {
+        id: programmeTimeline
+        startMs: root.transportTimelineUsingCatchup
+            ? Number(root.player.catchupTimelineStartEpochMs)
+            : Date.parse(String((root.playbackNowNext.currentProgram || {}).start || ""))
+        endMs: root.transportTimelineUsingCatchup
+            ? Number(root.player.catchupTimelineEndEpochMs)
+            : Date.parse(String((root.playbackNowNext.currentProgram || {}).stop || ""))
+        nowMs: root.currentClockTime.getTime()
+        archiveEdgeMs: root.transportTimelineUsingCatchup
+            ? Number(root.player.catchupTimelineAvailableEdgeEpochMs)
+            : nowMs - Math.max(0, Number(root.liveCatchupState.safetySeconds ?? 180)) * 1000
+        positionMs: root.transportTimelineUsingCatchup
+            ? startMs + Number(root.player.catchupTimelinePositionSeconds || 0) * 1000
+            : Math.min(nowMs, endMs) - Number(root.player.liveBufferBehindLiveSeconds || 0) * 1000
+    }
     readonly property real transportBehindLiveSeconds: root.player.catchupTimelineActive
         ? Math.max(0, (Date.now() - Number(root.player.catchupTimelineStartEpochMs || 0)) / 1000
                    - Number(root.player.catchupTimelinePositionSeconds || 0))
@@ -766,7 +788,20 @@ Item {
         if (!root.transportTimelineActive || root.transportTimelineUsingLiveProgress) {
             return false
         }
+        if (!Number.isFinite(Number(fraction)))
+            return false
         const clamped = Math.max(0, Math.min(1, Number(fraction)))
+        // Future programme time is an explicit request to resume the live channel.
+        if (root.programmeTimelineActive && programmeTimeline.isFuture(clamped, Date.now())) {
+            if (root.transportTimelineUsingCatchup) {
+                root.player.returnToLiveFromCatchup()
+                return true
+            }
+            // The normal live buffer reserve is not a reason to seek again.
+            if (!root.timeshiftBadgeShowBehindLive)
+                return true
+            return root.jumpToLiveEdgeWithBadge()
+        }
         if (root.transportTimelineUsingLiveProgram) {
             const program = root.playbackNowNext.currentProgram || ({})
             const startMs = Date.parse(String(program.start || ""))
@@ -776,7 +811,7 @@ Item {
             }
             const nowMs = Math.min(Date.now(), stopMs)
             const programmeAvailableSeconds = Math.max(0, (nowMs - startMs) / 1000.0)
-            const targetProgrammeSeconds = clamped * programmeAvailableSeconds
+            const targetProgrammeSeconds = clamped * (stopMs - startMs) / 1000.0
             const localAvailableSeconds = Math.max(0, Number(root.player.liveBufferAvailableSeconds || 0))
             const localStartSeconds = Math.max(0, programmeAvailableSeconds - localAvailableSeconds)
             if (targetProgrammeSeconds + 0.05 >= localStartSeconds) {
@@ -795,7 +830,7 @@ Item {
                 root.showLiveTimelineNotice(String(root.liveCatchupState.reason || "Catch-up is unavailable."))
                 return true
             }
-            const safetySeconds = Math.max(180, Number(root.liveCatchupState.safetySeconds || 180))
+            const safetySeconds = Math.max(0, Number(root.liveCatchupState.safetySeconds ?? 180))
             if (startMs + targetProgrammeSeconds * 1000 > Math.min(stopMs, Date.now() - safetySeconds * 1000)) {
                 root.showLiveTimelineNotice("The last " + Math.round(safetySeconds / 60) + " minutes are not yet available in the archive.")
                 return true
@@ -855,9 +890,8 @@ Item {
             const program = root.playbackNowNext.currentProgram || ({})
             const start = Date.parse(String(program.start || ""))
             const stop = Date.parse(String(program.stop || ""))
-            const nowMs = Date.now()
             startMs = Number.isFinite(start) ? start : 0
-            endMs = Number.isFinite(stop) ? Math.min(nowMs, stop) : nowMs
+            endMs = Number.isFinite(stop) ? stop : 0
         }
         if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
             return "--:--"
@@ -2156,6 +2190,19 @@ Item {
         root.updateAutoHide()
     }
 
+    function refreshTransportTracks() {
+        if (!root.transportTracksReady) {
+            root.transportAudioTrackCount = 0
+            root.transportSubtitleTrackCount = 0
+            return
+        }
+        root.transportAudioTrackCount = root.player.audioTracks().length
+        // The subtitle picker includes a synthetic "None" row (id 0).
+        root.transportSubtitleTrackCount = root.player.subtitleTracks().filter(function(track) {
+            return Number(track.id) !== 0
+        }).length
+    }
+
     function openAudioPicker() {
         if (guideOverlayMounted || root.shell.activeOverlay === "guide") {
             forceCloseGuideOverlay()
@@ -2168,7 +2215,9 @@ Item {
         root.subtitlePickerRows = []
         root.audioPickerRows = root.player.audioTracks()
         root.audioPickerOpen = true
-        root.audioPickerHighlightedId = root.audioPickerRows.length > 0 ? root.audioPickerRows[0].id : -1
+        const selectedAudio = root.audioPickerRows.find(function(track) { return track.selected })
+        root.audioPickerHighlightedId = selectedAudio ? selectedAudio.id
+            : (root.audioPickerRows.length > 0 ? root.audioPickerRows[0].id : -1)
         interactionFocusTarget.forceActiveFocus()
         root.setPlayerKeyboardFocusArea("audioTrack")
         revealUi("keyboard")
@@ -2240,7 +2289,9 @@ Item {
         root.audioPickerRows = []
         root.subtitlePickerRows = root.player.subtitleTracks()
         root.subtitlePickerOpen = true
-        root.subtitlePickerHighlightedId = root.subtitlePickerRows.length > 0 ? root.subtitlePickerRows[0].id : -1
+        const selectedSubtitle = root.subtitlePickerRows.find(function(track) { return track.selected })
+        root.subtitlePickerHighlightedId = selectedSubtitle ? selectedSubtitle.id
+            : (root.subtitlePickerRows.length > 0 ? root.subtitlePickerRows[0].id : -1)
         interactionFocusTarget.forceActiveFocus()
         root.setPlayerKeyboardFocusArea("subtitleTrack")
         revealUi("keyboard")
@@ -3018,7 +3069,11 @@ Item {
         interval: 1000
         running: root.visible
         repeat: true
-        onTriggered: root.currentClockTime = new Date()
+        onTriggered: {
+            root.currentClockTime = new Date()
+            if (root.showShellChrome)
+                root.refreshTransportTracks()
+        }
     }
 
     Component.onCompleted: {
@@ -3029,6 +3084,8 @@ Item {
     }
 
     onKeyboardModeLockedChanged: root.updateAutoHide()
+    onTransportTracksReadyChanged: root.refreshTransportTracks()
+    onPlayerChanged: Qt.callLater(root.refreshTransportTracks)
     onChromeAnimationsRunningChanged: Qt.callLater(root.focusSearchWhenReady)
     onHoverBubbleActiveChanged: root.updateAutoHide()
     onNumericEntryContextActiveChanged: {
@@ -3040,6 +3097,8 @@ Item {
     onSideNowNextModelChanged: root.hideProgramHoverBubble()
 
     onShowShellChromeChanged: {
+        if (root.showShellChrome)
+            root.refreshTransportTracks()
         if (root.showShellChrome && root.catchupPlayback)
             Qt.callLater(function() { epgTimeline.centerPlayback(true) })
         root.clearLeftPaneHideIfSettled()
@@ -3230,6 +3289,7 @@ Item {
         target: root.player
 
         function onCurrentChannelChanged() {
+            root.refreshTransportTracks()
             if (!root.hasPlaybackChannel) {
                 root.markTimeshiftBadgeLive()
             }
@@ -3238,6 +3298,10 @@ Item {
             if (Number.isNaN(currentChannelId) || currentChannelId < 0) {
                 root.channelChangeBubbleVisible = false
             }
+        }
+
+        function onPlaybackPlayerObjectChanged() {
+            root.refreshTransportTracks()
         }
 
         function onPlaybackModeChanged() {
@@ -3453,6 +3517,13 @@ Item {
 
                 Rectangle {
                     anchors.fill: parent
+                    color: "#000000"
+                    visible: index === 0 && root.showChannelSwitchBlackout
+                    z: 10
+                }
+
+                Rectangle {
+                    anchors.fill: parent
                     color: "transparent"
                     border.width: parent.tileFocusedBorderVisible ? 2 : 0
                     border.color: "#3b82f6"
@@ -3574,13 +3645,6 @@ Item {
                     color: multiviewGridSeparators.separatorColor
                 }
             }
-        }
-
-        Rectangle {
-            anchors.fill: parent
-            color: "#000000"
-            visible: root.showChannelSwitchBlackout
-            z: 10
         }
     }
 
@@ -4496,7 +4560,7 @@ Item {
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onPositionChanged: root.revealUi("pointer")
-                            onClicked: root.openGroupPicker("pointer")
+                            onClicked: root.openGroupPicker("pointer", true)
                         }
                     }
                 }
@@ -5298,6 +5362,9 @@ Item {
                                     root.channelList.toggleFavorite(channelId)
                                 } else if (mouse.button === Qt.RightButton) {
                                     root.multiView.assignChannelToPictureInPicture(channelId)
+                                    if (root.multiView.layoutMode === "pip") {
+                                        root.closeTransientPlayerChrome()
+                                    }
                                 } else if (mouse.button === Qt.LeftButton) {
                                     root.commitChannelSelection(channelId)
                                 }
@@ -5857,20 +5924,6 @@ Item {
                             Layout.preferredWidth: root.transportTimelineUsingTimeshift ? -1 : 0
                         }
 
-                        Text {
-                            Layout.alignment: Qt.AlignVCenter
-                            text: root.formatTimeshiftClock(root.transportTimelineUsingCatchup
-                                ? root.player.catchupTimelineEndEpochMs
-                                : (root.transportTimelineUsingTimeshift
-                                    ? root.player.timeshiftLiveEdgeEpochMs
-                                    : (root.transportTimelineUsingLiveProgress
-                                        ? Date.parse(String((root.playbackNowNext.currentProgram || {}).stop || ""))
-                                        : Math.min(Date.now(), Date.parse(String((root.playbackNowNext.currentProgram || {}).stop || ""))))))
-                            color: Theme.textSecondary
-                            font.pixelSize: 11
-                            renderType: Text.NativeRendering
-                        }
-
                         Rectangle {
                             Layout.alignment: Qt.AlignVCenter
                             visible: root.transportTimelineUsingCatchup || root.transportTimelineUsingLiveProgram
@@ -5907,6 +5960,18 @@ Item {
                                 }
                             }
                         }
+
+                        Text {
+                            Layout.alignment: Qt.AlignVCenter
+                            text: root.formatTimeshiftClock(root.transportTimelineUsingCatchup
+                                ? root.player.catchupTimelineEndEpochMs
+                                : (root.transportTimelineUsingTimeshift
+                                    ? root.player.timeshiftLiveEdgeEpochMs
+                                    : Date.parse(String((root.playbackNowNext.currentProgram || {}).stop || ""))))
+                            color: Theme.textSecondary
+                            font.pixelSize: 11
+                            renderType: Text.NativeRendering
+                        }
                     }
 
                     Item {
@@ -5921,18 +5986,75 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             height: 6
                             radius: 3
-                            color: root.transportTimelineUsingLiveProgress ? "#283542" : "#36454f"
+                            color: root.programmeTimelineActive || root.transportTimelineUsingLiveProgress ? "#283542" : "#36454f"
+
+                            // Published archive, including material ahead of the watched position.
+                            Rectangle {
+                                visible: root.programmeTimelineActive
+                                width: parent.width * programmeTimeline.archiveFraction
+                                height: parent.height
+                                topLeftRadius: parent.radius
+                                bottomLeftRadius: parent.radius
+                                topRightRadius: programmeTimeline.archiveFraction >= 1 ? parent.radius : 0
+                                bottomRightRadius: topRightRadius
+                                color: "#52758c"
+                            }
+
+                            // Broadcast already, but still inside the source publication margin.
+                            Item {
+                                visible: root.programmeTimelineActive
+                                x: parent.width * programmeTimeline.archiveFraction
+                                width: parent.width * Math.max(0, programmeTimeline.nowFraction - programmeTimeline.archiveFraction)
+                                height: parent.height
+                                clip: true
+                                Rectangle { anchors.fill: parent; color: "#36454f" }
+                                Repeater {
+                                    model: parent.visible ? Math.ceil(parent.width / 6) : 0
+                                    Rectangle {
+                                        required property int index
+                                        x: index * 6
+                                        y: -2
+                                        width: 2
+                                        height: 10
+                                        rotation: 30
+                                        color: "#8b969e"
+                                    }
+                                }
+                            }
+
+                            // A live demuxer buffer can make part of that margin seekable locally.
+                            Rectangle {
+                                visible: root.transportTimelineUsingLiveProgram && root.player.liveBufferActive
+                                readonly property real first: programmeTimeline.fractionAt(
+                                    Math.min(programmeTimeline.nowMs, programmeTimeline.endMs)
+                                    - Number(root.player.liveBufferAvailableSeconds || 0) * 1000)
+                                x: parent.width * first
+                                width: parent.width * Math.max(0, programmeTimeline.nowFraction - first)
+                                height: parent.height
+                                color: "#52758c"
+                            }
 
                             Rectangle {
                                 width: root.transportTimelineUsingLiveProgress
                                     ? parent.width * Math.min(100, Math.max(0,
                                         Number((root.playbackNowNext.currentProgram || {}).progressPercent || 0))) / 100
-                                    : (root.timeshiftBadgeShowBehindLive
-                                        ? (timeshiftThumb.x + timeshiftThumb.width * 0.5)
-                                        : parent.width)
+                                    : (root.programmeTimelineActive
+                                        ? parent.width * programmeTimeline.positionFraction
+                                        : (root.timeshiftBadgeShowBehindLive
+                                            ? (timeshiftThumb.x + timeshiftThumb.width * 0.5)
+                                            : parent.width))
                                 height: parent.height
                                 radius: parent.radius
                                 color: root.transportTimelineUsingLiveProgress ? Theme.accent : "#a9d8ff"
+                            }
+
+                            Rectangle {
+                                visible: root.programmeTimelineActive && programmeTimeline.hasFuture
+                                x: Math.max(0, Math.min(parent.width - width, parent.width * programmeTimeline.nowFraction - width / 2))
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 2
+                                height: parent.height
+                                color: "#ffffff"
                             }
 
                             Rectangle {
@@ -5946,28 +6068,14 @@ Item {
                                 border.color: "#26445b"
                                 anchors.verticalCenter: parent.verticalCenter
                                 x: {
+                                    if (root.programmeTimelineActive)
+                                        return timeshiftTrack.width * programmeTimeline.positionFraction - width / 2
                                     const available = Math.max(1, timeshiftTrack.width - width)
-                                    if (!root.timeshiftBadgeShowBehindLive) {
+                                    if (!root.timeshiftBadgeShowBehindLive)
                                         return available
-                                    }
-                                    const program = root.playbackNowNext.currentProgram || ({})
-                                    const startMs = Date.parse(String(program.start || ""))
-                                    const stopMs = Date.parse(String(program.stop || ""))
-                                    const liveProgramTotal = (Number.isFinite(startMs) && Number.isFinite(stopMs) && stopMs > startMs)
-                                        ? Math.max(0, (Math.min(Date.now(), stopMs) - startMs) / 1000.0)
-                                        : 0
-                                    const total = root.transportTimelineUsingCatchup
-                                        ? Number(root.player.catchupTimelineDurationSeconds || 0)
-                                        : (root.transportTimelineUsingTimeshift
-                                            ? Number(root.player.timeshiftAvailableSeconds || 0)
-                                            : liveProgramTotal)
-                                    const current = root.transportTimelineUsingCatchup
-                                        ? Number(root.player.catchupTimelinePositionSeconds || 0)
-                                        : (root.transportTimelineUsingTimeshift
-                                            ? Number(root.player.timeshiftPositionSeconds || 0)
-                                            : Math.max(0, liveProgramTotal - Number(root.player.liveBufferBehindLiveSeconds || 0)))
-                                    const fraction = total > 0 ? Math.max(0, Math.min(1, current / total)) : 1
-                                    return available * fraction
+                                    const total = Number(root.player.timeshiftAvailableSeconds || 0)
+                                    const current = Number(root.player.timeshiftPositionSeconds || 0)
+                                    return available * (total > 0 ? Math.max(0, Math.min(1, current / total)) : 1)
                                 }
                             }
 
@@ -6099,7 +6207,69 @@ Item {
                     }
                 }
 
+                IconActionButton {
+                    compact: true
+                    borderless: true
+                    barMode: true
+                    implicitWidth: bottomChrome.mediaButtonSize
+                    implicitHeight: bottomChrome.mediaButtonSize
+                    iconInset: 4
+                    iconSource: root.iconPath("pip-switch.svg")
+                    caption: "Swap PiP"
+                    visible: root.multiView.layoutMode === "pip"
+                    enabled: true
+                    onClicked: {
+                        root.multiView.swapPrimaryWithPictureInPicture()
+                        root.revealUi("pointer")
+                    }
+                }
+
+                IconActionButton {
+                    compact: true
+                    borderless: true
+                    barMode: true
+                    implicitWidth: bottomChrome.mediaButtonSize
+                    implicitHeight: bottomChrome.mediaButtonSize
+                    iconInset: 4
+                    iconSource: root.iconPath("pip-close.svg")
+                    caption: "Close PiP"
+                    visible: root.multiView.layoutMode === "pip"
+                    enabled: true
+                    onClicked: {
+                        root.multiView.togglePictureInPicture(-1)
+                        root.revealUi("pointer")
+                    }
+                }
+
                 Item { Layout.fillWidth: true }
+
+                IconActionButton {
+                    objectName: "transportAudioTracksButton"
+                    compact: true
+                    borderless: true
+                    barMode: true
+                    implicitWidth: bottomChrome.mediaButtonSize
+                    implicitHeight: bottomChrome.mediaButtonSize
+                    iconInset: 1
+                    iconSource: root.iconPath("audio-track.svg")
+                    caption: "Audio tracks"
+                    visible: root.transportTracksReady && root.transportAudioTrackCount > 1
+                    onClicked: root.openAudioPicker()
+                }
+
+                IconActionButton {
+                    objectName: "transportSubtitleTracksButton"
+                    compact: true
+                    borderless: true
+                    barMode: true
+                    implicitWidth: bottomChrome.mediaButtonSize
+                    implicitHeight: bottomChrome.mediaButtonSize
+                    iconInset: 1
+                    iconSource: root.iconPath("closed-caption.svg")
+                    caption: "Subtitle tracks"
+                    visible: root.transportTracksReady && root.transportSubtitleTrackCount > 0
+                    onClicked: root.openSubtitlePicker()
+                }
 
                 IconActionButton {
                     compact: true
@@ -6332,6 +6502,12 @@ Item {
                     anchors.topMargin: root.shell.layoutBand === "compact" ? 28 : 30
                     overlayMode: true
                     onCollapseRequested: root.collapseGuideOverlayToVideoOnly()
+                    onPictureInPictureRequested: function(channelId) {
+                        root.multiView.assignChannelToPictureInPicture(channelId)
+                        if (root.multiView.layoutMode === "pip") {
+                            root.closeGuideOverlay(true)
+                        }
+                    }
                     onPlayChannelRequested: function(channelId) { root.activateChannelById(channelId) }
                     onPlayCatchupRequested: function(channel, program) { root.app.resumeCatchup(channel, program) }
                     onPlayCatchupFromBeginningRequested: function(channel, program) { root.app.playCatchup(channel, program) }

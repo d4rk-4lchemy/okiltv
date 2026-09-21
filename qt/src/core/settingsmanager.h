@@ -16,6 +16,9 @@ public:
 
     void load();
     void save() const;
+    QJsonObject channelTrackPreferences(const QString &profileId, const QString &channelKey) const;
+    void setChannelTrackPreference(const QString &profileId, const QString &channelKey,
+                                   const QString &type, const QJsonObject &preference);
 
     AppSettings &current();
     const AppSettings &current() const;

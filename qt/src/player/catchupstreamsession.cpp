@@ -1,6 +1,7 @@
 #include "catchupstreamsession.h"
 
 #include "../core/debuglogger.h"
+#include "../core/models.h"
 #include "../core/redaction.h"
 #include "../core/catchupurlresolver.h"
 
@@ -103,9 +104,8 @@ CatchupStreamSession::HeaderList CatchupStreamSession::requestHeadersFromOptions
     };
 
     const auto trimmedUserAgent = playerUserAgent.trimmed();
-    if (!trimmedUserAgent.isEmpty()) {
-        appendHeader(QByteArrayLiteral("User-Agent"), trimmedUserAgent.toUtf8());
-    }
+    appendHeader(QByteArrayLiteral("User-Agent"),
+                 (trimmedUserAgent.isEmpty() ? Core::defaultPlayerUserAgent() : trimmedUserAgent).toUtf8());
 
     const auto rawHeaderFields = mpvOptions.value(QStringLiteral("http-header-fields")).trimmed();
     if (!rawHeaderFields.isEmpty()) {
@@ -215,7 +215,7 @@ void CatchupStreamSession::configureContinuous(ContinuousPolicy policy)
     if (m_started) {
         return;
     }
-    policy.safetySeconds = std::clamp(policy.safetySeconds, 180, 1800);
+    policy.safetySeconds = std::clamp(policy.safetySeconds, 0, 1800);
     m_continuousPolicy = std::move(policy);
     m_readReady = false;
 }

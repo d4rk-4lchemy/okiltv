@@ -564,6 +564,14 @@ int main(int argc, char *argv[])
         } else {
 #if defined(Q_OS_WINDOWS)
             enableNativeSnapSupportForFramelessWindow(mainWindow);
+            // Activate once after QML restores the window state and native styles
+            // are applied. Keep this separate from the user's always-on-top mode.
+            QMetaObject::invokeMethod(mainWindow, [mainWindow]() {
+                if (mainWindow->isVisible() && mainWindow->visibility() != QWindow::Minimized) {
+                    mainWindow->raise();
+                    mainWindow->requestActivate();
+                }
+            }, Qt::QueuedConnection);
 #endif
             QObject::connect(
                 mainWindow,
