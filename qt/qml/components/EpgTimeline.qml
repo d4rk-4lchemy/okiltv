@@ -573,10 +573,10 @@ Item {
                         if (hovered) {
                             if (!control.pointerSelectionActive)
                                 return
-                            if (control.catchupActive) {
-                                if (!control.updating)
-                                    row.selectPointerProgram()
-                            } else {
+                            // Catch-up selection follows actual scene-position changes
+                            // in the outer HoverHandler. Layout/scrolling can hover a
+                            // different delegate beneath a stationary pointer.
+                            if (!control.catchupActive) {
                                 control.programHovered(row.program, body)
                             }
                         } else
