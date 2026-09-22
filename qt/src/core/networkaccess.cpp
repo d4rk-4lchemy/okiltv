@@ -111,7 +111,7 @@ QByteArray BlockingNetworkAccess::get(const QUrl &url) const
     timer.stop();
 
     const auto error = reply->error();
-    const auto errorString = reply->errorString();
+    const auto errorString = redactSensitiveText(reply->errorString());
     const auto statusCode =
         reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     QByteArray payload;
@@ -136,13 +136,13 @@ QByteArray BlockingNetworkAccess::get(const QUrl &url) const
     publishNetworkObservation(replyObservation);
 
     if (timedOut) {
-        throw std::runtime_error(QStringLiteral("Request timed out for %1").arg(url.toString()).toStdString());
+        throw std::runtime_error(QStringLiteral("Request timed out for %1").arg(requestObservation.redactedUrl).toStdString());
     }
 
     if (error != QNetworkReply::NoError) {
         throw std::runtime_error(
             QStringLiteral("Network request failed for %1: %2")
-                .arg(url.toString(), errorString)
+                .arg(requestObservation.redactedUrl, errorString)
                 .toStdString());
     }
 
@@ -150,7 +150,7 @@ QByteArray BlockingNetworkAccess::get(const QUrl &url) const
         throw std::runtime_error(
             QStringLiteral("HTTP %1 for %2")
                 .arg(statusCode)
-                .arg(url.toString())
+                .arg(requestObservation.redactedUrl)
                 .toStdString());
     }
 

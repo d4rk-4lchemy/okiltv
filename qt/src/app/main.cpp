@@ -1,4 +1,5 @@
 #include "appcontroller.h"
+#include "catchupdownloadcontroller.h"
 #include "databasestartup.h"
 #include "channellistmodel.h"
 #include "displaysleepblocker.h"
@@ -427,6 +428,7 @@ void registerQmlContextProperties(
     const AppServices &services)
 {
     engine.rootContext()->setContextProperty(QStringLiteral("appController"), appController);
+    engine.rootContext()->setContextProperty(QStringLiteral("catchupDownloadController"), appController->downloadController());
     engine.rootContext()->setContextProperty(QStringLiteral("profilesModel"), services.profilesModel.get());
     engine.rootContext()->setContextProperty(QStringLiteral("channelListModel"), services.channelListModel.get());
     engine.rootContext()->setContextProperty(QStringLiteral("nowNextModel"), services.nowNextModel.get());

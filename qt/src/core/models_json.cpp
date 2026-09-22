@@ -227,6 +227,7 @@ QJsonObject toJson(const ServerProfile &profile)
     object.insert(QStringLiteral("m3UUrl"), profile.m3uUrl);
     object.insert(QStringLiteral("m3UFilePath"), profile.m3uFilePath);
     object.insert(QStringLiteral("xmltvUrl"), profile.xmltvUrl);
+    object.insert(QStringLiteral("discoveredXmltvUrls"), QJsonArray::fromStringList(profile.discoveredXmltvUrls));
     object.insert(
         QStringLiteral("autoRefreshIntervalHours"),
         normalizeAutoRefreshIntervalHours(profile.autoRefreshIntervalHours));
@@ -253,6 +254,10 @@ ServerProfile serverProfileFromJson(const QJsonObject &object)
     profile.m3uUrl = object.value(QStringLiteral("m3UUrl")).toString();
     profile.m3uFilePath = object.value(QStringLiteral("m3UFilePath")).toString();
     profile.xmltvUrl = object.value(QStringLiteral("xmltvUrl")).toString();
+    for (const auto &url : object.value(QStringLiteral("discoveredXmltvUrls")).toArray()) {
+        if (!url.toString().trimmed().isEmpty())
+            profile.discoveredXmltvUrls.push_back(url.toString().trimmed());
+    }
     profile.autoRefreshIntervalHours = normalizeAutoRefreshIntervalHours(
         object.value(QStringLiteral("autoRefreshIntervalHours")).toInt(profile.autoRefreshIntervalHours));
     profile.lastRefreshed = dateTimeFromJsonValue(object.value(QStringLiteral("lastRefreshed")));
@@ -361,6 +366,7 @@ QJsonObject toJson(const AppSettings &settings)
         settings.multiviewRetainSelectionOnPromotion);
     object.insert(QStringLiteral("screenshotsDirectory"), settings.screenshotsDirectory);
     object.insert(QStringLiteral("recordingsDirectory"), settings.recordingsDirectory);
+    object.insert(QStringLiteral("catchupDownloadDirectory"), settings.catchupDownloadDirectory);
     object.insert(QStringLiteral("remuxRecordingsToMkv"), settings.remuxRecordingsToMkv);
     object.insert(QStringLiteral("minimizeToTrayOnMinimize"), settings.minimizeToTrayOnMinimize);
     object.insert(QStringLiteral("reopenMaximizedOnLaunch"), settings.reopenMaximizedOnLaunch);
@@ -471,6 +477,7 @@ AppSettings appSettingsFromJson(const QJsonObject &object)
                                                         .toBool(settings.multiviewRetainSelectionOnPromotion);
     settings.screenshotsDirectory = object.value(QStringLiteral("screenshotsDirectory")).toString();
     settings.recordingsDirectory = object.value(QStringLiteral("recordingsDirectory")).toString();
+    settings.catchupDownloadDirectory = object.value(QStringLiteral("catchupDownloadDirectory")).toString();
     const auto remuxVal = object.value(QStringLiteral("remuxRecordingsToMkv"));
     settings.remuxRecordingsToMkv = remuxVal.isUndefined() ? true : remuxVal.toBool();
     settings.minimizeToTrayOnMinimize =

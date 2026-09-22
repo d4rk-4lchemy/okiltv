@@ -157,12 +157,12 @@ Item {
         const normalizedType = normalizedDraftType(draft.type)
         const hasCommonText = normalizedText(draft.name).length > 0
             || normalizedText(draft.xmltvUrl).length > 0
+            || Number(draft.catchupSafetyMinutes ?? 3) !== 3
         if (normalizedType === 0) {
             return hasCommonText
                 || normalizedText(draft.xtreamBaseUrl).length > 0
                 || normalizedText(draft.xtreamUsername).length > 0
                 || normalizedText(draft.xtreamPassword).length > 0
-                || Number(draft.catchupSafetyMinutes ?? 3) !== 3
                 || normalizedAutoRefreshIntervalHours(draft.autoRefreshIntervalHours) !== 24
         }
         if (normalizedType === 1) {
@@ -503,12 +503,14 @@ Item {
                                 currentCreateDraft.name,
                                 currentCreateDraft.m3UUrl,
                                 currentCreateDraft.xmltvUrl,
-                                currentCreateDraft.autoRefreshIntervalHours)
+                                currentCreateDraft.autoRefreshIntervalHours,
+                                currentCreateDraft.catchupSafetyMinutes)
                 } else {
                     createdProfileId = root.profiles.addM3uFileProfile(
                                 currentCreateDraft.name,
                                 currentCreateDraft.m3UFilePath,
-                                currentCreateDraft.xmltvUrl)
+                                currentCreateDraft.xmltvUrl,
+                                currentCreateDraft.catchupSafetyMinutes)
                 }
 
                 if (createdProfileId.length > 0) {
@@ -578,12 +580,14 @@ Item {
                             draft.name,
                             draft.m3UUrl,
                             draft.xmltvUrl,
-                            draft.autoRefreshIntervalHours)
+                            draft.autoRefreshIntervalHours,
+                            draft.catchupSafetyMinutes)
             } else {
                 createdProfileId = root.profiles.addM3uFileProfile(
                             draft.name,
                             draft.m3UFilePath,
-                            draft.xmltvUrl)
+                            draft.xmltvUrl,
+                            draft.catchupSafetyMinutes)
             }
 
             if (createdProfileId.length > 0) {
@@ -1117,7 +1121,6 @@ Item {
                     }
                     RowLayout {
                         Layout.fillWidth: true
-                        visible: root.draftType === 0
                         spacing: Theme.spacingM
                         Text {
                             Layout.fillWidth: true
@@ -1390,7 +1393,7 @@ Item {
 
                     Text {
                         Layout.fillWidth: true
-                        text: "Use XMLTV when the provider does not supply usable EPG data directly."
+                        text: "Leave empty to use provider EPG or XMLTV links declared in the playlist. An explicit URL overrides automatic detection."
                         color: Theme.textSecondary
                         font.pixelSize: 12
                         wrapMode: Text.Wrap

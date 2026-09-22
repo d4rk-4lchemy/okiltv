@@ -40,6 +40,9 @@ QString resolveM3uTemplate(QString templateValue, const EpgEntry &program, const
     const auto stopUtc = program.stop.toUTC();
     const auto lutcEpoch = stopUtc.toSecsSinceEpoch();
     const auto replacements = QList<QPair<QString, QString>> {
+        { QStringLiteral("${start}"), QString::number(utcEpoch) },
+        { QStringLiteral("${end}"), QString::number(lutcEpoch) },
+        { QStringLiteral("{utcend}"), QString::number(lutcEpoch) },
         { QStringLiteral("{utc}"), QString::number(utcEpoch) },
         { QStringLiteral("{lutc}"), QString::number(lutcEpoch) },
         { QStringLiteral("{Y}"), startUtc.toString(QStringLiteral("yyyy")) },
@@ -58,8 +61,8 @@ QString resolveM3uTemplate(QString templateValue, const EpgEntry &program, const
     static const QRegularExpression durationPattern(QStringLiteral(R"(\{duration:(\d+)\})"));
     auto match = durationPattern.match(templateValue);
     while (match.hasMatch()) {
-        const auto multiplier = std::max(1, match.captured(1).toInt());
-        templateValue.replace(match.capturedStart(0), match.capturedLength(0), QString::number(durationSeconds * multiplier));
+        const auto divisor = std::max(1LL, match.captured(1).toLongLong());
+        templateValue.replace(match.capturedStart(0), match.capturedLength(0), QString::number(durationSeconds / divisor));
         match = durationPattern.match(templateValue);
     }
 
@@ -99,6 +102,7 @@ bool isQueryShapedAppendTemplate(const QString &templateValue)
     return firstSpecialIndex < 0 || equalsIndex < firstSpecialIndex;
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) -- Named URL and query fragment have distinct call-site roles.
 QString appendQueryStringFallback(const QString &baseUrl, const QString &queryFragment)
 {
     const auto fragmentIndex = baseUrl.indexOf(u'#');
@@ -108,6 +112,7 @@ QString appendQueryStringFallback(const QString &baseUrl, const QString &queryFr
     return withoutFragment + separator + queryFragment + fragment;
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters) -- Named URL and template have distinct call-site roles.
 QString mergeAppendQueryTemplate(const QString &baseUrl, const QString &queryTemplate)
 {
     const auto trimmedTemplate = queryTemplate.trimmed();
@@ -365,6 +370,29 @@ std::optional<CatchupPlaybackTarget> CatchupUrlResolver::resolve(
     }
 
     return target;
+}
+
+std::optional<CatchupDownloadTarget> CatchupUrlResolver::resolveDownload(
+    const Channel &channel, const EpgEntry &program, QString *failureReason) const
+{
+    const auto now = QDateTime::currentDateTimeUtc();
+    const int safety = 60 * std::clamp(m_profile ? m_profile->catchupSafetyMinutes : 3, 0, 30);
+    if (!program.start.isValid() || !program.stop.isValid() || program.stop <= program.start
+        || availableEdge(program.stop, safety, now) < program.stop
+        || program.start < now.addSecs(-3600LL * channel.catchupWindowHours)) {
+        if (failureReason)
+            *failureReason = QStringLiteral("The complete programme is not available in the archive.");
+        return std::nullopt;
+    }
+    const auto playback = resolve(channel, program, failureReason);
+    if (!playback)
+        return std::nullopt;
+    CatchupDownloadTarget result;
+    result.url = playback->url;
+    result.durationSeconds = program.start.secsTo(program.stop);
+    if (channel.source == ChannelSource::Xtream)
+        result.trimStartSeconds = program.start.toUTC().time().second();
+    return result;
 }
 
 std::optional<CatchupPlaybackTarget> CatchupUrlResolver::resolveWindow(

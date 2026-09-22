@@ -16,6 +16,13 @@ struct CatchupPlaybackTarget
     QString reasonIfUnavailable;
 };
 
+struct CatchupDownloadTarget
+{
+    QString url;
+    qint64 trimStartSeconds { 0 };
+    qint64 durationSeconds { 0 };
+};
+
 class CatchupUrlResolver
 {
 public:
@@ -31,6 +38,11 @@ public:
         const Channel &channel,
         const EpgEntry &program,
         QString *failureReason = nullptr) const;
+
+    // Finite archive export; unlike resolveWindow(), this covers the complete
+    // programme and reports the provider's minute-rounded leading material.
+    std::optional<CatchupDownloadTarget> resolveDownload(
+        const Channel &channel, const EpgEntry &program, QString *failureReason = nullptr) const;
 
     // Transport ranges are independent of EPG programme boundaries. The caller
     // supplies the published edge; returned bounds include provider rounding.

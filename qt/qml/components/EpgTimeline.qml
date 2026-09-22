@@ -49,6 +49,7 @@ Item {
 
     signal selectionRequested(int index)
     signal activationRequested(int index)
+    signal downloadRequested(int index)
     signal programHovered(var program, Item anchor)
     signal programReleased(Item anchor)
     signal scrolling()
@@ -585,8 +586,16 @@ Item {
                 }
                 MouseArea {
                     anchors.fill: parent
-                    onClicked: control.selectionRequested(row.index)
-                    onDoubleClicked: control.activationRequested(row.index)
+                    acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+                    onClicked: function(mouse) {
+                        control.selectionRequested(row.index)
+                        if (mouse.button === Qt.MiddleButton)
+                            control.downloadRequested(row.index)
+                    }
+                    onDoubleClicked: function(mouse) {
+                        if (mouse.button === Qt.LeftButton)
+                            control.activationRequested(row.index)
+                    }
                 }
             }
         }

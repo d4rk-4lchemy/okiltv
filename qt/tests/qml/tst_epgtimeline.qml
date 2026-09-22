@@ -46,6 +46,7 @@ TestCase {
     }
     EpgHoverBubble { id: bubble; visible: false }
     SignalSpy { id: selected; target: panel; signalName: "selectionRequested" }
+    SignalSpy { id: downloaded; target: panel; signalName: "downloadRequested" }
     SignalSpy { id: activated; target: panel; signalName: "activationRequested" }
 
     function program(index) {
@@ -121,6 +122,7 @@ TestCase {
         panel.goToNow()
         selected.clear()
         activated.clear()
+        downloaded.clear()
     }
     function watch(index) {
         panel.playbackChannel = epg.channel
@@ -420,6 +422,16 @@ TestCase {
         tryCompare(panel, "updating", false)
         compare(panel.entries.length, 0)
         compare(panel.defaultIndex, -1)
+    }
+    function test_middle_click_downloads_without_playback() {
+        panel.showIndex(40)
+        const row = panel.itemAt(40)
+        verify(row !== null)
+        mouseClick(row, 100, row.height - 20, Qt.MiddleButton)
+        compare(selected.count, 1)
+        compare(downloaded.count, 1)
+        compare(downloaded.signalArguments[0][0], 40)
+        compare(activated.count, 0)
     }
     function test_click_and_double_click() {
         panel.showIndex(40)

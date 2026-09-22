@@ -145,6 +145,12 @@ void ensureSchemaOnConnection(QSqlDatabase &database)
             )
         )sql"),
         QStringLiteral(R"sql(
+            CREATE TABLE IF NOT EXISTS m3u_channel_sequences (
+                profile_id TEXT PRIMARY KEY,
+                next_id INTEGER NOT NULL
+            )
+        )sql"),
+        QStringLiteral(R"sql(
             CREATE TABLE IF NOT EXISTS channel_watch_stats (
                 profile_id    TEXT    NOT NULL,
                 channel_id    INTEGER NOT NULL,
@@ -374,7 +380,7 @@ void DatabaseService::removeProfileData(const QUuid &profileId) const
     secure.finish();
     if (!database.transaction()) throw std::runtime_error("Cannot begin source removal.");
     try {
-        for (const auto *table : { "channels", "epg_entries", "channel_watch_stats", "catchup_progress" }) {
+        for (const auto *table : { "channels", "epg_entries", "channel_watch_stats", "catchup_progress", "m3u_channel_sequences" }) {
             QSqlQuery query(database);
             query.prepare(QStringLiteral("DELETE FROM %1 WHERE profile_id=?").arg(QString::fromLatin1(table)));
             query.addBindValue(guidToString(profileId));
@@ -459,7 +465,8 @@ void DatabaseService::upsertChannels(const QList<Channel> &channels) const
     }
 }
 
-void DatabaseService::replaceChannelsForProfile(const QUuid &profileId, const QList<Channel> &channels) const
+void DatabaseService::replaceChannelsForProfile(const QUuid &profileId, const QList<Channel> &channels,
+                                                std::optional<qint64> nextM3uChannelId) const
 {
     ScopedConnection connection(m_databaseFilePath);
     auto &database = schemaReadyDatabase(connection);
@@ -543,6 +550,15 @@ void DatabaseService::replaceChannelsForProfile(const QUuid &profileId, const QL
         pruneQuery.bindValue(QStringLiteral(":profile_id"), guidToString(profileId));
         execOrThrow(pruneQuery, QStringLiteral("Prune stale channels"));
 
+        if (nextM3uChannelId) {
+            QSqlQuery sequence(database);
+            sequence.prepare(QStringLiteral("INSERT INTO m3u_channel_sequences(profile_id, next_id) VALUES(?, ?) "
+                "ON CONFLICT(profile_id) DO UPDATE SET next_id=MAX(next_id, excluded.next_id)"));
+            sequence.addBindValue(guidToString(profileId));
+            sequence.addBindValue(*nextM3uChannelId);
+            execOrThrow(sequence, QStringLiteral("Retain playlist channel sequence"));
+        }
+
         if (!database.commit()) {
             throw std::runtime_error(
                 QStringLiteral("Transaction commit failed: %1")
@@ -552,6 +568,17 @@ void DatabaseService::replaceChannelsForProfile(const QUuid &profileId, const QL
         database.rollback();
         throw;
     }
+}
+
+qint64 DatabaseService::nextM3uChannelId(const QUuid &profileId) const
+{
+    ScopedConnection connection(m_databaseFilePath);
+    auto &database = schemaReadyDatabase(connection);
+    QSqlQuery query(database);
+    query.prepare(QStringLiteral("SELECT next_id FROM m3u_channel_sequences WHERE profile_id=?"));
+    query.addBindValue(guidToString(profileId));
+    execOrThrow(query, QStringLiteral("Load playlist channel sequence"));
+    return query.next() ? std::max<qint64>(0, query.value(0).toLongLong()) : 0;
 }
 
 QStringList DatabaseService::loadChannelGroupIds(const QUuid &profileId) const

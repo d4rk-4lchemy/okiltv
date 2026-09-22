@@ -45,6 +45,7 @@ struct ServerProfile
     QString m3uFilePath;
 
     QString xmltvUrl;
+    QStringList discoveredXmltvUrls; // Playlist hints; explicit xmltvUrl takes precedence.
     int autoRefreshIntervalHours { 24 };
 
     QDateTime lastRefreshed;
@@ -163,6 +164,7 @@ struct AppSettings
 
     QString screenshotsDirectory;
     QString recordingsDirectory;
+    QString catchupDownloadDirectory;
     bool remuxRecordingsToMkv { true };
     bool minimizeToTrayOnMinimize { true };
     bool reopenMaximizedOnLaunch { false };

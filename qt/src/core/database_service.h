@@ -33,7 +33,9 @@ public:
     void ensureSchema(const RebuildStarted &rebuildStarted = {}) const;
     void removeProfileData(const QUuid &profileId) const;
     void upsertChannels(const QList<Channel> &channels) const;
-    void replaceChannelsForProfile(const QUuid &profileId, const QList<Channel> &channels) const;
+    void replaceChannelsForProfile(const QUuid &profileId, const QList<Channel> &channels,
+                                   std::optional<qint64> nextM3uChannelId = std::nullopt) const;
+    qint64 nextM3uChannelId(const QUuid &profileId) const;
     QList<Channel> loadChannels(const QUuid &profileId) const;
     // Normalized, unique groups in channel order; never reads protected URLs.
     QStringList loadChannelGroupIds(const QUuid &profileId) const;
