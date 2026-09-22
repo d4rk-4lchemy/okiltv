@@ -18,6 +18,8 @@
 #include <QJsonObject>
 #include <QMutex>
 #include <QTemporaryDir>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QScopeGuard>
 #include <QSqlDatabase>
 #include <QSqlQuery>
@@ -163,7 +165,16 @@ private slots:
     void redactionMasksStructuredSecrets();
     void redactionMasksXtreamSecrets();
     void redactionMasksAuthorizationAndTokenSecrets();
+    void networkErrorsRedactCredentials_data();
+    void networkErrorsRedactCredentials();
+    void m3uParserRejectsInvalidPayloads_data();
+    void m3uParserRejectsInvalidPayloads();
+    void m3uParserAcceptsEmptyAndHeaderlessPlaylists();
     void m3uParserKeepsFieldParity();
+    void m3uPlaylistMetadataAndRelativeReferences();
+    void m3uHlsIsSingleChannel();
+    void m3uArchiveOptOutAndShift();
+    void m3uRetainsDuplicateChannelIds();
     void m3uParserCapturesSupportedCatchupMetadata();
     void m3uParserAcceptsFlexibleAttributeSyntax();
     void m3uParserSupportsLegacyTimeshiftCatchupMetadata();
@@ -1156,6 +1167,170 @@ void CoreTests::redactionMasksAuthorizationAndTokenSecrets()
     QVERIFY(redactedOptionLog.contains(QStringLiteral("Authorization=***")));
 }
 
+void CoreTests::networkErrorsRedactCredentials_data()
+{
+    QTest::addColumn<bool>("timeout");
+    QTest::newRow("http-error") << false;
+    QTest::newRow("timeout") << true;
+}
+
+void CoreTests::networkErrorsRedactCredentials()
+{
+    QFETCH(bool, timeout);
+    QTcpServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost));
+    connect(&server, &QTcpServer::newConnection, &server, [&] {
+        auto *socket = server.nextPendingConnection();
+        connect(socket, &QTcpSocket::readyRead, socket, [socket, timeout] {
+            socket->readAll();
+            if (!timeout) {
+                socket->write("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                socket->disconnectFromHost();
+            }
+        });
+    });
+    const QUrl url(QStringLiteral("http://127.0.0.1:%1/private-path-secret/playlist?username=private-user&password=private-pass&token=private-token")
+        .arg(server.serverPort()));
+    NetworkObservation reply;
+    const auto observer = addNetworkObserver([&](const NetworkObservation &event) {
+        if (event.phase == QStringLiteral("reply"))
+            reply = event;
+    });
+    const auto cleanup = qScopeGuard([observer] { removeNetworkObserver(observer); });
+    QString error;
+    try {
+        BlockingNetworkAccess(timeout ? 100 : 2000).get(url);
+        QFAIL("The request should fail.");
+    } catch (const std::exception &failure) {
+        error = QString::fromUtf8(failure.what());
+    }
+    QVERIFY(!reply.phase.isEmpty());
+    QCOMPARE(reply.timedOut, timeout);
+    QVERIFY(error.contains(QStringLiteral("127.0.0.1")));
+    for (const auto &secret : {QStringLiteral("private-path-secret"), QStringLiteral("private-user"),
+                               QStringLiteral("private-pass"), QStringLiteral("private-token")}) {
+        QVERIFY2(!error.contains(secret), qPrintable(error));
+        QVERIFY2(!reply.errorText.contains(secret), qPrintable(reply.errorText));
+    }
+}
+
+void CoreTests::m3uParserRejectsInvalidPayloads_data()
+{
+    QTest::addColumn<QByteArray>("payload");
+    QTest::newRow("empty") << QByteArray();
+    QTest::newRow("whitespace") << QByteArray(" \r\n\t");
+    QTest::newRow("html-error") << QByteArray("<!DOCTYPE html><html>Service unavailable</html>");
+    QTest::newRow("json-error") << QByteArray("{\"error\":\"expired subscription\"}");
+    QTest::newRow("truncated") << QByteArray("#EXTM3U\n#EXTINF:-1,One\nhttp://stream/one\n#EXTINF:-1,Two\n");
+    QTest::newRow("missing-url") << QByteArray("#EXTM3U\n#EXTINF:-1,One\n#EXTINF:-1,Two\nhttp://stream/two\n");
+}
+
+void CoreTests::m3uParserRejectsInvalidPayloads()
+{
+    QFETCH(QByteArray, payload);
+    QVERIFY_EXCEPTION_THROWN(M3UService().parse(payload, QUuid::createUuid()), std::runtime_error);
+}
+
+void CoreTests::m3uParserAcceptsEmptyAndHeaderlessPlaylists()
+{
+    const auto profile = QUuid::createUuid();
+    M3UService service;
+    QVERIFY(service.parse(QByteArray("#EXTM3U\n# Empty playlist\n"), profile).isEmpty());
+    QVERIFY(service.parse(QByteArray::fromHex("efbbbf") + "#EXTM3U\r\n", profile).isEmpty());
+    const auto channels = service.parse(QByteArray("#EXTINF:-1,One\nhttp://stream/one\n"), profile);
+    QCOMPARE(channels.size(), 1);
+    QCOMPARE(channels.first().name, QStringLiteral("One"));
+}
+
+void CoreTests::m3uPlaylistMetadataAndRelativeReferences()
+{
+    QStringList urls;
+    const auto channels = M3UService().parse(QByteArrayLiteral(
+        "#EXTM3U url-tvg=\"epg.xml, ../guide.xml.gz\" x-tvg-url=\"epg.xml\" catchup=\"append\" catchup-days=\"2\" catchup-source=\"?utc={utc}&end={utcend}\"\n"
+        "#EXTINF:-1 tvg-id=\"one\" tvg-logo=\"logos/one.png\",One\n"
+        "#EXTGRP:News\n"
+        "live/one.m3u8\n"
+        "#EXTINF:-1 catchup-days=\"1\" group-title=\"Sport\",Two\n"
+        "../two.m3u8\n"), QUuid::createUuid(), QUrl(QStringLiteral("https://example.test/list/channels.m3u")), &urls);
+    QCOMPARE(channels.size(), 2);
+    QCOMPARE(urls, QStringList({QStringLiteral("https://example.test/list/epg.xml"), QStringLiteral("https://example.test/guide.xml.gz")}));
+    QCOMPARE(channels[0].streamUrl, QStringLiteral("https://example.test/list/live/one.m3u8"));
+    QCOMPARE(channels[0].iconUrl, QStringLiteral("https://example.test/list/logos/one.png"));
+    QCOMPARE(channels[0].categoryName, QStringLiteral("News"));
+    QVERIFY(channels[0].catchupSupported);
+    QCOMPARE(channels[0].catchupWindowHours, 48);
+    QCOMPARE(channels[1].catchupWindowHours, 24);
+    QCOMPARE(channels[1].categoryName, QStringLiteral("Sport"));
+    ServerProfile profile;
+    profile.type = ProfileType::M3UUrl;
+    profile.discoveredXmltvUrls = urls;
+    QCOMPARE(serverProfileFromJson(toJson(profile)).discoveredXmltvUrls, urls);
+    const auto automaticFingerprint = EpgCacheService::sourceFingerprint(profile);
+    profile.discoveredXmltvUrls.push_back(QStringLiteral("https://example.test/other.xml"));
+    QVERIFY(EpgCacheService::sourceFingerprint(profile) != automaticFingerprint);
+    profile.xmltvUrl = QStringLiteral("https://example.test/override.xml");
+    const auto explicitFingerprint = EpgCacheService::sourceFingerprint(profile);
+    profile.discoveredXmltvUrls.clear();
+    QCOMPARE(EpgCacheService::sourceFingerprint(profile), explicitFingerprint);
+}
+
+void CoreTests::m3uHlsIsSingleChannel()
+{
+    const auto media = QByteArray("#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nsegment.ts\n#EXT-X-ENDLIST\n");
+    const auto master = QByteArray("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nstream.m3u8\n");
+    for (const auto &payload : {media, master}) {
+        const QUrl url(QStringLiteral("https://example.test/channel.m3u8"));
+        const auto channels = M3UService().parse(payload, QUuid::createUuid(), url);
+        QCOMPARE(channels.size(), 1);
+        QCOMPARE(channels[0].streamUrl, url.toString());
+        QCOMPARE(channels[0].name, QStringLiteral("channel"));
+        QVERIFY_EXCEPTION_THROWN(M3UService().parse(payload, QUuid::createUuid()), std::runtime_error);
+    }
+}
+
+void CoreTests::m3uRetainsDuplicateChannelIds()
+{
+    const auto id = QUuid::createUuid();
+    const auto original = M3UService().parse(QByteArray("#EXTM3U\n#EXTINF:-1,One\nhttp://test/one\n"
+        "#EXTINF:-1,Duplicate\nhttp://test/one\n#EXTINF:-1,Two\nhttp://test/two\n"), id);
+    auto channels = original;
+    std::reverse(channels.begin(), channels.end());
+    qint64 nextId = 0;
+    M3UService::retainChannelIds(channels, original, nextId);
+    QCOMPARE(channels[0].id, 2);
+    QCOMPARE(channels[1].id, 0);
+    QCOMPARE(channels[2].id, 1);
+    QCOMPARE(nextId, 3);
+    QTemporaryDir directory;
+    DatabaseService database(directory.filePath(QStringLiteral("identity.db")));
+    database.replaceChannelsForProfile(id, channels, nextId);
+    QCOMPARE(database.nextM3uChannelId(id), 3);
+    auto invalid = channels;
+    invalid[0].profileId = QUuid::createUuid();
+    QVERIFY_EXCEPTION_THROWN(database.replaceChannelsForProfile(id, invalid, 99), std::runtime_error);
+    QCOMPARE(database.nextM3uChannelId(id), 3);
+    QCOMPARE(database.loadChannels(id).size(), 3);
+    database.removeProfileData(id);
+    QCOMPARE(database.nextM3uChannelId(id), 0);
+}
+
+void CoreTests::m3uArchiveOptOutAndShift()
+{
+    const auto channels = M3UService().parse(QByteArrayLiteral(
+        "#EXTM3U catchup=\"append\" catchup-days=\"2\" catchup-source=\"?utc={utc}\"\n"
+        "#EXTINF:-1 catchup=\"none\" timeshift=\"7\",Disabled\nhttp://example.test/one\n"
+        "#EXTINF:-1 catchup-days=\"0\",Zero\nhttp://example.test/two\n"
+        "#EXTINF:-1 catchup-days=\"inf\",Invalid\nhttp://example.test/three\n"
+        "#EXTINF:-1 catchup=\"shift\" catchup-days=\"1.5\",Shift\nhttp://example.test/four\n"), QUuid::createUuid());
+    QCOMPARE(channels.size(), 4);
+    QVERIFY(!channels[0].catchupSupported);
+    QVERIFY(!channels[1].catchupSupported);
+    QVERIFY(!channels[2].catchupSupported);
+    QVERIFY(channels[3].catchupSupported);
+    QCOMPARE(channels[3].catchupMode, QStringLiteral("append"));
+    QCOMPARE(channels[3].catchupWindowHours, 36);
+}
+
 void CoreTests::m3uParserKeepsFieldParity()
 {
     const auto profileId = QUuid::createUuid();
@@ -1186,7 +1361,7 @@ void CoreTests::m3uParserCapturesSupportedCatchupMetadata()
             "#EXTM3U\n"
             "#EXTINF:-1 tvg-id=\"archive.one\" catchup=\"append\" catchup-days=\"3\" catchup-source=\"?utc={utc}&dur={duration}\" group-title=\"News\",Archive One\n"
             "http://archive.example/live.m3u8\n"
-            "#EXTINF:-1 tvg-id=\"archive.two\" catchup=\"shift\" catchup-days=\"5\" catchup-source=\"http://ignored\"\n"
+            "#EXTINF:-1 tvg-id=\"archive.two\" catchup=\"unsupported\" catchup-days=\"5\" catchup-source=\"http://ignored\"\n"
             "http://archive.example/unsupported.m3u8\n"),
         profileId);
 
@@ -1952,14 +2127,14 @@ void CoreTests::catchupUrlResolverBuildsIndependentWindows()
     QVERIFY(window);
     QCOMPARE(window->programStartUtc, start);
     QCOMPARE(window->programStopUtc, end);
-    QCOMPARE(window->url, QStringLiteral("https://provider/live/99.ts?utc=%1&lutc=%2&duration=7200&units=7200000")
+    QCOMPARE(window->url, QStringLiteral("https://provider/live/99.ts?utc=%1&lutc=%2&duration=7200&units=7")
         .arg(start.toSecsSinceEpoch()).arg(end.toSecsSinceEpoch()));
     channel.catchupMode = QStringLiteral("default");
     channel.catchupSourceTemplate.prepend(QStringLiteral("https://archive/channel.ts?"));
     window = resolver.resolveWindow(channel, start.addSecs(3600), end);
     QVERIFY(window);
     QVERIFY(window->url.startsWith(QStringLiteral("https://archive/channel.ts?")));
-    QVERIFY(window->url.contains(QStringLiteral("duration=3600&units=3600000")));
+    QVERIFY(window->url.contains(QStringLiteral("duration=3600&units=3")));
     QVERIFY(!resolver.resolveWindow(channel, end, start));
 }
 
@@ -2056,7 +2231,7 @@ void CoreTests::catchupUrlResolverBuildsXtreamAndM3uTargets()
     QVERIFY(m3uTarget.has_value());
     QCOMPARE(
         m3uTarget->url,
-        QStringLiteral("http://archive.example/live.m3u8?utc=1773770400&dur=5040&date=2026-03-17"));
+        QStringLiteral("http://archive.example/live.m3u8?utc=1773770400&dur=1260&date=2026-03-17"));
 
     Channel synthesizedM3uChannel;
     synthesizedM3uChannel.source = ChannelSource::M3U;

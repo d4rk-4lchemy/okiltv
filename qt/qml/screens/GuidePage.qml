@@ -13,6 +13,7 @@ Item {
     property int uiTransparency: (typeof settingsController !== "undefined") ? settingsController.uiTransparency : 100
     // qmllint enable unqualified
 
+    signal downloadRequested(var channel, var program)
     signal collapseRequested()
     signal pictureInPictureRequested(int channelId)
     signal playChannelRequested(int channelId)
@@ -512,6 +513,10 @@ Item {
             return true
         }
         if (root.epgGrid.rebuildPending) {
+            return true
+        }
+        if (event.modifiers === Qt.ControlModifier && event.key === Qt.Key_D) {
+            root.downloadRequested(root.guideState.selectedChannel, root.selectedProgramData())
             return true
         }
         if (ctrlPressed && event.key === Qt.Key_R) {
@@ -1372,6 +1377,21 @@ Item {
                                                 onClicked: root.playCatchupFromBeginningRequested(
                                                     root.guideState.selectedChannel,
                                                     root.selectedCatchupProgramData())
+                                            }
+
+                                            IconActionButton {
+                                                objectName: "ui.guide.download"
+                                                compact: true
+                                                borderless: true
+                                                barMode: true
+                                                implicitWidth: 30
+                                                implicitHeight: 30
+                                                iconInset: 0
+                                                iconSource: "qrc:/resources/icons/download.svg"
+                                                caption: "Download programme (Ctrl+D)"
+                                                enabled: !root.epgGrid.rebuildPending
+                                                onClicked: root.downloadRequested(
+                                                    root.guideState.selectedChannel, root.selectedProgramData())
                                             }
 
                                             Text {

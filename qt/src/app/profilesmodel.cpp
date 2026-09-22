@@ -112,11 +112,13 @@ QString ProfilesModel::addM3uUrlProfile(
     const QString &name,
     const QString &m3uUrl,
     const QString &xmltvUrl,
-    const int autoRefreshIntervalHours)
+    const int autoRefreshIntervalHours, // NOLINT(bugprone-easily-swappable-parameters) -- Fixed QML positional API, matching Xtream.
+    const int catchupSafetyMinutes)
 {
     ServerProfile profile;
     profile.name = name.trimmed();
     profile.type = ProfileType::M3UUrl;
+    profile.catchupSafetyMinutes = std::clamp(catchupSafetyMinutes, 0, 30);
     profile.m3uUrl = m3uUrl.trimmed();
     profile.xmltvUrl = xmltvUrl.trimmed();
     profile.autoRefreshIntervalHours = normalizeAutoRefreshIntervalHours(autoRefreshIntervalHours);
@@ -128,11 +130,12 @@ QString ProfilesModel::addM3uUrlProfile(
     return guidToString(profile.id);
 }
 
-QString ProfilesModel::addM3uFileProfile(const QString &name, const QString &filePath, const QString &xmltvUrl)
+QString ProfilesModel::addM3uFileProfile(const QString &name, const QString &filePath, const QString &xmltvUrl, const int catchupSafetyMinutes)
 {
     ServerProfile profile;
     profile.name = name.trimmed();
     profile.type = ProfileType::M3UFile;
+    profile.catchupSafetyMinutes = std::clamp(catchupSafetyMinutes, 0, 30);
     profile.m3uFilePath = filePath.trimmed();
     profile.xmltvUrl = xmltvUrl.trimmed();
 

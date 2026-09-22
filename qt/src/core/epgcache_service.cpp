@@ -71,14 +71,18 @@ bool readVersion1Entry(QDataStream &stream, EpgEntry *entry)
 
 QString sourceDescriptor(const ServerProfile &profile)
 {
+    const auto xmltvSource = profile.xmltvUrl.trimmed().isEmpty()
+        ? profile.discoveredXmltvUrls.join(u'\n') : profile.xmltvUrl.trimmed();
     switch (profile.type) {
     case ProfileType::Xtream:
+        if (!profile.xmltvUrl.trimmed().isEmpty())
+            return QStringLiteral("xmltv|%1|xtream").arg(profile.xmltvUrl.trimmed());
         return QStringLiteral("xtream|%1|%2|%3")
             .arg(profile.xtreamBaseUrl.trimmed(), profile.xtreamUsername.trimmed(), profile.xtreamPassword);
     case ProfileType::M3UUrl:
-        return QStringLiteral("xmltv|%1|m3uurl").arg(profile.xmltvUrl.trimmed());
+        return QStringLiteral("xmltv|%1|m3uurl").arg(xmltvSource);
     case ProfileType::M3UFile:
-        return QStringLiteral("xmltv|%1|m3ufile").arg(profile.xmltvUrl.trimmed());
+        return QStringLiteral("xmltv|%1|m3ufile").arg(xmltvSource);
     }
 
     return QString {};

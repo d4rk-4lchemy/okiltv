@@ -17,6 +17,9 @@ Item {
         source: "qrc:/resources/fonts/VCR_OSD_MONO_1.001.ttf"
     }
 
+    property bool downloadIndicatorVisible: false
+    readonly property alias downloadTransportBar: bottomChrome
+    readonly property alias downloadButtonHost: downloadButtonSlot
     property var mainWindow
     // qmllint disable unqualified
     readonly property var shell: shellController
@@ -259,6 +262,9 @@ Item {
     property int rightPaneSelectionFlatIndex: -1
     property string rightPaneSelectionChannelKey: ""
     property var rightPaneProgramData: ({})
+    // Explicit selection for Ctrl+D is independent of hover-driven catch-up preview.
+    property var downloadProgramData: ({})
+    property string downloadChannelKey: ""
     property bool keyboardVolumeHudVisible: false
     property string keyboardVolumeHudIconFile: "volume-over-50.svg"
     property bool timeshiftTimelineHoverVisible: false
@@ -1567,6 +1573,8 @@ Item {
         rightPaneSelectionFlatIndex = nextIndex
         rightPaneSelectionChannelKey = epgTimeline.channelKey
         rightPaneProgramData = entry.program
+        downloadProgramData = Object.assign({}, entry.program)
+        downloadChannelKey = epgTimeline.channelKey
         if ((revealSource || "").length > 0) {
             revealUi(revealSource)
         }
@@ -1575,6 +1583,12 @@ Item {
     }
 
     function syncRightPaneSelectionForModelUpdate() {
+        const downloadIndex = root.downloadChannelKey === epgTimeline.channelKey
+            ? epgTimeline.indexForProgram(root.downloadProgramData) : -1
+        root.downloadProgramData = downloadIndex >= 0
+            ? Object.assign({}, epgTimeline.entries[downloadIndex].program) : ({})
+        if (downloadIndex < 0)
+            root.downloadChannelKey = ""
         if (playerKeyboardFocusArea !== "rightPane")
             return
         const entries = rightPaneEntries()
@@ -2427,6 +2441,8 @@ Item {
         rightPaneSelectionFlatIndex = -1
         rightPaneSelectionChannelKey = ""
         rightPaneProgramData = ({})
+        downloadProgramData = ({})
+        downloadChannelKey = ""
         if (playerKeyboardFocusArea === "rightPane") {
             clearKeyboardProgramBubble()
         }
@@ -2533,6 +2549,8 @@ Item {
     }
 
     function handleLiveKey(event) {
+        if (event.key === Qt.Key_D && event.modifiers === Qt.ControlModifier)
+            return root.handleDownloadShortcut()
         const ctrlPressed = (event.modifiers & Qt.ControlModifier) !== 0
         const shiftPressed = (event.modifiers & Qt.ShiftModifier) !== 0
         const altPressed = (event.modifiers & Qt.AltModifier) !== 0
@@ -2873,7 +2891,27 @@ Item {
         }
     }
 
+    function handleDownloadShortcut() {
+        if (root.searchFieldActive || root.leftPickerOpen)
+            return false
+        if (root.shell.activeOverlay === "guide") {
+            return guidePage.handleKeyboardEvent({key: Qt.Key_D, modifiers: Qt.ControlModifier})
+        }
+        const validSelection = root.showShellChrome && !epgTimeline.updating
+            && root.downloadChannelKey === epgTimeline.channelKey
+            && epgTimeline.indexForProgram(root.downloadProgramData) >= 0
+        root.mainWindow.requestCatchupDownload(validSelection ? epgTimeline.channelData : ({}),
+                                               validSelection ? root.downloadProgramData : ({}))
+        return true
+    }
+
     function handleWindowKey(event) {
+        if (root.mainWindow && root.mainWindow.shortcutEnabled && !root.mainWindow.shortcutEnabled("always"))
+            return false
+        if (event.key === Qt.Key_D && event.modifiers === Qt.ControlModifier
+            && root.shell.activeOverlay !== "settings")
+            return root.handleDownloadShortcut()
+
         if (event.key === Qt.Key_F1) {
             root.openAudioPicker()
             return true
@@ -5636,6 +5674,10 @@ Item {
                 selectedKey: programKey(root.rightPaneProgramData)
                 keyboardSelectionActive: root.playerKeyboardFocusArea === "rightPane"
                 onSelectionRequested: function(index) { root.selectRightPaneEntry(index, "pointer") }
+                onDownloadRequested: function(index) {
+                    root.selectRightPaneEntry(index, "pointer")
+                    root.handleDownloadShortcut()
+                }
                 onActivationRequested: function(index) {
                     if (entries[index].kind === "past") {
                         root.selectRightPaneEntry(index, "pointer")
@@ -6242,6 +6284,13 @@ Item {
                     }
                 }
 
+                Item {
+                    id: downloadButtonSlot
+                    visible: root.downloadIndicatorVisible
+                    Layout.preferredWidth: bottomChrome.mediaButtonSize
+                    Layout.preferredHeight: bottomChrome.mediaButtonSize
+                }
+
                 Item { Layout.fillWidth: true }
 
                 IconActionButton {
@@ -6498,6 +6547,7 @@ Item {
                 }
 
                 GuidePage {
+                    onDownloadRequested: function(channel, program) { root.mainWindow.requestCatchupDownload(channel, program) }
                     id: guidePage
                     anchors.fill: parent
                     anchors.topMargin: root.shell.layoutBand === "compact" ? 28 : 30

@@ -65,6 +65,12 @@ set_tests_properties(
 
 qt_add_executable(OKILTVQtAppTests
     tst_app_models.cpp
+    ../src/app/catchupdownloadcontroller.cpp
+    ../src/app/catchuparchivetransfer.cpp
+    ../src/app/catchuparchivetransfer.h
+    ../src/app/catchupdownloadtransfer.cpp
+    ../src/app/catchupdownloadtransfer.h
+    ../src/app/catchupdownloadcontroller.h
     ../src/app/appcontroller.cpp
     ../src/app/appcontroller.h
     ../src/app/channellistmodel.cpp
@@ -159,6 +165,7 @@ qt_add_executable(OKILTVQtAppTests
 target_include_directories(OKILTVQtAppTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 
 target_link_libraries(OKILTVQtAppTests PRIVATE
+    Qt6::Widgets
     Qt6::Concurrent
     Qt6::Core
     Qt6::Gui
@@ -284,7 +291,8 @@ if (OKILTV_BUILD_UI_TESTS)
         06-overlay-inactivity
         07-guide-groups
         08-stationary-pointer-navigation
-        08-ui-transparency)
+        08-ui-transparency
+        09-catchup-download)
         add_test(NAME "UI-${scenario}"
             COMMAND "${OKILTV_TEST_BASH}" "${CMAKE_SOURCE_DIR}/scripts/ci/run_ui_test.sh"
                 "${CMAKE_SOURCE_DIR}/ui-tests/tests/${scenario}.py"
@@ -293,4 +301,40 @@ if (OKILTV_BUILD_UI_TESTS)
         set_tests_properties("UI-${scenario}" PROPERTIES
             LABELS ui TIMEOUT 300 RESOURCE_LOCK okiltv_ui_desktop)
     endforeach()
+endif ()
+
+qt_add_executable(OKILTVQtDownloadTests
+    tst_catchup_downloads.cpp
+    ../src/player/catchuptsjoiner.cpp
+    ../src/core/database_service.cpp
+    ../src/app/catchupdownloadcontroller.cpp
+    ../src/app/catchuparchivetransfer.cpp
+    ../src/app/catchuparchivetransfer.h
+    ../src/app/catchupdownloadtransfer.cpp
+    ../src/app/catchupdownloadtransfer.h
+    ../src/core/appdatapaths.cpp
+    ../src/core/catchupurlresolver.cpp
+    ../src/core/datetimeformat.cpp
+    ../src/core/debuglogger.cpp
+    ../src/core/models.cpp
+    ../src/core/models_json.cpp
+    ../src/core/models_variant.cpp
+    ../src/core/portablebootstrap.cpp
+    ../src/core/processutils.cpp
+    ../src/core/redaction.cpp
+    ../src/core/secretprotection.cpp
+    ../src/core/settingsmanager.cpp
+    ../src/core/sourcestore.cpp)
+target_include_directories(OKILTVQtDownloadTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_definitions(OKILTVQtDownloadTests PRIVATE OKILTV_SECURITY_TESTS)
+target_link_libraries(OKILTVQtDownloadTests PRIVATE Qt6::Widgets Qt6::Core Qt6::Network Qt6::Sql Qt6::Test ${OKILTV_SECRET_LIB})
+add_test(NAME OKILTVQtDownloadTests COMMAND OKILTVQtDownloadTests)
+set_tests_properties(OKILTVQtDownloadTests PROPERTIES LABELS app TIMEOUT 600
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;OKILTV_HEADLESS_TEST=1")
+
+if (NOT CMAKE_CROSSCOMPILING AND OKILTV_QMLTESTRUNNER)
+    add_test(NAME OKILTVQtDownloadUiTests COMMAND "${OKILTV_QMLTESTRUNNER}"
+        -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_catchupdownloads.qml")
+    set_tests_properties(OKILTVQtDownloadUiTests PROPERTIES LABELS qml TIMEOUT 60
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
 endif ()

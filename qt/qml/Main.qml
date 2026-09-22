@@ -33,13 +33,15 @@ ApplicationWindow {
 
     font.family: plexRegular.status === FontLoader.Ready ? plexRegular.name : font.family
     // qmllint disable unqualified
+    readonly property var dateTime: dateTimeFormatter
     readonly property var shell: shellController
     readonly property var settings: settingsController
     readonly property var tray: trayController
     readonly property var dvr: dvrController
     readonly property var app: appController
+    readonly property var downloads: catchupDownloadController
     // qmllint enable unqualified
-    readonly property bool overlayShortcutsEnabled: window.shell.activeOverlay !== "settings"
+    readonly property bool overlayShortcutsEnabled: window.shell.activeOverlay !== "settings" && !downloadUi.interactionActive && !dvrExitDialog.visible && !window.downloads.shuttingDown
     readonly property bool liveShortcutsEnabled: window.overlayShortcutsEnabled && !livePage.searchFieldActive
     readonly property var forwardedShortcuts: {
         const shortcuts = [
@@ -59,6 +61,7 @@ ApplicationWindow {
             { sequence: "Ctrl+Shift+O", key: Qt.Key_O, modifiers: Qt.ControlModifier | Qt.ShiftModifier, scope: "live" },
             { sequence: "Ctrl+P", key: Qt.Key_P, modifiers: Qt.ControlModifier, scope: "live" },
             { sequence: "Ctrl+Shift+P", key: Qt.Key_P, modifiers: Qt.ControlModifier | Qt.ShiftModifier, scope: "live" },
+            { sequence: "Ctrl+D", key: Qt.Key_D, modifiers: Qt.ControlModifier, scope: "download" },
             { sequence: "Ctrl+R", key: Qt.Key_R, modifiers: Qt.ControlModifier, scope: "overlay" },
             { sequence: "Ctrl+Return", key: Qt.Key_Return, modifiers: Qt.ControlModifier, scope: "guideOnly" },
             { sequence: "Ctrl+Enter", key: Qt.Key_Enter, modifiers: Qt.ControlModifier, scope: "guideOnly" },
@@ -113,7 +116,7 @@ ApplicationWindow {
 
     function requestAppClose(source) {
         const closeSource = source || "window"
-        if (window.dvr.exitConfirmationRequired) {
+        if (window.dvr.exitConfirmationRequired || window.downloads.hasPending) {
             window.pendingCloseSource = closeSource
             if (closeSource === "tray") {
                 restoreFromTray()
@@ -122,12 +125,24 @@ ApplicationWindow {
             return
         }
 
+        window.beginExit()
+    }
+
+    function requestCatchupDownload(channel, program) {
+        downloadUi.requestDownload(channel, program)
+    }
+
+    function beginExit() {
+        if (window.downloads.shuttingDown)
+            return
+        window.downloads.shutdown()
+    }
+
+    function finishExit() {
         window.pendingCloseSource = ""
         window.allowWindowClose = true
         close()
-        Qt.callLater(function() {
-            Qt.quit()
-        })
+        Qt.callLater(function() { Qt.quit() })
     }
 
     function toggleAlwaysOnTop() {
@@ -154,17 +169,13 @@ ApplicationWindow {
             window.pendingCloseSource = ""
             return
         }
-        if (window.dvr.exitConfirmationRequired) {
-            close.accepted = false
-            window.pendingCloseSource = "window"
-            dvrExitDialog.open()
-            return
-        }
-        window.shell.setReopenMaximizedOnLaunch(visibility === Window.Maximized)
-        window.tray.hideTrayIcon()
+        close.accepted = false
+        window.requestAppClose("window")
     }
 
     function dispatchShortcut(key, modifiers) {
+        if (downloadUi.interactionActive || dvrExitDialog.visible || window.downloads.shuttingDown)
+            return false
         return livePage.handleWindowKey({
             key: key,
             modifiers: modifiers !== undefined ? modifiers : Qt.NoModifier
@@ -172,8 +183,13 @@ ApplicationWindow {
     }
 
     function shortcutEnabled(scope) {
+        if (downloadUi.interactionActive || dvrExitDialog.visible || window.downloads.shuttingDown)
+            return false
         if (scope === "always") {
             return true
+        }
+        if (scope === "download") {
+            return window.overlayShortcutsEnabled && !livePage.searchFieldActive && !livePage.leftPickerOpen
         }
         if (scope === "live") {
             return window.liveShortcutsEnabled
@@ -212,7 +228,10 @@ ApplicationWindow {
 
     Shortcut {
         sequence: "Escape"
+        enabled: !downloadUi.choosingFile && !dvrExitDialog.visible && !window.downloads.shuttingDown
         onActivated: {
+            if (downloadUi.handleEscape())
+                return
             if (!window.dispatchShortcut(Qt.Key_Escape) && window.visibility === Window.FullScreen) {
                 window.showNormal()
             }
@@ -229,7 +248,28 @@ ApplicationWindow {
         id: livePage
         anchors.fill: parent
         mainWindow: window
-        topBarExternalHideLock: windowChromeBar.interactionActive || windowResizeHandles.interactionActive
+        downloadIndicatorVisible: downloadUi.indicatorVisible
+        topBarExternalHideLock: windowChromeBar.interactionActive || windowResizeHandles.interactionActive || downloadUi.interactionActive
+    }
+
+    CatchupDownloads {
+        dateTimePattern: window.dateTime.dateTimePattern
+        id: downloadUi
+        anchors.fill: parent
+        buttonHost: livePage.downloadButtonHost
+        transportBar: livePage.downloadTransportBar
+        controller: window.downloads
+        app: window.app
+        shellChromeVisible: window.shell.overlaysVisible || window.shell.activeOverlay !== "none"
+        mainWindow: window
+        topInset: window.topBarReservedHeight
+        uiTransparency: window.settings.uiTransparency
+        z: 40
+    }
+
+    Connections {
+        target: window.downloads
+        function onShutdownFinished() { Qt.callLater(function() { window.finishExit() }) }
     }
 
     WindowResizeHandles {
@@ -263,24 +303,64 @@ ApplicationWindow {
 
     Dialog {
         id: dvrExitDialog
+        parent: Overlay.overlay
+        anchors.centerIn: parent
         modal: true
         focus: true
-        title: "Recording in progress"
+        title: "Background tasks"
         standardButtons: Dialog.Yes | Dialog.No
-        implicitWidth: 360 + leftPadding + rightPadding
+        width: Math.min(440, parent.width - 32)
+        padding: 20
+        spacing: 16
+
+        background: Rectangle {
+            radius: 8
+            color: Theme.uiBackground("#e6070d12", window.settings.uiTransparency)
+        }
+
+        header: Text {
+            text: dvrExitDialog.title
+            color: Theme.textPrimary
+            font.pixelSize: 16
+            font.bold: true
+            leftPadding: dvrExitDialog.leftPadding
+            rightPadding: dvrExitDialog.rightPadding
+            topPadding: dvrExitDialog.topPadding
+            wrapMode: Text.Wrap
+        }
+
+        footer: DialogButtonBox {
+            standardButtons: dvrExitDialog.standardButtons
+            alignment: Qt.AlignRight
+            leftPadding: dvrExitDialog.leftPadding
+            rightPadding: dvrExitDialog.rightPadding
+            bottomPadding: dvrExitDialog.bottomPadding
+            background: Item {}
+            delegate: AppButton {
+                id: exitAction
+                compact: true
+                borderless: true
+                background: Rectangle {
+                    radius: 4
+                    color: exitAction.down ? "#35ffffff"
+                        : (exitAction.hovered || exitAction.visualFocus ? "#20ffffff" : "transparent")
+                }
+            }
+        }
 
         contentItem: Text {
-            text: "A recording is active or scheduled to start within 15 minutes. Exit anyway?"
+            text: (window.dvr.exitConfirmationRequired
+                ? "A recording is active or scheduled to start within 15 minutes. " : "")
+                + (window.downloads.hasPending
+                    ? "Active, paused and queued downloads will be cancelled and their unfinished files deleted. " : "")
+                + "Exit anyway?"
+            font.pixelSize: 14
             wrapMode: Text.Wrap
             color: Theme.textPrimary
         }
 
         onAccepted: {
-            window.allowWindowClose = true
-            window.close()
-            Qt.callLater(function() {
-                Qt.quit()
-            })
+            window.beginExit()
         }
         onRejected: window.pendingCloseSource = ""
     }

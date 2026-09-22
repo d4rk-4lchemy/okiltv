@@ -45,11 +45,13 @@ public:
         const QString &name,
         const QString &m3uUrl,
         const QString &xmltvUrl = {},
-        int autoRefreshIntervalHours = 24);
+        int autoRefreshIntervalHours = 24,
+        int catchupSafetyMinutes = 3);
     Q_INVOKABLE QString addM3uFileProfile(
         const QString &name,
         const QString &filePath,
-        const QString &xmltvUrl = {});
+        const QString &xmltvUrl = {},
+        int catchupSafetyMinutes = 3);
     Q_INVOKABLE bool replaceProfile(const QString &profileId, const QVariantMap &changes);
     Q_INVOKABLE bool removeProfile(const QString &profileId);
     Q_INVOKABLE bool selectProfile(const QString &profileId);

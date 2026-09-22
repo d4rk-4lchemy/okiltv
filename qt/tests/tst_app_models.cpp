@@ -5,6 +5,7 @@
 #include "../src/app/appcontroller.h"
 #undef private
 #include "../src/app/channellistmodel.h"
+#include "../src/app/catchupdownloadcontroller.h"
 #define private public
 #include "../src/app/dvrcontroller.h"
 #undef private
@@ -388,6 +389,7 @@ class AppModelTests final : public QObject
 
 private slots:
     void initTestCase() { OKILTV::Core::useIsolatedSecretKeyForTests(); }
+    void catchupDownloadValidation();
     void trackPreferencesRejectStaleSnapshots();
     void removingProfileClearsTrackPreferences();
     void playerRemembersTracksAcrossRestartAndFallsBack();
@@ -644,6 +646,9 @@ private slots:
     void guideStateModelRefreshPreservesBrowsedProgram_data();
     void guideStateModelRefreshPreservesBrowsedProgram();
     void epgMissingCacheFetchesFromSource();
+    void m3uDiscoversEpgAndRespectsOverride();
+    void m3uSourcesSaveArchiveSafetyMargin();
+    void m3uRefreshRetainsChannelIdentity();
     void epgFreshCacheSkipsNetworkUntilDue();
     void manualEpgRefreshBypassesFreshCache();
     void epgStaleCacheLoadsThenRefreshesInBackground();
@@ -651,6 +656,10 @@ private slots:
     void xtreamProfileRefreshKeepsStoredTimezoneWhenResponseMissingTimezone();
     void scheduledSourceAutoRefreshTriggersAtExactIntervalBoundary();
     void sourceRefreshFailureWithCachedFallbackKeepsPreviousLastRefreshed();
+    void profileRefreshPreservesSettingsDraft_data();
+    void profileRefreshPreservesSettingsDraft();
+    void invalidPlaylistRefreshKeepsCachedChannels_data();
+    void invalidPlaylistRefreshKeepsCachedChannels();
     void profileRefreshPrunesRemovedChannelsFromDatabase();
 };
 
@@ -8707,6 +8716,89 @@ void AppModelTests::sourceRefreshFailureWithCachedFallbackKeepsPreviousLastRefre
     QVERIFY(harness.appController->statusText().contains(QStringLiteral("Using cached channels after refresh failure")));
 }
 
+void AppModelTests::profileRefreshPreservesSettingsDraft_data()
+{
+    QTest::addColumn<bool>("saveDraft");
+    QTest::newRow("save") << true;
+    QTest::newRow("discard") << false;
+}
+
+void AppModelTests::profileRefreshPreservesSettingsDraft()
+{
+    QFETCH(bool, saveDraft);
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    harness.appController->initialize();
+    QTRY_VERIFY_WITH_TIMEOUT(!harness.appController->isBusy(), 5000);
+    const auto savedTransparency = harness.settings->current().uiTransparency;
+    const auto savedPreset = harness.settings->current().playerPicturePreset;
+    harness.shellController->openOverlay(QStringLiteral("settings"));
+    QSignalSpy profileLoadSpy(harness.appController.get(), &AppController::profileLoadFinished);
+    harness.appController->refreshActiveProfile();
+    harness.settingsController->setUiTransparency(35);
+    harness.settingsController->setPicturePreset(QStringLiteral("warm"));
+    QVERIFY(harness.settingsController->dirty());
+    QTRY_VERIFY_WITH_TIMEOUT(!profileLoadSpy.isEmpty(), 5000);
+    QVERIFY(profileLoadSpy.last().at(1).toBool());
+    QCOMPARE(harness.shellController->activeOverlay(), QStringLiteral("settings"));
+    QCOMPARE(harness.settingsController->uiTransparency(), 35);
+    QCOMPARE(harness.settingsController->picturePreset(), QStringLiteral("warm"));
+    QVERIFY(harness.settingsController->dirty());
+    QCOMPARE(harness.settings->current().uiTransparency, savedTransparency);
+    QCOMPARE(harness.settings->current().playerPicturePreset, savedPreset);
+    if (saveDraft) {
+        harness.settingsController->save();
+        QCOMPARE(harness.settings->current().uiTransparency, 35);
+        QCOMPARE(harness.settings->current().playerPicturePreset, QStringLiteral("warm"));
+    } else {
+        harness.settingsController->cancel();
+        QCOMPARE(harness.settingsController->uiTransparency(), savedTransparency);
+        QCOMPARE(harness.settingsController->picturePreset(), savedPreset);
+    }
+    QVERIFY(!harness.settingsController->dirty());
+}
+
+void AppModelTests::invalidPlaylistRefreshKeepsCachedChannels_data()
+{
+    QTest::addColumn<QByteArray>("payload");
+    QTest::newRow("html") << QByteArray("<html>Service unavailable</html>");
+    QTest::newRow("empty") << QByteArray();
+    QTest::newRow("truncated") << QByteArray("#EXTM3U\n#EXTINF:-1,Only one\nhttp://stream/one\n#EXTINF:-1,Missing URL\n");
+}
+
+void AppModelTests::invalidPlaylistRefreshKeepsCachedChannels()
+{
+    QFETCH(QByteArray, payload);
+    auto network = std::make_shared<MockNetworkAccess>();
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt, network));
+    harness.appController->initialize();
+    QTRY_VERIFY_WITH_TIMEOUT(!harness.appController->isBusy(), 5000);
+    const auto before = harness.channelListModel->allChannels();
+    QCOMPARE(before.size(), 2);
+    const auto profileId = harness.profilesModel->activeProfileId();
+    const auto previousRefresh = QDateTime::currentDateTimeUtc().addDays(-1);
+    const QUrl url(QStringLiteral("https://example.test/invalid.m3u"));
+    QVERIFY(harness.profilesModel->replaceProfile(profileId, {
+        { QStringLiteral("type"), static_cast<int>(ProfileType::M3UUrl) },
+        { QStringLiteral("m3UUrl"), url.toString() },
+        { QStringLiteral("lastRefreshed"), previousRefresh.toString(Qt::ISODateWithMs) }
+    }));
+    network->setResponse(url, {payload, {}, 0});
+    QSignalSpy profileLoadSpy(harness.appController.get(), &AppController::profileLoadFinished);
+    harness.appController->refreshActiveProfile();
+    QTRY_VERIFY_WITH_TIMEOUT(!profileLoadSpy.isEmpty(), 5000);
+    const auto stored = harness.database->loadChannels(parseGuid(profileId));
+    QCOMPARE(stored.size(), before.size());
+    QCOMPARE(harness.channelListModel->allChannels().size(), before.size());
+    for (qsizetype i = 0; i < before.size(); ++i) {
+        QCOMPARE(stored[i].name, before[i].name);
+        QCOMPARE(stored[i].streamUrl, before[i].streamUrl);
+    }
+    QCOMPARE(harness.settings->profileById(parseGuid(profileId))->lastRefreshed, previousRefresh);
+    QVERIFY(harness.appController->statusText().contains(QStringLiteral("Using cached channels after refresh failure")));
+}
+
 void AppModelTests::profileRefreshPrunesRemovedChannelsFromDatabase()
 {
     auto network = std::make_shared<MockNetworkAccess>();
@@ -8760,7 +8852,7 @@ void AppModelTests::profileRefreshPrunesRemovedChannelsFromDatabase()
 
     const auto loaded = harness.database->loadChannels(profile.id);
     QCOMPARE(loaded.size(), 1);
-    QCOMPARE(loaded.first().id, 0);
+    QCOMPARE(loaded.first().id, 5); // Changed URL is a new identity, after the original two and imported three.
     QCOMPARE(loaded.first().name, QStringLiteral("Prune One Updated"));
 }
 
@@ -11938,6 +12030,111 @@ void AppModelTests::guideStateModelRefreshPreservesBrowsedProgram()
     QCOMPARE(model.selectedProgram().value(QStringLiteral("title")).toString(), current.title);
 }
 
+void AppModelTests::m3uDiscoversEpgAndRespectsOverride()
+{
+    auto network = std::make_shared<MockNetworkAccess>();
+    const QUrl overrideUrl(QStringLiteral("https://example.test/override.xml"));
+    network->setResponse(overrideUrl, {xmltvPayload(QStringLiteral("Override")), {}, 0});
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt, network));
+    const auto writeGuide = [&](const QString &title) {
+        QFile file(harness.tempDir.filePath(QStringLiteral("guide.xml")));
+        return file.open(QIODevice::WriteOnly | QIODevice::Truncate) && file.write(xmltvPayload(title)) > 0;
+    };
+    QVERIFY(writeGuide(QStringLiteral("Discovered")));
+    QFile playlist(harness.playlistPath);
+    QVERIFY(playlist.open(QIODevice::ReadWrite));
+    auto bytes = playlist.readAll();
+    bytes.replace("#EXTM3U", "#EXTM3U url-tvg=\"guide.xml\"");
+    QVERIFY(playlist.resize(0));
+    QCOMPARE(playlist.write(bytes), bytes.size());
+    playlist.close();
+    harness.appController->initialize();
+    QTRY_VERIFY_WITH_TIMEOUT(!harness.appController->isBusy() && !harness.appController->epgRefreshInProgress(), 5000);
+    QTRY_COMPARE(harness.epgService->totalEntries(), 1);
+    QCOMPARE(harness.epgService->allEntries().first().title, QStringLiteral("Discovered"));
+    const auto saved = harness.settings->activeProfile();
+    QVERIFY(saved);
+    QCOMPARE(saved->discoveredXmltvUrls.size(), 1);
+    QVERIFY(saved->xmltvUrl.isEmpty());
+    QVERIFY(writeGuide(QStringLiteral("Refreshed")));
+    harness.appController->refreshActiveEpg();
+    QTRY_VERIFY(!harness.appController->epgRefreshInProgress());
+    QCOMPARE(harness.epgService->allEntries().first().title, QStringLiteral("Refreshed"));
+    auto profile = *saved;
+    profile.xmltvUrl = overrideUrl.toString();
+    QVERIFY(harness.settings->replaceProfile(profile.id, profile));
+    harness.appController->refreshActiveEpg();
+    QTRY_VERIFY(!harness.appController->epgRefreshInProgress());
+    QCOMPARE(harness.epgService->allEntries().first().title, QStringLiteral("Override"));
+    QCOMPARE(network->callCount(overrideUrl), 1);
+    // An explicit EPG override has the same meaning for XC profiles.
+    profile.type = ProfileType::Xtream;
+    QVERIFY(harness.settings->replaceProfile(profile.id, profile));
+    harness.appController->refreshActiveEpg();
+    QTRY_VERIFY(!harness.appController->epgRefreshInProgress());
+    QCOMPARE(network->callCount(overrideUrl), 2);
+    QCOMPARE(harness.epgService->allEntries().first().title, QStringLiteral("Override"));
+}
+
+void AppModelTests::m3uRefreshRetainsChannelIdentity()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    harness.appController->initialize();
+    QTRY_VERIFY(!harness.appController->isBusy());
+    const auto profile = harness.activeProfileId();
+    const auto key = guidToString(profile);
+    QVERIFY(harness.channelListModel->toggleFavorite(0));
+    harness.settings->current().lastWatchedChannelId[key] = 0;
+    harness.database->incrementWatchSeconds(profile, 0, 123);
+    QFile playlist(harness.playlistPath);
+    QVERIFY(playlist.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    playlist.write("#EXTM3U\n#EXTINF:-1,New\nhttp://127.0.0.1/new\n"
+                   "#EXTINF:-1,Two\nhttp://127.0.0.1/channel-two\n"
+                   "#EXTINF:-1,One\nhttp://127.0.0.1/channel-one\n");
+    playlist.close();
+    harness.appController->refreshActiveProfile();
+    QTRY_VERIFY(!harness.appController->isBusy());
+    const auto channels = harness.database->loadChannels(profile);
+    QCOMPARE(channels.size(), 3);
+    QCOMPARE(channels[0].id, 2);
+    QCOMPARE(channels[1].id, 1);
+    QCOMPARE(channels[2].id, 0);
+    QCOMPARE(channels[2].sortOrder, 3);
+    QVERIFY(harness.channelListModel->isFavorite(0));
+    QVERIFY(!harness.channelListModel->isFavorite(2));
+    QCOMPARE(harness.database->loadWatchSecondsByProfile(profile).value(0), 123);
+    QCOMPARE(harness.settings->current().lastWatchedChannelId.value(key), 0);
+    // Even an empty refresh and reopening the database must not recycle IDs.
+    harness.database->replaceChannelsForProfile(profile, {});
+    DatabaseService reopened(harness.database->databaseFilePath());
+    QCOMPARE(reopened.nextM3uChannelId(profile), 3);
+    QVERIFY(playlist.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    playlist.write("#EXTM3U\n#EXTINF:-1,Replacement\nhttp://127.0.0.1/replacement\n");
+    playlist.close();
+    harness.appController->refreshActiveProfile();
+    QTRY_VERIFY(!harness.appController->isBusy());
+    QCOMPARE(harness.database->loadChannels(profile).first().id, 3);
+    QVERIFY(!harness.channelListModel->isFavorite(3));
+    harness.playerController->stop();
+}
+
+void AppModelTests::m3uSourcesSaveArchiveSafetyMargin()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    const auto urlId = harness.profilesModel->addM3uUrlProfile(QStringLiteral("URL"),
+        QStringLiteral("https://example.test/list.m3u"), {}, 12, 0);
+    const auto fileId = harness.profilesModel->addM3uFileProfile(QStringLiteral("File"), harness.playlistPath, {}, 17);
+    QVERIFY(!urlId.isEmpty());
+    QVERIFY(!fileId.isEmpty());
+    QCOMPARE(harness.settings->profileById(parseGuid(urlId))->catchupSafetyMinutes, 0);
+    QCOMPARE(harness.settings->profileById(parseGuid(fileId))->catchupSafetyMinutes, 17);
+    harness.settings->load();
+    QCOMPARE(harness.settings->profileById(parseGuid(fileId))->catchupSafetyMinutes, 17);
+}
+
 void AppModelTests::epgMissingCacheFetchesFromSource()
 {
     const auto url = QUrl(QStringLiteral("https://example.com/guide.xml"));
@@ -12159,6 +12356,56 @@ void AppModelTests::playerControllerRecoveryRespectsPauseAndPendingReload()
     QVERIFY(!controller.m_recovery.active());
     QCOMPARE(controller.m_catchupSession.reloadUrl(), QStringLiteral("archive"));
     controller.stop();
+}
+
+void AppModelTests::catchupDownloadValidation()
+{
+    if (!ffmpegToolsAvailable())
+        QSKIP("ffmpeg/ffprobe unavailable");
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    Channel channel;
+    channel.id = 7;
+    channel.profileId = harness.activeProfileId();
+    channel.source = ChannelSource::M3U;
+    channel.streamUrl = QStringLiteral("http://example.invalid/live");
+    channel.tvgId = QStringLiteral("fixture");
+    channel.catchupSupported = true;
+    channel.catchupWindowHours = 24;
+    channel.catchupMode = QStringLiteral("default");
+    channel.catchupSourceTemplate = QStringLiteral("http://example.invalid/archive?utc={utc}&duration={duration}");
+    harness.channelListModel->setChannels({channel}, {});
+    EpgEntry program;
+    program.channelId = channel.tvgId;
+    program.title = QStringLiteral("Download fixture");
+    program.start = QDateTime::currentDateTimeUtc().addSecs(-3600);
+    program.stop = program.start.addSecs(600);
+    auto state = [&] { return harness.appController->catchupDownloadActionState(toVariantMap(channel), toVariantMap(program)); };
+    QVERIFY(state().value(QStringLiteral("enabled")).toBool());
+    const auto stop = program.stop;
+    program.stop = QDateTime::currentDateTimeUtc().addSecs(-30);
+    QVERIFY(!state().value(QStringLiteral("enabled")).toBool());
+    program.stop = QDateTime::currentDateTimeUtc().addSecs(60);
+    QVERIFY(!state().value(QStringLiteral("enabled")).toBool());
+    program.stop = stop;
+    program.channelId = QStringLiteral("wrong-channel");
+    QVERIFY(!state().value(QStringLiteral("enabled")).toBool());
+    program.channelId = channel.tvgId;
+    harness.settings->current().catchupEnabled = false;
+    QVERIFY(!state().value(QStringLiteral("enabled")).toBool());
+    harness.settings->current().catchupEnabled = true;
+    program.start = QDateTime::currentDateTimeUtc().addDays(-2);
+    QVERIFY(!state().value(QStringLiteral("enabled")).toBool());
+    program.start = stop.addSecs(-600);
+    const auto profile = channel.profileId;
+    channel.profileId = QUuid::createUuid();
+    QVERIFY(!state().value(QStringLiteral("enabled")).toBool());
+    channel.profileId = profile;
+    // A dialog result must revalidate after its selected channel disappears.
+    harness.channelListModel->setChannels({}, {});
+    QVERIFY(!harness.appController->enqueueCatchupDownload(toVariantMap(channel), toVariantMap(program),
+        QUrl::fromLocalFile(harness.tempDir.filePath(QStringLiteral("download.mkv")))).isEmpty());
+    QCOMPARE(harness.appController->downloadController()->rowCount(), 0);
 }
 
 QTEST_MAIN(AppModelTests)

@@ -60,6 +60,12 @@ endif ()
 qt_standard_project_setup()
 
 qt_add_executable(OKILTVQt
+    src/app/catchupdownloadcontroller.cpp
+    src/app/catchuparchivetransfer.cpp
+    src/app/catchuparchivetransfer.h
+    src/app/catchupdownloadtransfer.cpp
+    src/app/catchupdownloadtransfer.h
+    src/app/catchupdownloadcontroller.h
     src/app/appcontroller.cpp
     src/app/appcontroller.h
     src/app/channellistmodel.cpp
@@ -174,7 +180,9 @@ qt_add_resources(OKILTVQt app_assets
         resources/icons/continue-catch-up.svg
         resources/icons/channel-error.svg
         resources/icons/close.svg
+        resources/icons/restart.svg
         resources/icons/diagnostics.svg
+        resources/icons/download.svg
         resources/icons/dvr.svg
         resources/icons/epg-hide.svg
         resources/icons/epg-show.svg
@@ -263,6 +271,7 @@ endif ()
 
 set(OKILTV_QML_FILES
     qml/Main.qml
+    qml/components/CatchupDownloads.qml
     qml/components/AppButton.qml
     qml/components/ChannelBadge.qml
     qml/components/FormComboBox.qml

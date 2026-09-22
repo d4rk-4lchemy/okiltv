@@ -17,6 +17,7 @@
 
 namespace OKILTV::App {
 
+class CatchupDownloadController;
 class ChannelListModel;
 class DvrController;
 class EpgGridModel;
@@ -63,6 +64,7 @@ public:
         Core::EpgService *epgService,
         QObject *parent = nullptr);
 
+    CatchupDownloadController *downloadController() const { return m_downloadController; }
     QStringList groupAutoEnableNoticeProfileIds() const;
     Q_INVOKABLE void dismissGroupAutoEnableNotice(const QString &profileId);
     QString statusText() const;
@@ -83,6 +85,8 @@ public slots:
     Q_INVOKABLE void resumeCatchup(const QVariantMap &channel, const QVariantMap &program);
     Q_INVOKABLE void playCatchupAtOffset(const QVariantMap &channel, const QVariantMap &program, double targetSeconds);
     Q_INVOKABLE QVariantMap catchupActionState(const QVariantMap &channel, const QVariantMap &program) const;
+    Q_INVOKABLE QVariantMap catchupDownloadActionState(const QVariantMap &channel, const QVariantMap &program) const;
+    Q_INVOKABLE QString enqueueCatchupDownload(const QVariantMap &channel, const QVariantMap &program, const QUrl &destination);
     void dumpDebugReport();
     Q_INVOKABLE QString debugSummary() const;
 
@@ -139,6 +143,7 @@ private:
 
     static QList<Core::ChannelCategory> buildM3uCategories(const QList<Core::Channel> &channels);
 
+    CatchupDownloadController *m_downloadController { nullptr };
     Core::SettingsManager *m_settings;
     Core::DatabaseService *m_database;
     std::shared_ptr<Core::NetworkAccess> m_network;

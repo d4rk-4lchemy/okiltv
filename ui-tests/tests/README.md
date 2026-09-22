@@ -41,3 +41,7 @@ pointer input; the Settings test also waits for `hovered` to confirm pointer
 delivery to `ui.live.settingsButton`. The application
 intentionally ignores input during slide animations; fixed sleeps alone do not
 establish that a control is ready.
+
+## Catch-up download regression
+
+`09-catchup-download.py` uses generated local media and XMLTV to check `Ctrl+D` from Guide and the right EPG pane, cancelling the Save File dialog, title-based MKV output, filename collisions, preservation of incomplete archives as `.partial.mkv` and cancellation cleanup. Requires ffmpeg/ffprobe and the existing Xvfb/Openbox/xdotool stack. Run through `scripts/ci/run_ui_test.sh` for an isolated Secret Service session.

@@ -1,4 +1,6 @@
 #include "appcontroller.h"
+#include "catchupdownloadcontroller.h"
+#include "catchupdownloadtransfer.h"
 #include "../core/sourcegrouppreferences.h"
 
 #include "channellistmodel.h"
@@ -341,6 +343,7 @@ AppController::AppController(
     , m_epgService(epgService)
     , m_iconCacheService(*database, m_network)
 {
+    m_downloadController = new CatchupDownloadController(settings, this);
     const auto updateDateTimeFormat = [this]() {
         const auto options = m_settingsController->dateTimeFormatter()->options();
         m_epgGridModel->setDateTimeFormat(options);
@@ -766,21 +769,28 @@ void AppController::loadProfile(const QString &profileId)
                 }
             } else if (profile.type == ProfileType::M3UUrl) {
                 M3UService m3u(m_network);
-                result.channels = m3u.loadFromUrl(QUrl(profile.m3uUrl), profile.id);
+                result.channels = m3u.loadFromUrl(QUrl(profile.m3uUrl), profile.id, &result.profile.discoveredXmltvUrls);
                 result.categories = buildM3uCategories(result.channels);
             } else if (profile.type == ProfileType::M3UFile) {
                 M3UService m3u(m_network);
-                result.channels = m3u.loadFromFile(profile.m3uFilePath, profile.id);
+                result.channels = m3u.loadFromFile(profile.m3uFilePath, profile.id, &result.profile.discoveredXmltvUrls);
                 result.categories = buildM3uCategories(result.channels);
             }
 
-            m_database->replaceChannelsForProfile(profile.id, result.channels);
+            std::optional<qint64> nextM3uId;
+            if (profile.type != ProfileType::Xtream) {
+                auto nextId = m_database->nextM3uChannelId(profile.id);
+                M3UService::retainChannelIds(result.channels, m_database->loadChannels(profile.id), nextId);
+                nextM3uId = nextId;
+            }
+            m_database->replaceChannelsForProfile(profile.id, result.channels, nextM3uId);
             result.watchSecondsByChannelId = m_database->loadWatchSecondsByProfile(profile.id);
             result.profile.lastRefreshed = QDateTime::currentDateTimeUtc();
             result.sourceRefreshSucceeded = true;
             result.ok = true;
             result.statusText = QStringLiteral("%1 channels loaded").arg(result.channels.size());
         } catch (const std::exception &error) {
+            result.profile = profile;
             result.channels = m_database->loadChannels(profile.id);
             if (!result.channels.isEmpty()) {
                 result.categories = buildM3uCategories(result.channels);
@@ -837,6 +847,15 @@ void AppController::loadProfile(const QString &profileId)
                 }
                 const auto activeProfileBeforeSave = activeProfileId();
                 if (result.sourceRefreshSucceeded) {
+                    if (result.profile.type != ProfileType::Xtream) {
+                        auto current = m_settings->profileById(result.profile.id);
+                        if (current && current->m3uUrl == result.profile.m3uUrl
+                            && current->m3uFilePath == result.profile.m3uFilePath
+                            && current->discoveredXmltvUrls != result.profile.discoveredXmltvUrls) {
+                            current->discoveredXmltvUrls = result.profile.discoveredXmltvUrls;
+                            m_settings->replaceProfile(current->id, *current);
+                        }
+                    }
                     m_settings->setProfileLastRefreshed(result.profile.id, result.profile.lastRefreshed);
                     m_settings->setProfileGroupCount(result.profile.id, static_cast<int>(result.categories.size()));
                 }
@@ -857,7 +876,11 @@ void AppController::loadProfile(const QString &profileId)
                     emit activeProfileIdChanged();
                 }
                 m_profilesModel->reload();
-                m_settingsController->reload();
+                // A source refresh can finish while the Settings overlay is being
+                // edited. Only Save or an explicit discard may replace that draft.
+                if (!m_settingsController->dirty()) {
+                    m_settingsController->reload();
+                }
                 const auto loadedProfileId = guidToString(result.profile.id);
                 const auto loadedProfileIsActive = activeProfileAfterSave == loadedProfileId;
                 if (loadedProfileIsActive) {
@@ -1690,6 +1713,46 @@ QVariantMap AppController::catchupActionState(const QVariantMap &channel, const 
     };
 }
 
+QVariantMap AppController::catchupDownloadActionState(const QVariantMap &channel, const QVariantMap &program) const
+{
+    const auto validation = validateCatchupRequest(m_settings, m_settings->current(), m_channelListModel, channel, program);
+    QString reason = validation.reason;
+    if (validation.enabled) {
+        const auto profile = validation.profile;
+        const auto entry = validation.program;
+        const int safety = 60 * std::clamp(profile ? profile->catchupSafetyMinutes : 3, 0, 30);
+        if (!profile || !entry)
+            reason = QStringLiteral("Source or programme is unavailable.");
+        else if (CatchupUrlResolver::availableEdge(entry->stop, safety) < entry->stop)
+            reason = QStringLiteral("Download is available after the programme ends and the source archive margin (%1 minutes) has elapsed.").arg(safety / 60);
+        else if (!Core::ffmpegToolsAvailable())
+            reason = QStringLiteral("Downloading requires ffmpeg and ffprobe in the application directory or PATH.");
+        else {
+            const auto resolved = validation.channel;
+            if (resolved) {
+                const auto target = CatchupUrlResolver(profile).resolveDownload(*resolved, *entry, &reason);
+                if (target && !CatchupDownloadTransfer::supportedUrl(QUrl(target->url), true))
+                    reason = QStringLiteral("Downloads support HTTP/HTTPS media and finite HLS archives; DASH is not supported.");
+            }
+        }
+    }
+    return {{QStringLiteral("enabled"), validation.enabled && reason.isEmpty()},
+            {QStringLiteral("reason"), reason}};
+}
+
+QString AppController::enqueueCatchupDownload(const QVariantMap &channel, const QVariantMap &program, const QUrl &destination)
+{
+    const auto state = catchupDownloadActionState(channel, program);
+    if (!state.value(QStringLiteral("enabled")).toBool())
+        return state.value(QStringLiteral("reason")).toString();
+    const auto validation = validateCatchupRequest(m_settings, m_settings->current(), m_channelListModel, channel, program);
+    const auto resolvedChannel = validation.channel;
+    const auto resolvedProgram = validation.program;
+    if (!validation.enabled || !resolvedChannel || !resolvedProgram)
+        return QStringLiteral("The selected programme is no longer available.");
+    return m_downloadController->enqueue(*resolvedChannel, *resolvedProgram, destination);
+}
+
 void AppController::resumeCatchup(const QVariantMap &channel, const QVariantMap &program)
 {
     const auto state = catchupActionState(channel, program);
@@ -2053,16 +2116,41 @@ void AppController::loadEpgAsync(const ServerProfile &profile, const bool forceR
         };
 
         auto fetchFresh = [this, &profile, &sourceFingerprint]() -> EpgCacheService::CacheData {
-            QByteArray xmltvPayload;
-            if (profile.type == ProfileType::Xtream) {
+            QList<EpgEntry> entries;
+            if (profile.type == ProfileType::Xtream && profile.xmltvUrl.trimmed().isEmpty()) {
                 XtreamService xtream(m_network);
                 xtream.setProfile(profile);
-                xmltvPayload = xtream.getXmltvBytes();
-            } else if (!profile.xmltvUrl.trimmed().isEmpty()) {
-                xmltvPayload = m_network->get(QUrl(profile.xmltvUrl));
+                entries = EpgService::parseEntries(xtream.getXmltvBytes());
+            } else {
+                const auto urls = profile.xmltvUrl.trimmed().isEmpty()
+                    ? profile.discoveredXmltvUrls : QStringList {profile.xmltvUrl.trimmed()};
+                QHash<QString, QSet<qint64>> seenStarts;
+                for (const auto &source : urls) {
+                    const QUrl url(source);
+                    QByteArray payload;
+                    if (url.isLocalFile()) {
+                        QFile file(url.toLocalFile());
+                        if (!file.open(QIODevice::ReadOnly))
+                            throw std::runtime_error("Cannot read the local XMLTV file.");
+                        payload = file.readAll();
+                    } else {
+                        payload = m_network->get(url);
+                    }
+                    const auto parsed = EpgService::parseEntries(payload);
+                    if (urls.size() == 1) {
+                        entries = parsed;
+                    } else {
+                        for (const auto &entry : parsed) {
+                            auto &starts = seenStarts[entry.channelId.trimmed().toLower()];
+                            const auto start = entry.start.toMSecsSinceEpoch();
+                            if (!starts.contains(start)) {
+                                starts.insert(start);
+                                entries.push_back(entry);
+                            }
+                        }
+                    }
+                }
             }
-
-            const auto entries = EpgService::parseEntries(xmltvPayload);
 
             EpgCacheService::CacheData data;
             data.profileId = profile.id;
