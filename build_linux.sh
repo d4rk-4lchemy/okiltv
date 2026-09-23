@@ -37,4 +37,4 @@ if [[ "$needs_reconfigure" -eq 1 ]]; then
     cmake --fresh --preset qt-linux-release
 fi
 
-cmake --build --preset qt-linux-release -j"$build_jobs"
+cmake --build --preset qt-linux-release --target OKILTVQt -j"$build_jobs"

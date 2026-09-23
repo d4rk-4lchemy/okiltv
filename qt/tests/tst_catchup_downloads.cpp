@@ -62,6 +62,7 @@ private:
         QMap<qint64, qsizetype> timeOffsets;
         QList<qint64> requestedTimes;
         qint64 sentBytes { 0 };
+        QList<qint64> sentBytesByRequest;
         Fixture()
         {
             profile.id = QUuid::createUuid();
@@ -93,6 +94,8 @@ private:
                         receivedHeaders = request;
                         requestsSeen.append(request);
                         ++requests;
+                        const auto requestIndex = sentBytesByRequest.size();
+                        sentBytesByRequest.append(0);
                         if (stall)
                             return;
                         const auto requestPath = request.split(' ').value(1).split('?').first();
@@ -104,7 +107,7 @@ private:
                             responsePayload = payload.mid(timeOffsets.value(offset));
                         }
                         const QPointer<QTcpSocket> guarded(socket);
-                        QTimer::singleShot(delayMs, socket, [this, guarded, responsePayload] {
+                        QTimer::singleShot(delayMs, socket, [this, guarded, responsePayload, requestIndex] {
                             if (!guarded)
                                 return;
                             const auto range = QRegularExpression(QStringLiteral("Range: bytes=(\\d+)-"),
@@ -125,7 +128,7 @@ private:
                             if (slow) {
                                 auto *timer = new QTimer(guarded);
                                 timer->setInterval(chunkIntervalMs);
-                                QObject::connect(timer, &QTimer::timeout, guarded, [this, guarded, timer, body, cursor = qsizetype(0)]() mutable {
+                                QObject::connect(timer, &QTimer::timeout, guarded, [this, guarded, timer, body, requestIndex, cursor = qsizetype(0)]() mutable {
                                     if (!guarded || guarded->state() != QAbstractSocket::ConnectedState) {
                                         timer->stop();
                                         return;
@@ -133,6 +136,7 @@ private:
                                     const auto chunk = body.mid(cursor, chunkBytes);
                                     guarded->write(chunk);
                                     sentBytes += chunk.size();
+                                    sentBytesByRequest[requestIndex] += chunk.size();
                                     cursor += chunk.size();
                                     if (cursor >= body.size()) {
                                         timer->stop();
@@ -142,7 +146,9 @@ private:
                                 });
                                 timer->start();
                             } else {
-                                guarded->write(interruptResponse ? body.first(std::min<qsizetype>(32768, body.size())) : body);
+                                const auto response = interruptResponse ? body.first(std::min<qsizetype>(32768, body.size())) : body;
+                                guarded->write(response);
+                                sentBytesByRequest[requestIndex] += response.size();
                                 if (!stallAfterPayload)
                                     guarded->disconnectFromHost();
                             }
@@ -293,6 +299,9 @@ private slots:
         Fixture fixture;
         fixture.payload = m_video;
         fixture.slow = true;
+        // Leave time for the client to reject headers before another body chunk
+        // is queued by the server, including on a loaded CI runner.
+        fixture.chunkIntervalMs = 100;
         CatchupDownloadTransfer transfer;
         QSignalSpy progress(&transfer, &CatchupDownloadTransfer::progress);
         QSignalSpy failed(&transfer, &CatchupDownloadTransfer::failed);
@@ -302,11 +311,17 @@ private slots:
         QTRY_VERIFY(!progress.isEmpty() && progress.last()[1].toLongLong() > 128 * 1024);
         transfer.pause(2);
         const auto saved = QFileInfo(path).size();
-        const auto sent = fixture.sentBytes;
         transfer.start(3, url, path, {});
         QTRY_COMPARE_WITH_TIMEOUT(failed.count(), 1, 45000);
         QCOMPARE(QFileInfo(path).size(), saved);
-        QVERIFY(fixture.sentBytes - sent < 64 * 1024);
+        QCOMPARE(fixture.requests, 4); // Initial transfer plus three resume attempts.
+        for (qsizetype request = 1; request < fixture.sentBytesByRequest.size(); ++request) {
+            // The bound applies to each rejected response, not the sum of all
+            // retries or bytes still in flight from the initial transfer.
+            QVERIFY2(fixture.sentBytesByRequest[request] < 64 * 1024,
+                     qPrintable(QStringLiteral("Resume attempt %1 sent %2 bytes")
+                         .arg(request).arg(fixture.sentBytesByRequest[request])));
+        }
         QVERIFY(failed.first()[1].toString().contains(QStringLiteral("cannot resume")));
     }
 

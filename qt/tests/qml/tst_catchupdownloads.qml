@@ -49,11 +49,12 @@ TestCase {
     QtObject {
         id: app
         property bool eligible: true
+        property bool downloadVisible: true
         property var submitted: ({})
         property int requests: 0
         property string enqueueError: ""
         function catchupDownloadActionState(channel, program) {
-            return { enabled: eligible, reason: eligible ? "" : "Archive unavailable" }
+            return { visible: downloadVisible, enabled: eligible, reason: eligible ? "" : "Archive unavailable" }
         }
         function enqueueCatchupDownload(channel, program, destination) {
             ++requests
@@ -99,6 +100,7 @@ TestCase {
         downloads.cancelled = ""
         downloads.restarted = ""
         app.eligible = true
+        app.downloadVisible = true
         app.requests = 0
         app.enqueueError = ""
     }
@@ -134,6 +136,14 @@ TestCase {
         ui.requestDownload({id: 1}, {start: "2026-09-01", title: "Old programme"})
         compare(ui.choosingFile, false)
         compare(ui.notice, "Archive unavailable")
+        compare(app.requests, 0)
+    }
+    function test_ongoing_programme_ignores_download_request() {
+        app.downloadVisible = false
+        app.eligible = false
+        ui.requestDownload({id: 1}, {start: "2026-09-01", title: "Ongoing programme"})
+        compare(ui.choosingFile, false)
+        compare(ui.notice, "")
         compare(app.requests, 0)
     }
     function test_missing_selection() {

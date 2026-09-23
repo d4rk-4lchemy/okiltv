@@ -1715,6 +1715,8 @@ QVariantMap AppController::catchupActionState(const QVariantMap &channel, const 
 
 QVariantMap AppController::catchupDownloadActionState(const QVariantMap &channel, const QVariantMap &program) const
 {
+    const auto stop = parseIsoUtc(program.value(QStringLiteral("stop")).toString());
+    const bool visible = stop.isValid() && stop <= QDateTime::currentDateTimeUtc();
     const auto validation = validateCatchupRequest(m_settings, m_settings->current(), m_channelListModel, channel, program);
     QString reason = validation.reason;
     if (validation.enabled) {
@@ -1736,7 +1738,8 @@ QVariantMap AppController::catchupDownloadActionState(const QVariantMap &channel
             }
         }
     }
-    return {{QStringLiteral("enabled"), validation.enabled && reason.isEmpty()},
+    return {{QStringLiteral("visible"), visible},
+            {QStringLiteral("enabled"), validation.enabled && reason.isEmpty()},
             {QStringLiteral("reason"), reason}};
 }
 

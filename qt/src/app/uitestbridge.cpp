@@ -1105,6 +1105,9 @@ QJsonArray UiTestBridge::buildVisibleTextInventory() const
                 if (object->metaObject()->indexOfProperty("hovered") >= 0) {
                     record.insert(QStringLiteral("hovered"), object->property("hovered").toBool());
                 }
+                if (object->metaObject()->indexOfProperty("pinned") >= 0) {
+                    record.insert(QStringLiteral("pinned"), object->property("pinned").toBool());
+                }
                 const auto scenePosition = item->mapToScene(QPointF(0.0, 0.0));
                 record.insert(
                     QStringLiteral("bounds"),

@@ -329,7 +329,9 @@ target_include_directories(OKILTVQtDownloadTests PRIVATE ${CMAKE_CURRENT_SOURCE_
 target_compile_definitions(OKILTVQtDownloadTests PRIVATE OKILTV_SECURITY_TESTS)
 target_link_libraries(OKILTVQtDownloadTests PRIVATE Qt6::Widgets Qt6::Core Qt6::Network Qt6::Sql Qt6::Test ${OKILTV_SECRET_LIB})
 add_test(NAME OKILTVQtDownloadTests COMMAND OKILTVQtDownloadTests)
-set_tests_properties(OKILTVQtDownloadTests PROPERTIES LABELS app TIMEOUT 600
+# Real 10/30-second retry cooldowns and the 60-second stall case put this suite
+# near nine minutes locally. Leave room for slower hosted runners.
+set_tests_properties(OKILTVQtDownloadTests PROPERTIES LABELS app TIMEOUT 900
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;OKILTV_HEADLESS_TEST=1")
 
 if (NOT CMAKE_CROSSCOMPILING AND OKILTV_QMLTESTRUNNER)

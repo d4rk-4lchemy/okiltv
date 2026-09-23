@@ -62,6 +62,8 @@ Item {
             return
         }
         const state = root.app.catchupDownloadActionState(channel, program)
+        if (!state.visible)
+            return
         if (!state.enabled) {
             root.showNotice(state.reason || "This programme cannot be downloaded.")
             return

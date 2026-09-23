@@ -93,6 +93,7 @@ Item {
     property bool initialChannelPending: false
     property int initialPreferredChannelId: -1
     property var selectedCatchupState: ({ "visible": false, "enabled": false, "reason": "" })
+    property var selectedDownloadState: ({ "visible": false, "enabled": false, "reason": "" })
     property int selectedDetailRowIndex: {
         const _timeSlotsRevision = root.epgGrid.timeSlots.length
         return root.epgGrid.rowIndexForChannelId(root.guideState.selectedChannelId)
@@ -570,6 +571,9 @@ Item {
         root.selectedCatchupState = root.app.catchupActionState(
             root.guideState.selectedChannel || ({}),
             root.selectedCatchupProgramData() || ({}))
+        root.selectedDownloadState = root.app.catchupDownloadActionState(
+            root.guideState.selectedChannel || ({}),
+            root.selectedProgramData() || ({}))
     }
 
     function resumeTimeLabel() {
@@ -1381,6 +1385,7 @@ Item {
 
                                             IconActionButton {
                                                 objectName: "ui.guide.download"
+                                                visible: root.selectedDownloadState.visible
                                                 compact: true
                                                 borderless: true
                                                 barMode: true

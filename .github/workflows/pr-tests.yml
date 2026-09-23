@@ -24,7 +24,7 @@ jobs:
           - group: core
             targets: OKILTVQtCoreTests OKILTVQtDatabaseStartupTests
           - group: app
-            targets: OKILTVQtAppTests
+            targets: OKILTVQtAppTests OKILTVQtDownloadTests
           - group: playback
             targets: OKILTVQtPlaybackTests OKILTVQtCatchupTests
           - group: qml

@@ -104,11 +104,9 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends \
             libmpv2 libsecret-1-0 ffmpeg imagemagick patchelf desktop-file-utils
-      - name: Build and test Linux
+      - name: Build Linux application
         if: matrix.platform == 'linux'
-        run: |
-          bash ./build_linux.sh
-          ctest --test-dir qt/out/build/qt-linux-release --output-on-failure --no-tests=error --timeout 600
+        run: bash ./build_linux.sh
       - name: Package Linux AppImage
         if: matrix.platform == 'linux'
         run: |
