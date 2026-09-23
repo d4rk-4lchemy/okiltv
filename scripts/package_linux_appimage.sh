@@ -56,6 +56,10 @@ rm -rf "$plugin_dir"
 cp -a "$qt_root/plugins" "$plugin_dir"
 find "$plugin_dir/sqldrivers" -type f ! -name libqsqlite.so -delete
 test -f "$plugin_dir/sqldrivers/libqsqlite.so"
+# Qt's optional TIFF plugin needs libtiff.so.5, unavailable on Ubuntu 24.04
+# (which ships libtiff.so.6). Omit TIFF from the AppImage; keep the other image
+# plugins, including WebP and SVG. Filter only this private copy of the SDK.
+rm -f "$plugin_dir/imageformats/libqtiff.so"
 install -m 0755 "$repo_root/scripts/ci/qmake_appimage.sh" "$stage_parent/qmake-appimage"
 
 export PATH="$tools_dir:$qt_root/bin:$PATH"
