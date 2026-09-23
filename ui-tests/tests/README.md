@@ -10,6 +10,7 @@ account, private capture or repository secret is needed.
 | `07-guide-groups.py` | Selected groups, empty groups and Guide navigation |
 | `08-stationary-pointer-navigation.py` | Keyboard scrolling under a stationary pointer |
 | `08-ui-transparency.py` | Preview, keyboard/drag changes, Save/discard and playback preservation |
+| `09-catchup-download.py` | Guide/right-pane downloads, pause/resume, filenames and partial archives |
 
 Configure and run the group:
 
@@ -40,8 +41,9 @@ Wait for overlay visibility/geometry and the effective `enabled` state before
 pointer input; the Settings test also waits for `hovered` to confirm pointer
 delivery to `ui.live.settingsButton`. The application
 intentionally ignores input during slide animations; fixed sleeps alone do not
-establish that a control is ready.
+establish that a control is ready. The channel-selection helper repeats real mouse
+movement while waiting, because movement during auto-hide animations is ignored.
 
 ## Catch-up download regression
 
-`09-catchup-download.py` uses generated local media and XMLTV to check `Ctrl+D` from Guide and the right EPG pane, cancelling the Save File dialog, title-based MKV output, filename collisions, preservation of incomplete archives as `.partial.mkv` and cancellation cleanup. Requires ffmpeg/ffprobe and the existing Xvfb/Openbox/xdotool stack. Run through `scripts/ci/run_ui_test.sh` for an isolated Secret Service session.
+`09-catchup-download.py` uses generated local media and XMLTV to check `Ctrl+D` from Guide and the right EPG pane, cancelling the Save File dialog, channel/date/time/title MKV filenames using explicit saved date/time settings, filename collisions, preservation of incomplete archives as `.partial.mkv` and cancellation cleanup. Requires ffmpeg/ffprobe and the existing Xvfb/Openbox/xdotool stack. Run through `scripts/ci/run_ui_test.sh` for an isolated Secret Service session.

@@ -12381,12 +12381,18 @@ void AppModelTests::catchupDownloadValidation()
     program.start = QDateTime::currentDateTimeUtc().addSecs(-3600);
     program.stop = program.start.addSecs(600);
     auto state = [&] { return harness.appController->catchupDownloadActionState(toVariantMap(channel), toVariantMap(program)); };
+    QVERIFY(state().value(QStringLiteral("visible")).toBool());
     QVERIFY(state().value(QStringLiteral("enabled")).toBool());
     const auto stop = program.stop;
     program.stop = QDateTime::currentDateTimeUtc().addSecs(-30);
+    QVERIFY(state().value(QStringLiteral("visible")).toBool());
     QVERIFY(!state().value(QStringLiteral("enabled")).toBool());
     program.stop = QDateTime::currentDateTimeUtc().addSecs(60);
+    QVERIFY(!state().value(QStringLiteral("visible")).toBool());
     QVERIFY(!state().value(QStringLiteral("enabled")).toBool());
+    QVERIFY(!harness.appController->enqueueCatchupDownload(toVariantMap(channel), toVariantMap(program),
+        QUrl::fromLocalFile(harness.tempDir.filePath(QStringLiteral("ongoing.mkv")))).isEmpty());
+    QCOMPARE(harness.appController->downloadController()->rowCount(), 0);
     program.stop = stop;
     program.channelId = QStringLiteral("wrong-channel");
     QVERIFY(!state().value(QStringLiteral("enabled")).toBool());

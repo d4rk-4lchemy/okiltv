@@ -8,10 +8,10 @@ same PR; a failed group does not cancel other groups.
 | Job group | Coverage |
 | --- | --- |
 | `core` | Services, settings, database and database startup |
-| `app` | Controllers, models and real libmpv integration |
+| `app` | Controllers, models, archive downloads and real libmpv integration |
 | `playback` | Playback decisions and synthetic catch-up transport |
-| `qml` | Four component suites using qmltestrunner |
-| `ui` | Five local-media scenarios on Xvfb/Openbox |
+| `qml` | Five component suites using qmltestrunner |
+| `ui` | Six local-media scenarios on Xvfb/Openbox |
 | `windows` | Native Windows process ownership, cleanup and DVR reconciliation |
 
 Linux jobs use CTest labels and build only their required targets. CTest verbose
@@ -42,6 +42,9 @@ and verifies the required CI files before staging the clean checkout.
 `.github/workflows/release.yml` builds Windows x64 (NSIS installer and portable
 ZIP) and Linux x86_64 (AppImage) on Ubuntu 24.04. Windows uses the existing
 MinGW/Wine scripts; both SDKs use the Qt version in `dependencies.env`.
+Release builds compile only the application and do not run tests; test execution
+belongs to `pr-tests.yml`. The Linux Release preset disables test targets, and
+`build_linux.sh` explicitly builds `OKILTVQt` even with an older build cache.
 
 ## One-time setup
 
@@ -71,8 +74,8 @@ dependency asset in the same repository. Downloads use the built-in
 3. Publish a GitHub Release for that tag. Publishing a pre-release also works;
    saving a draft or pushing a tag alone does not start this workflow.
 
-The workflow checks that the tag matches CMake, builds both platforms, runs
-the Linux test suite and checks AppDir libraries/plugins, including the dynamic
+The workflow checks that the tag matches CMake, builds both platforms and
+checks AppDir libraries/plugins, including the dynamic
 libmpv and libsecret ABI. Only after both jobs succeed does it attach:
 
 - `OKILTV-qt-win-x64-<version>.zip`

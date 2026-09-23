@@ -48,7 +48,8 @@
       "inherits": "qt-linux-base",
       "displayName": "Qt Linux Release",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_BUILD_TYPE": "Release",
+        "OKILTV_BUILD_TESTS": "OFF"
       }
     },
     {

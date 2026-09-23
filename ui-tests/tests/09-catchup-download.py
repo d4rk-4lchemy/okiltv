@@ -32,6 +32,7 @@ class LocalRunner(module.Runner):
         now = dt.datetime.now(dt.timezone.utc)
         stamp = lambda value: value.strftime("%Y%m%d%H%M%S +0000")
         start = now - dt.timedelta(minutes=10)
+        self.archive_start = start
         (self.run_dir / "epg.xml").write_text(
             '<tv><channel id="fixture"><display-name>Fixture</display-name></channel>'
             f'<programme channel="fixture" start="{stamp(start - dt.timedelta(minutes=10))}" '
@@ -43,6 +44,7 @@ class LocalRunner(module.Runner):
             f'stop="{stamp(now + dt.timedelta(hours=1))}"><title>Current fixture</title></programme></tv>')
         profile = "11111111-1111-1111-1111-111111111111"
         settings = {"activeProfileId": profile,
+                    "dateOrder": "dmy", "timeFormat": "24h",
                     "profiles": [{"id": profile, "name": "Archive fixture", "type": 2,
                                   "m3UFilePath": str(playlist), "isActive": True,
                                   "xmltvUrl": f"http://127.0.0.1:{self.http_port}/epg.xml"}],
@@ -83,6 +85,12 @@ def main():
     runner.http_port = server.server_port
     threading.Thread(target=server.serve_forever, daemon=True).start()
     checks = []
+
+    def destination_for(title, start):
+        # The suggested name includes channel and local programme time. Fix the
+        # saved format above so this assertion is independent of the CI locale.
+        stamp = start.astimezone().strftime("%d-%m-%Y %H_%M")
+        return runner.run_dir / f"Fixture - {stamp} - {title}.mkv"
 
     def wait(label, predicate, timeout=15):
         deadline = time.monotonic() + timeout
@@ -159,7 +167,7 @@ def main():
         key("ctrl+d")
         await_dialog()
         key("Return", False)
-        destination = runner.run_dir / "Archived fixture.mkv"
+        destination = destination_for("Archived fixture", runner.archive_start)
         wait("archive transfer has started", lambda s: transfer_waiting.is_set())
         runner.xdotool("windowactivate", "--sync", runner.window_id)
         key("Escape")
@@ -198,16 +206,18 @@ def main():
         key("ctrl+d")
         await_dialog()
         key("Return", False)
-        wait("right EPG download uses a unique filename", lambda s: (runner.run_dir / "Archived fixture (2).mkv").exists(), 25)
+        duplicate = destination.with_stem(destination.stem + " (2)")
+        wait("right EPG download uses a unique filename", lambda s: duplicate.exists(), 25)
         wait("completion notification visible", lambda s: any("Download complete" in i.get("text", "") for i in s["inventory"]))
         runner.xdotool("windowactivate", "--sync", runner.window_id)
         key("Up")
         key("ctrl+d")
         await_dialog()
         key("Return", False)
-        partial = runner.run_dir / "Partial fixture.partial.mkv"
+        incomplete = destination_for("Partial fixture", runner.archive_start - dt.timedelta(minutes=10))
+        partial = incomplete.with_suffix(".partial.mkv")
         wait("incomplete archive is preserved", lambda s: partial.exists() and partial.stat().st_size > 0, 25)
-        assert not (runner.run_dir / "Partial fixture.mkv").exists()
+        assert not incomplete.exists()
         wait("failure notification identifies retained data", lambda s: any("Incomplete data retained" in i.get("text", "") for i in s["inventory"]))
         assert not list(runner.run_dir.glob(".okiltv-download-*"))
         checks.append("no unlabelled temporary files left")
