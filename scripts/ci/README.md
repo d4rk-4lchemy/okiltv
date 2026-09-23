@@ -100,6 +100,11 @@ build-draft-then-publish flow would be needed.
   Explicit library inputs are necessary because mpv and libsecret are loaded
   dynamically. It targets Ubuntu 24.04 or a compatible/newer x86_64 system;
   compatibility with older distributions is not promised.
+- The private Qt plugin staging tree keeps only SQLite among SQL drivers and
+  excludes the optional TIFF image plugin: the Qt SDK build requires
+  `libtiff.so.5`, while Ubuntu 24.04 supplies `libtiff.so.6`. TIFF images are
+  therefore unsupported in the AppImage; other image plugins, including WebP
+  and SVG, are retained. The installed SDK is not modified.
 - A running desktop Secret Service/keyring, graphics drivers and an audio
   service remain host requirements. FFmpeg/ffprobe command-line tools used for
   recording and timeshift remain external dependencies, as in existing builds.
