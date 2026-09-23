@@ -43,6 +43,12 @@ delivery to `ui.live.settingsButton`. The application
 intentionally ignores input during slide animations; fixed sleeps alone do not
 establish that a control is ready. The channel-selection helper repeats real mouse
 movement while waiting, because movement during auto-hide animations is ignored.
+Channel targeting uses the rendered `ui.live.channelName.<id>` bounds and waits
+for that row to be enabled, hovered and selected. Pinning steps additionally wait
+for the actual `pinned` state after the click, so a missed click cannot silently
+pass as hover selection. Picker rows are targeted by rendered labels. Timeout
+errors include selected/playing channel IDs and hovered/pinned rows; the full
+state is also retained in `failure.json`.
 
 ## Catch-up download regression
 

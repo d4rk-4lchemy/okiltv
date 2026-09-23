@@ -5228,6 +5228,7 @@ Item {
                     }
 
                     delegate: Rectangle {
+                        id: liveChannelRow
                         property int channelId: model.id
                         property string channelName: model.name
                         property bool channelCatchupSupported: model.catchupSupported
@@ -5285,6 +5286,10 @@ Item {
 
                                     Text {
                                         id: liveChannelName
+                                        objectName: "ui.live.channelName." + liveChannelRow.channelId
+                                        readonly property bool hovered: liveChannelRow.rowHovered
+                                        readonly property bool pinned: root.mousePinnedChannelId === liveChannelRow.channelId
+                                            && root.mousePinnedProfileId === root.channelList.activeProfileId
                                         anchors.verticalCenter: parent.verticalCenter
                                         width: Math.min(implicitWidth, Math.max(0, parent.width - (channelCatchupSupported ? 22 : 0)))
                                         text: channelName

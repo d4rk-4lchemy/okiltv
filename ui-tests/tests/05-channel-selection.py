@@ -95,7 +95,12 @@ def main():
                 return state
             time.sleep(.1)
         runner.save_state_snapshot("failure", state)
-        raise AssertionError(label)
+        rows = [i for i in state["inventory"]
+                if i["objectName"].startswith("ui.live.channelName.")]
+        hovered = [i["text"] for i in rows if i.get("hovered", False)]
+        pinned = [i["text"] for i in rows if i.get("pinned", False)]
+        raise AssertionError(f"{label}; selected={selected(state)}, playing={playing(state)}, "
+                             f"hovered={hovered}, pinned={pinned}")
 
     def key(value):
         runner.xdotool("key", "--window", runner.window_id, value)
@@ -105,6 +110,16 @@ def main():
         runner.xdotool("mousemove", "--window", runner.window_id, str(round(x)), str(round(y)))
         time.sleep(.3)
 
+    def channel_item(state, number):
+        return next((i for i in state["inventory"]
+                     if i["objectName"] == f"ui.live.channelName.{number - 1}"), None)
+
+    def point_at_item(item, attempt):
+        bounds = item["bounds"]
+        runner.xdotool("mousemove", "--window", runner.window_id,
+                       str(round(bounds["x"] + bounds["width"] / 2) + attempt % 2),
+                       str(round(bounds["y"] + bounds["height"] / 2)))
+
     def row(number):
         # Auto-hide can begin after any snapshot. Movement during that animation
         # is deliberately ignored, so keep delivering real movement until the
@@ -113,22 +128,42 @@ def main():
 
         def ready(state):
             nonlocal attempt
-            bounds = next(r for r in state["regions"] if r["name"] == "left_pane")
-            y = bounds["y"] + 16 + 42 + 8 + 31 + (number - 1) * 64
-            runner.xdotool("mousemove", "--window", runner.window_id,
-                           str(100 + attempt % 2), str(round(y)))
+            item = channel_item(state, number)
+            if item and item.get("enabled", False) and visible(state):
+                # Follow the rendered row when window chrome or layout changes.
+                point_at_item(item, attempt)
+            else:
+                runner.xdotool("mousemove", "--window", runner.window_id,
+                               str(100 + attempt % 2), "200")
             attempt += 1
-            return visible(state) and any(
-                i.get("enabled", False) and 0 <= i.get("bounds", {}).get("x", -1) < 340
-                and bounds["y"] <= i["bounds"]["y"] < bounds["y"] + bounds["height"]
-                for i in state["inventory"])
+            return (visible(state) and item and item.get("enabled", False)
+                    and item.get("hovered", False) and selected(state) == number - 1)
 
-        state = wait("left panel accepts pointer input", ready)
-        bounds = next(r for r in state["regions"] if r["name"] == "left_pane")
-        y = bounds["y"] + 16 + 42 + 8 + 31 + (number - 1) * 64
-        # Reapply hover after the transition; the first move may have reached
-        # a disabled delegate and therefore could not preview the channel.
-        move(102, y)
+        wait(f"pointer previews channel {number}", ready)
+
+    def pin(number):
+        row(number)
+        click()
+        wait(f"click pins channel {number}", lambda s:
+             channel_item(s, number) is not None
+             and channel_item(s, number).get("pinned", False)
+             and selected(s) == number - 1)
+
+    def picker_row(text):
+        attempt = 0
+
+        def ready(state):
+            nonlocal attempt
+            item = next((i for i in state["inventory"] if i["text"] == text
+                         and 0 <= i.get("bounds", {}).get("x", -1) < 340
+                         and i.get("enabled", False)), None)
+            if not item:
+                return False
+            point_at_item(item, attempt)
+            attempt += 1
+            return True
+
+        wait("picker row accepts pointer input: " + text, ready)
 
     def outside():
         move(710, 450)
@@ -161,8 +196,7 @@ def main():
         wait("hover previews B without tuning", lambda s: selected(s) == 1 and playing(s) == 0 and epg(s, 2), 30)
         outside()
         wait("unpin exit restores A", lambda s: selected(s) == 0 and epg(s, 1))
-        row(2)
-        click()
+        pin(2)
         row(3)
         wait("pinned B permits temporary C", lambda s: selected(s) == 2 and playing(s) == 0)
         pane = next(r for r in runner.read_state()["regions"] if r["name"] == "left_pane")
@@ -172,8 +206,7 @@ def main():
         wait("exit restores pinned B", lambda s: selected(s) == 1 and epg(s, 2))
         time.sleep(3)
         wait("click locks auto-hide", lambda s: visible(s) and playing(s) == 0)
-        row(2)
-        click()
+        pin(2)
         wait("separated second click does not tune", lambda s: playing(s) == 0)
         activation_count = (runner.run_dir / "app.log").read_text().count("Activating channel Fixture 02")
         click(2)
@@ -182,14 +215,12 @@ def main():
         assert (runner.run_dir / "app.log").read_text().count("Activating channel Fixture 02") == activation_count + 1
         checks.append("double click activates exactly once")
         outside()
-        row(1)
-        click()
+        pin(1)
         row(3)
         key("Return")
         wait("Enter tunes hovered C and closes", lambda s: playing(s) == 2 and not visible(s))
         outside()
-        row(2)
-        click()
+        pin(2)
         row(1)
         key("ctrl+Up")
         wait("Guide receives pinned B", lambda s: element(s, "guide.selection")["value"]["selectedChannel"].get("id") == 1)
@@ -209,8 +240,7 @@ def main():
         time.sleep(3)
         wait("Guide cleared auto-hide lock", lambda s: not visible(s))
         outside()
-        row(2)
-        click()
+        pin(2)
         state = runner.read_state()
         settings_bounds = next(i["bounds"] for i in state["inventory"] if i["text"] == "Settings" and i["property"] == "caption")
         move(settings_bounds["x"] + settings_bounds["width"] / 2,
@@ -226,8 +256,7 @@ def main():
         key("Return")
         wait("keyboard-only activation", lambda s: playing(s) == 1 and not visible(s))
         outside()
-        row(3)
-        click()
+        pin(3)
         runner.xdotool("click", "--repeat", "5", "--delay", "10", "5")
         runner.xdotool("mousemove", "--window", runner.window_id, "700", "450")
         time.sleep(.6)
@@ -252,10 +281,9 @@ def main():
         wait("PiP close preserves primary", lambda s: playing(s) == 2)
         key("Escape")
         outside()
-        row(2)
-        click()
+        pin(2)
         key("ctrl+s")
-        row(2)  # Source picker uses the same search/row geometry.
+        picker_row("Second local fixture")
         click()
         wait("source switch with overlapping channel IDs", lambda s:
              "22222222" in s["playback"]["currentChannel"].get("profileId", ""), 20)
@@ -272,7 +300,7 @@ def main():
         key("ctrl+g")
         runner.xdotool("type", "--window", runner.window_id, "Fixture")
         time.sleep(.3)
-        row(1)
+        picker_row("Fixture")
         click()
         wait("group picker still confirms with one click", lambda s: playing(s) == 1 and any(
             i["text"] == "Search channels" and 0 <= i.get("bounds", {}).get("x", -1) < 340
