@@ -500,11 +500,11 @@ AppController::AppController(
         m_observedCatchupSession = {};
         m_dvrController->setPlayerController(m_playerController);
         m_timeshiftController->setPlayerController(m_playerController);
-        m_playbackNowNextModel->setChannel(m_playerController->currentChannelValue());
+        m_playbackNowNextModel->setChannel(m_multiViewController->focusedController()->currentChannelValue());
         beginWatchTrackingForCurrentChannel();
     });
-    connect(m_multiViewController, &MultiViewController::primaryPlaybackChanged, this, [this]() {
-        m_playbackNowNextModel->setChannel(m_playerController->currentChannelValue());
+    connect(m_multiViewController, &MultiViewController::focusedPlaybackChanged, this, [this]() {
+        m_playbackNowNextModel->setChannel(m_multiViewController->focusedController()->currentChannelValue());
     });
     m_catchupProgressFlushTimer.start(10000);
     connect(m_playbackNowNextModel, &NowNextModel::dataChanged, this, [this]() {

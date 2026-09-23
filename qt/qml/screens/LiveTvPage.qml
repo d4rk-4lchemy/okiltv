@@ -7,6 +7,7 @@ import "../theme/Theme.js" as Theme
 
 Item {
     id: root
+    objectName: "ui.live.page"
 
     // qmllint disable unqualified
     property int uiTransparency: (typeof settingsController !== "undefined") ? settingsController.uiTransparency : 100
@@ -26,7 +27,8 @@ Item {
     readonly property var settings: settingsController
     readonly property var dateTime: dateTimeFormatter
     readonly property var app: appController
-    readonly property var player: multiViewController.primaryController
+    readonly property var primaryPlayer: multiViewController.primaryController
+    readonly property var player: multiViewController.focusedController
     readonly property var channelList: channelListModel
     readonly property var guideState: guideStateModel
     readonly property var nowNext: nowNextModel
@@ -47,8 +49,8 @@ Item {
             || root.player.isBuffering
             || root.player.timeshiftPreparing)
         && root.hasPlaybackChannel
-    property bool showChannelSwitchBlackout: root.player.channelSwitchInProgress
-        && root.hasPlaybackChannel
+    property bool showChannelSwitchBlackout: root.primaryPlayer.channelSwitchInProgress
+        && root.primaryPlayer.currentChannel.id !== undefined
     property bool showChannelLoadError: root.player.channelLoadFailed
         && root.hasPlaybackChannel
         && !root.showPlaybackSpinner
@@ -237,6 +239,18 @@ Item {
     property bool keyboardModeLocked: false
     property int keyboardNavigationCandidateCount: 0
     property string playerKeyboardFocusArea: "none"
+    readonly property bool multiviewSelectionAvailable: root.multiviewGridActive
+        && root.shell.activeOverlay === "none" && !root.guideOverlayMounted
+        && !root.leftPickerOpen && !root.searchFieldActive
+        && !root.multiView.degradePromptVisible
+        && root.mainWindow && root.mainWindow.active
+        && root.mainWindow.overlayShortcutsEnabled
+    readonly property int multiviewFocusedIndex: root.multiView.focusedTileIndex
+    readonly property string multiviewMode: root.multiView.layoutMode
+    onMultiviewSelectionAvailableChanged: {
+        if (!root.multiviewSelectionAvailable)
+            root.cancelMultiviewSelection()
+    }
     property bool multiviewSelectionMode: false
     property int multiviewSelectionIndex: 0
     property bool pendingEmptyPipAssignment: false
@@ -401,9 +415,9 @@ Item {
         && root.playbackChannelId >= 0
         && root.channelList.selectedChannelId === root.playbackChannelId
     readonly property bool sideUsesBrowseModel: root.browsePreviewActive
-        || (!root.hasPlaybackChannel && root.hasSelectedChannel)
+        || (!root.multiviewActive && !root.hasPlaybackChannel && root.hasSelectedChannel)
         || (!root.playbackEpgAvailable && root.browseEpgAvailable
-            && (root.selectedMatchesPlayback || (!root.hasPlaybackChannel && root.hasSelectedChannel)))
+            && (root.selectedMatchesPlayback || (!root.multiviewActive && !root.hasPlaybackChannel && root.hasSelectedChannel)))
     property var sideNowNextModel: root.sideUsesBrowseModel
         ? root.nowNext
         : root.playbackNowNext
@@ -515,7 +529,10 @@ Item {
     function handleStopPlaybackAction() {
         const handledByRetainedMultiview = root.multiView.stopRetainedPromotedAndRestoreGrid()
         if (!handledByRetainedMultiview) {
-            root.player.stop()
+            if (root.multiView.layoutMode === "pip" && root.multiView.focusedTileIndex > 0)
+                root.multiView.closeFocusedTile()
+            else
+                root.player.stop()
         }
         root.revealUi("pointer")
     }
@@ -544,7 +561,7 @@ Item {
                 return root.multiView.fullPromoteAndExit()
             }
             if (shiftPressed) {
-                return root.setMultiviewSelectionMode(!root.multiviewSelectionMode)
+                return false
             }
             return root.multiView.toggleGrid()
         }
@@ -633,47 +650,35 @@ Item {
         if (Boolean(tileData.isPrimary)) {
             return "Select a channel"
         }
-        return "Ctrl+Shift+O, arrows, Enter"
+        return "Hold Ctrl + arrows, release Ctrl to select"
     }
 
-    function multiviewSelectionColumns() {
-        if (root.multiviewGridActive) {
-            return Math.max(1, Number(root.multiView.layoutColumns || 1))
-        }
-        if (root.multiviewActive && root.multiView.layoutMode === "pip" && root.multiviewVisibleSlots > 1) {
-            return 2
-        }
-        return 1
-    }
-
-    function setMultiviewSelectionMode(enabled) {
-        const next = Boolean(enabled) && root.multiviewActive && root.multiviewVisibleSlots > 0
-        if (next) {
-            if (root.shell.activeOverlay !== "none"
-                || root.leftPickerOpen
-                || searchField.activeFocus) {
-                return false
-            }
-            clearKeyboardNavigationCandidate()
-            root.keyboardModeLocked = false
-            root.setPlayerKeyboardFocusArea("none")
-            root.overlayInteractionSource = "none"
-            root.shell.overlaysVisible = false
-            interactionFocusTarget.forceActiveFocus()
-            const focused = Number(root.multiView.focusedTileIndex || 0)
-            root.multiviewSelectionMode = true
-            root.multiviewSelectionIndex = Math.max(0, Math.min(root.multiviewVisibleSlots - 1, focused))
-            root.updateAutoHide()
-            return true
-        }
-
-        root.multiviewSelectionMode = next
+    function cancelMultiviewSelection() {
+        if (!root.multiviewSelectionMode)
+            return
+        root.multiviewSelectionMode = false
         root.multiviewSelectionIndex = 0
+        root.updateAutoHide()
+    }
+
+    function isMultiviewArrow(event) {
+        return event.modifiers === Qt.ControlModifier
+            && (event.key === Qt.Key_Left || event.key === Qt.Key_Right
+                || event.key === Qt.Key_Up || event.key === Qt.Key_Down)
+    }
+
+    function beginMultiviewSelection() {
+        if (!root.multiviewSelectionAvailable || root.multiviewVisibleSlots <= 0)
+            return false
         clearKeyboardNavigationCandidate()
         root.keyboardModeLocked = false
         root.setPlayerKeyboardFocusArea("none")
         root.overlayInteractionSource = "none"
+        root.shell.overlaysVisible = false
         interactionFocusTarget.forceActiveFocus()
+        const focused = Number(root.multiView.focusedTileIndex || 0)
+        root.multiviewSelectionMode = true
+        root.multiviewSelectionIndex = Math.max(0, Math.min(root.multiviewVisibleSlots - 1, focused))
         root.updateAutoHide()
         return true
     }
@@ -683,7 +688,7 @@ Item {
             return false
         }
         const count = root.multiviewVisibleSlots
-        const columns = Math.max(1, root.multiviewSelectionColumns())
+        const columns = Math.max(1, Number(root.multiView.layoutColumns || 1))
         const rows = Math.max(1, Math.ceil(count / columns))
         let currentIndex = Math.max(0, Math.min(count - 1, root.multiviewSelectionIndex))
         let row = Math.floor(currentIndex / columns)
@@ -706,12 +711,12 @@ Item {
         }
         const count = root.multiviewVisibleSlots
         if (count <= 0) {
-            root.setMultiviewSelectionMode(false)
+            root.cancelMultiviewSelection()
             return false
         }
         const target = Math.max(0, Math.min(count - 1, root.multiviewSelectionIndex))
         root.multiView.focusTile(target)
-        root.setMultiviewSelectionMode(false)
+        root.cancelMultiviewSelection()
         return true
     }
 
@@ -867,6 +872,8 @@ Item {
     }
 
     function togglePauseWithBadge() {
+        if (!root.hasPlaybackChannel)
+            return
         if (!root.transportTimelineUsingLiveProgram
                 && root.transportSeekActive && root.hasPlaybackChannel && root.player.isPlaying) {
             root.markTimeshiftBadgeBehindLive()
@@ -1249,7 +1256,7 @@ Item {
     }
 
     function revealUi(source) {
-        if (root.pendingEmptyPipActive) {
+        if (root.pendingEmptyPipActive || root.multiviewSelectionMode) {
             return
         }
         if (source === "keyboard" || source === "pointer") {
@@ -1508,7 +1515,10 @@ Item {
             root.suppressSelectionInteraction = true
         }
 
-        const activated = root.channelList.activateRelative(delta)
+        const anchorId = root.hasPlaybackChannel ? root.playbackChannelId : root.channelList.selectedChannelId
+        const row = root.channelList.rowForChannelId(anchorId)
+        const nextRow = row < 0 ? 0 : Math.max(0, Math.min(root.channelList.filteredCount - 1, row + delta))
+        const activated = root.channelList.activateAt(nextRow)
         if (suppressBrowseReveal) {
             Qt.callLater(function() {
                 root.suppressSelectionInteraction = false
@@ -2478,7 +2488,7 @@ Item {
 
     function handleEscape() {
         if (root.multiviewSelectionMode) {
-            root.setMultiviewSelectionMode(false)
+            root.cancelMultiviewSelection()
             return true
         }
 
@@ -2748,7 +2758,9 @@ Item {
             return multiviewShortcutHandled
         }
 
-        if (root.multiviewSelectionMode) {
+        if (root.multiviewSelectionAvailable && root.isMultiviewArrow(event)) {
+            if (!root.multiviewSelectionMode && !root.beginMultiviewSelection())
+                return false
             switch (event.key) {
             case Qt.Key_Left:
                 return root.moveMultiviewSelection(0, -1)
@@ -2758,11 +2770,6 @@ Item {
                 return root.moveMultiviewSelection(-1, 0)
             case Qt.Key_Down:
                 return root.moveMultiviewSelection(1, 0)
-            case Qt.Key_Return:
-            case Qt.Key_Enter:
-                return root.commitMultiviewSelection()
-            default:
-                return false
             }
         }
 
@@ -2906,6 +2913,13 @@ Item {
     }
 
     function handleWindowKey(event) {
+        if (root.multiviewSelectionMode && !root.isMultiviewArrow(event)) {
+            if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                return true
+            root.cancelMultiviewSelection()
+            if (event.key === Qt.Key_Escape)
+                return true
+        }
         if (root.mainWindow && root.mainWindow.shortcutEnabled && !root.mainWindow.shortcutEnabled("always"))
             return false
         if (event.key === Qt.Key_D && event.modifiers === Qt.ControlModifier
@@ -3123,7 +3137,21 @@ Item {
 
     onKeyboardModeLockedChanged: root.updateAutoHide()
     onTransportTracksReadyChanged: root.refreshTransportTracks()
-    onPlayerChanged: Qt.callLater(root.refreshTransportTracks)
+    onPlayerChanged: Qt.callLater(root.refreshFocusedPlaybackContext)
+
+    function refreshFocusedPlaybackContext() {
+        root.clearMouseSelectionPin()
+        root.hoverPreviewActive = false
+        root.previewPinned = false
+        previewHoldTimer.stop()
+        root.committedChannelId = root.hasPlaybackChannel ? root.playbackChannelId : -1
+        root.restorePlaybackSelection()
+        root.scheduleSelectedChannelVisible(ListView.Center)
+        root.refreshTransportTracks()
+        root.refreshLiveCatchupState()
+        root.hideProgramHoverBubble()
+        root.markTimeshiftBadgeLive()
+    }
     onChromeAnimationsRunningChanged: Qt.callLater(root.focusSearchWhenReady)
     onHoverBubbleActiveChanged: root.updateAutoHide()
     onNumericEntryContextActiveChanged: {
@@ -3549,7 +3577,7 @@ Item {
                     anchors.fill: parent
                     visible: !Boolean(parent.tileData.isEmpty) && parent.visible
                     playerObject: Number(index) === 0
-                        ? root.player.playbackPlayerObject
+                        ? root.primaryPlayer.playbackPlayerObject
                         : parent.tileData.playerObject
                 }
 
@@ -3644,7 +3672,11 @@ Item {
                     anchors.fill: parent
                     enabled: root.multiviewActive
                     hoverEnabled: true
-                    onClicked: root.multiView.focusTile(index)
+                    onClicked: {
+                        root.cancelMultiviewSelection()
+                        root.multiView.focusTile(index)
+                        root.revealUi("pointer")
+                    }
                 }
             }
         }
@@ -3692,10 +3724,10 @@ Item {
         y: -2
         width: 1
         height: 1
-        visible: root.player.seamlessStandbyPrewarmActive
+        visible: root.primaryPlayer.seamlessStandbyPrewarmActive
         opacity: 0
         enabled: false
-        playerObject: root.player.seamlessStandbyPlayerObject
+        playerObject: root.primaryPlayer.seamlessStandbyPlayerObject
     }
 
     MpvVideoItem {
@@ -4417,6 +4449,31 @@ Item {
         id: interactionFocusTarget
         anchors.fill: parent
         focus: true
+        onActiveFocusChanged: {
+            if (!activeFocus)
+                root.cancelMultiviewSelection()
+        }
+        Keys.onPressed: function(event) {
+            if (!root.multiviewSelectionMode)
+                return
+            // Ctrl remains held during cancellation, so the plain Escape
+            // window shortcut does not match this event.
+            if (event.key === Qt.Key_Escape) {
+                root.cancelMultiviewSelection()
+                event.accepted = true
+            } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                event.accepted = true
+            }
+        }
+        Keys.onReleased: function(event) {
+            if (event.key === Qt.Key_Control && !event.isAutoRepeat && root.multiviewSelectionMode) {
+                if (root.multiviewSelectionAvailable)
+                    root.commitMultiviewSelection()
+                else
+                    root.cancelMultiviewSelection()
+                event.accepted = true
+            }
+        }
     }
 
     HoverHandler {
@@ -4441,8 +4498,15 @@ Item {
         anchors.fill: parent
         hoverEnabled: true
         acceptedButtons: Qt.AllButtons
+        propagateComposedEvents: root.multiviewActive
         cursorShape: (!root.showHoverUi && !root.pendingEmptyPipActive) ? Qt.BlankCursor : Qt.ArrowCursor
-        onClicked: root.revealUi("pointer")
+        onClicked: function(mouse) {
+            // The wake-up surface sits above the tile MouseAreas.
+            if (root.multiviewActive && mouse.button === Qt.LeftButton)
+                mouse.accepted = false
+            else
+                root.revealUi("pointer")
+        }
     }
 
     Item {
@@ -6199,6 +6263,7 @@ Item {
                     implicitHeight: bottomChrome.mediaButtonSize
                     iconInset: 1
                     iconSource: root.iconPath("previous-channel.svg")
+                    objectName: "ui.live.previousChannel"
                     caption: "Previous channel"
                     enabled: root.hasChannelList
                     onClicked: {
@@ -6215,6 +6280,7 @@ Item {
                     implicitHeight: bottomChrome.mediaButtonSize
                     iconInset: 1
                     iconSource: root.iconPath(root.hasPlaybackChannel && root.player.isPlaying ? "pause.svg" : "play.svg")
+                    objectName: "ui.live.playPause"
                     caption: root.hasPlaybackChannel && root.player.isPlaying ? "Pause" : "Play"
                     enabled: root.hasPlaybackChannel || root.hasSelectedChannel
                     onClicked: {
@@ -6234,6 +6300,7 @@ Item {
                     implicitHeight: bottomChrome.mediaButtonSize
                     iconInset: 1
                     iconSource: root.iconPath("stop.svg")
+                    objectName: "ui.live.stopPlayback"
                     caption: "Stop"
                     enabled: root.canStopPlaybackAction
                     onClicked: root.handleStopPlaybackAction()
@@ -6247,6 +6314,7 @@ Item {
                     implicitHeight: bottomChrome.mediaButtonSize
                     iconInset: 1
                     iconSource: root.iconPath("next-channel.svg")
+                    objectName: "ui.live.nextChannel"
                     caption: "Next channel"
                     enabled: root.hasChannelList
                     onClicked: {
@@ -6638,6 +6706,7 @@ Item {
         target: root.multiView
 
         function onLayoutModeChanged() {
+            root.cancelMultiviewSelection()
             if (root.multiviewActive) {
                 root.channelChangeBubbleVisible = false
             }
@@ -6646,11 +6715,6 @@ Item {
                 root.multiviewSelectionIndex = 0
                 root.pendingEmptyPipAssignment = false
                 return
-            }
-            if (root.multiviewSelectionMode) {
-                root.multiviewSelectionIndex = Math.max(
-                    0,
-                    Math.min(root.multiviewVisibleSlots - 1, root.multiviewSelectionIndex))
             }
             root.syncPendingEmptyPipAssignment()
         }
@@ -6968,7 +7032,7 @@ Item {
             Text {
                 id: selectionModePillText
                 anchors.centerIn: parent
-                text: "Select tile  Arrows / Enter / Esc"
+                text: "Hold Ctrl + arrows  Release Ctrl to select / Esc to cancel"
                 color: Theme.textPrimary
                 font.pixelSize: 13
                 font.bold: true
@@ -7006,8 +7070,8 @@ Item {
 
         MpvVideoItem {
             anchors.fill: parent
-            playerController: root.player
-            playerObject: root.player.playbackPlayerObject
+            playerController: root.primaryPlayer
+            playerObject: root.primaryPlayer.playbackPlayerObject
         }
     }
 

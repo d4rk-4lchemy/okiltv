@@ -292,7 +292,9 @@ if (OKILTV_BUILD_UI_TESTS)
         07-guide-groups
         08-stationary-pointer-navigation
         08-ui-transparency
-        09-catchup-download)
+        09-catchup-download
+        10-multiview-keyboard
+        11-multiview-controls)
         add_test(NAME "UI-${scenario}"
             COMMAND "${OKILTV_TEST_BASH}" "${CMAKE_SOURCE_DIR}/scripts/ci/run_ui_test.sh"
                 "${CMAKE_SOURCE_DIR}/ui-tests/tests/${scenario}.py"

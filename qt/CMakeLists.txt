@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(OKILTVQt VERSION 0.5.3 LANGUAGES CXX)
+project(OKILTVQt VERSION 0.5.4 LANGUAGES CXX)
 
 # Keep runtime identification independent of packaging metadata.  Core code also
 # uses this in tests, where QCoreApplication may not have an application version.

@@ -58,7 +58,6 @@ ApplicationWindow {
             { sequence: "Ctrl+F", key: Qt.Key_F, modifiers: Qt.ControlModifier, scope: "nonGuideOverlay" },
             { sequence: "Ctrl+O", key: Qt.Key_O, modifiers: Qt.ControlModifier, scope: "live" },
             { sequence: "Ctrl+Alt+O", key: Qt.Key_O, modifiers: Qt.ControlModifier | Qt.AltModifier, scope: "live" },
-            { sequence: "Ctrl+Shift+O", key: Qt.Key_O, modifiers: Qt.ControlModifier | Qt.ShiftModifier, scope: "live" },
             { sequence: "Ctrl+P", key: Qt.Key_P, modifiers: Qt.ControlModifier, scope: "live" },
             { sequence: "Ctrl+Shift+P", key: Qt.Key_P, modifiers: Qt.ControlModifier | Qt.ShiftModifier, scope: "live" },
             { sequence: "Ctrl+D", key: Qt.Key_D, modifiers: Qt.ControlModifier, scope: "download" },
@@ -66,7 +65,9 @@ ApplicationWindow {
             { sequence: "Ctrl+Return", key: Qt.Key_Return, modifiers: Qt.ControlModifier, scope: "guideOnly" },
             { sequence: "Ctrl+Enter", key: Qt.Key_Enter, modifiers: Qt.ControlModifier, scope: "guideOnly" },
             { sequence: "Ctrl+Up", key: Qt.Key_Up, modifiers: Qt.ControlModifier, scope: "overlay" },
-            { sequence: "Ctrl+Down", key: Qt.Key_Down, modifiers: Qt.ControlModifier, scope: "guideOnly" },
+            { sequence: "Ctrl+Down", key: Qt.Key_Down, modifiers: Qt.ControlModifier, scope: "guideOrGrid" },
+            { sequence: "Ctrl+Left", key: Qt.Key_Left, modifiers: Qt.ControlModifier, scope: "grid" },
+            { sequence: "Ctrl+Right", key: Qt.Key_Right, modifiers: Qt.ControlModifier, scope: "grid" },
             { sequence: "J", key: Qt.Key_J, scope: "live" },
             { sequence: "L", key: Qt.Key_L, scope: "live" },
             { sequence: "Home", key: Qt.Key_Home, scope: "live" },
@@ -185,6 +186,10 @@ ApplicationWindow {
     function shortcutEnabled(scope) {
         if (downloadUi.interactionActive || dvrExitDialog.visible || window.downloads.shuttingDown)
             return false
+        if (scope === "grid" || scope === "guideOrGrid") {
+            return livePage.multiviewSelectionAvailable
+                || (scope === "guideOrGrid" && window.shell.activeOverlay === "guide")
+        }
         if (scope === "always") {
             return true
         }

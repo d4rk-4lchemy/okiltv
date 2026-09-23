@@ -70,7 +70,7 @@ dependency asset in the same repository. Downloads use the built-in
 ## Publish an application release
 
 1. Set the application version in `qt/CMakeLists.txt` and synchronize the source.
-2. Create a tag `v<version>` on the synchronized commit, for example `v0.5.3`.
+2. Create a tag `v<version>` on the synchronized commit, for example `v0.5.0`.
 3. Publish a GitHub Release for that tag. Publishing a pre-release also works;
    saving a draft or pushing a tag alone does not start this workflow.
 

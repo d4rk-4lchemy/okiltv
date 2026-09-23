@@ -6,11 +6,10 @@
 
 <p align="center">
   A desktop <strong>IPTV player</strong> built with Qt and libmpv.<br/>
-  <small><em>No VOD support is planned for this app.</em></small><br/><br/>
-  Current version: <strong>0.5.3</strong>
+  <small><em>No VOD support is planned (yet) for this app.</em></small><br/><br/>
+  Current version: <strong>0.5.4</strong>
 </p>
 
-Builds and GitHub Release setup: [release workflow guide](scripts/ci/README.md).
 
 ## Features
 
@@ -28,17 +27,17 @@ Builds and GitHub Release setup: [release workflow guide](scripts/ci/README.md).
 
 ## Screenshots
 
-![Live TV main screen](docs/screenshots/01-live-tv-main.png)
+![Live TV main screen](docs/screenshots/01-live-tv-main.jpg)
 
-![Guide overlay](docs/screenshots/02-guide-overlay.png)
+![Guide overlay](docs/screenshots/02-guide-overlay.jpg)
 
-![Settings overlay](docs/screenshots/03-settings-overlay.png)
+![Settings overlay](docs/screenshots/03-settings-overlay.jpg)
 
-![Timeshift in action](docs/screenshots/04-timeshift-active.png)
+![Catch-up in action](docs/screenshots/04-catch-up-active.jpg)
 
-![Picture-in-Picture mode](docs/screenshots/05-pip-mode.png)
+![Picture-in-Picture mode](docs/screenshots/05-pip-mode.jpg)
 
-![Multiview grid](docs/screenshots/06-multiview-grid.png)
+![Multiview grid](docs/screenshots/06-multiview-grid.jpg)
 
 ## Installation
 
@@ -51,7 +50,7 @@ Expected Windows artifacts:
 
 _Windows SmartScreen may block the app on first run. Click **More info** → **Run anyway** to proceed._
 
-Default version comes from `qt/CMakeLists.txt` (currently `0.5.3`). Override by exporting `APP_VERSION` before packaging.
+Default version comes from `qt/CMakeLists.txt` (currently `0.5.4`). Override by exporting `APP_VERSION` before packaging.
 
 | Platform | Notes |
 |----------|-------|
@@ -168,13 +167,13 @@ Test binaries:
 | `Up` / `Down` | Prev/Next channel |
 | `Backspace` | Return to previously played channel |
 | `0-9` | Direct numeric tune (2s idle commit) |
-| `Ctrl+Up` | Open Guide |
+| `Ctrl+Up` | Select tile above in grid; otherwise open Guide |
 | `Ctrl+S` | Open source picker |
 | `Ctrl+G` | Open group picker |
 | `Ctrl+P` | Toggle PiP |
 | `Ctrl+Shift+P` | Swap primary and PiP |
 | `Ctrl+O` | Toggle multiview grid |
-| `Ctrl+Shift+O` | Toggle multiview tile-selection mode |
+| `Ctrl+Arrow` | Select grid tile while holding Ctrl; release Ctrl to confirm |
 | `Ctrl+Alt+O` | Fully exit multiview grid (if "Retain multiview" is enabled in Settings) |
 | `Ctrl+R` | DVR schedule toggle (programme) or manual recording fallback |
 | `Esc` | Stepwise close search/guide/overlay/fullscreen states |
@@ -209,10 +208,27 @@ Test binaries:
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+Shift+O` | Enter/exit selection mode |
-| Arrow keys | Move candidate border |
-| `Enter` | Commit selected tile as active focus |
-| `Esc` | Exit selection mode without changing active focus |
+| `Ctrl+Arrow` | Start grid selection on the first arrow; move orange candidate border with edge wrap |
+| Release `Ctrl` | Commit candidate as active tile and audio owner |
+| `Esc` | Cancel without changing active tile or audio |
+
+This gesture is grid-only; PiP tiles remain selectable with the mouse. Ctrl alone does nothing.
+Empty tiles remain selectable and held arrows repeat. Only Ctrl without Shift/Alt/Meta activates the gesture.
+Guide, Settings, search fields, pickers and dialogs retain their own keyboard handling.
+In ordinary Live panels the gesture takes priority over Ctrl+Up opening Guide and hides shell chrome.
+Selection keeps focus on `interactionFocusTarget`, shows a 3px orange candidate border and the
+“Hold Ctrl + arrows  Release Ctrl to select / Esc to cancel” hint. Audio changes only on commit.
+Enter is ignored while selecting. Window/focus loss, layout changes, opening a protected context,
+or another recognized shortcut cancel the candidate; cancellation never steals focus.
+Clicking a tile cancels the candidate before the normal mouse selection.
+The old Ctrl+Shift+O shortcut is removed.
+
+Transport controls, Space, channel stepping, and playback EPG follow the committed focused tile. Browsing other channels does not change the transport target. Empty tiles have no playback EPG; Space is a no-op. Focus changes preserve each stream and its pause state.
+
+Focus-border contract:
+- PiP shows no blue/orange focus border on either tile.
+- Grid focused tile uses a 2px blue border when not selecting.
+- Grid selection uses a 3px orange border on the candidate tile.
 
 ### Guide Overlay Keyboard
 

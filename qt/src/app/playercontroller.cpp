@@ -105,7 +105,6 @@ constexpr int kSoftReconnectWatchdogCooldownMs = 15000;
 constexpr int kCatchupSeekSettleMs = 3000;
 constexpr double kMinimumBufferSeconds = 0.1;
 constexpr double kMaximumBufferSeconds = 60.0;
-constexpr auto kPlaybackSignalsConnectedProperty = "_okiltvPlaybackSignalsConnected";
 constexpr double kCatchupActiveCacheHeadSeconds = 90.0;
 constexpr double kCatchupDebugEffectiveCacheMaxSeconds = kCatchupActiveCacheHeadSeconds;
 constexpr int kCatchupTimelineReloadAckTimeoutMs = 500;
@@ -472,11 +471,14 @@ void PlayerController::configurePlaybackTrackPreferences(Player::MpvPlayer *play
 
 void PlayerController::ensurePlaybackSignalConnections(Player::MpvPlayer *player)
 {
-    if (player == nullptr || player->property(kPlaybackSignalsConnectedProperty).toBool()) {
+    if (player == nullptr || m_playbackSignalSources.contains(player)) {
         return;
     }
 
-    player->setProperty(kPlaybackSignalsConnectedProperty, true);
+    m_playbackSignalSources.insert(player);
+    connect(player, &QObject::destroyed, this, [this, player]() {
+        m_playbackSignalSources.remove(player);
+    });
     connect(player, &Player::MpvPlayer::trackPreferenceChanged, this,
         [this](const QString &profileId, const QString &channelKey, const QString &type, const QJsonObject &preference) {
             if (m_trackPreferenceSettings) {
@@ -1953,9 +1955,6 @@ void PlayerController::attachSharedPlayback(
     clearPlaybackStallTracking();
     refreshBufferingState();
     syncIsPlayingFromBackend();
-    if (!isPlaying()) {
-        setIsPlaying(true);
-    }
     emit currentChannelChanged();
     if (previousPlaybackUrl != m_currentPlaybackUrl) {
         emit currentPlaybackUrlChanged();

@@ -297,32 +297,45 @@ tune_numeric "$PRIMARY_CHANNEL"
 prepare_capture
 capture_snapshot "01_primary_channel_${PRIMARY_CHANNEL}"
 
+# Provide a distinct selected channel so PiP opens with an assigned secondary,
+# rather than entering the pending empty-PiP channel picker.
+prepare_clean_capture
+send_keys Left 0.7
+send_keys Down 0.7
 send_keys ctrl+p 1.0
-send_keys ctrl+shift+o 0.7
-send_keys Right 0.4
-send_keys Return 0.7
+# PiP selection uses the mouse; Ctrl+arrows is reserved for grids.
+eval "$(xdotool getwindowgeometry --shell "$wid")"
+xdotool mousemove --window "$wid" "$((WIDTH * 85 / 100))" "$((HEIGHT * 85 / 100))"
+sleep 0.3
+xdotool key --window "$wid" Escape
+sleep 0.5
+xdotool click 1
+sleep 0.7
 tune_numeric "$PIP_CHANNEL"
 prepare_capture
 capture_snapshot "02_pip_primary_${PRIMARY_CHANNEL}_secondary_${PIP_CHANNEL}"
 
 send_keys ctrl+o 1.0
-send_keys ctrl+shift+o 0.7
+xdotool keydown --window "$wid" Control_L
 send_keys Down 0.4
-send_keys Return 0.7
+xdotool keyup --window "$wid" Control_L
+sleep 0.7
 tune_numeric "$GRID_CHANNEL_3"
 prepare_capture
 capture_snapshot "03_grid_three_tiles_${PRIMARY_CHANNEL}_${PIP_CHANNEL}_${GRID_CHANNEL_3}"
 
-send_keys ctrl+shift+o 0.7
+xdotool keydown --window "$wid" Control_L
 send_keys Left 0.4
-send_keys Return 0.7
+xdotool keyup --window "$wid" Control_L
+sleep 0.7
 tune_numeric "$GRID_CHANNEL_4"
 prepare_capture
 capture_snapshot "04_grid_four_tiles_${PRIMARY_CHANNEL}_${PIP_CHANNEL}_${GRID_CHANNEL_3}_${GRID_CHANNEL_4}"
 
-send_keys ctrl+shift+o 0.7
+xdotool keydown --window "$wid" Control_L
 send_keys Right 0.4
-send_keys Return 0.7
+xdotool keyup --window "$wid" Control_L
+sleep 0.7
 prepare_capture
 capture_snapshot "05_grid_focus_rotated"
 

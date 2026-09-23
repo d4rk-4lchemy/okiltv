@@ -543,6 +543,7 @@ private slots:
     void multiviewControllerAllowsCatchupPipButBlocksGrid();
     void multiviewControllerOpensPictureInPictureGridAndSwapsChannels();
     void multiviewPromotedPipCanPauseAfterRepeatedSwaps();
+    void multiviewFocusedControlsAndEpgFollowSlotWithoutRetune();
     void multiviewPrimaryTileReflectsPlaybackPlayerObjectChanges();
     void mpvVideoItemSharedPlayerDetachDoesNotClearOtherRenderTarget();
     void appControllerRoutesActivationToFocusedMultiviewTile();
@@ -7157,6 +7158,82 @@ void AppModelTests::multiviewPromotedPipCanPauseAfterRepeatedSwaps()
     }
     QCOMPARE(originalLoads.count(), 0);
     QCOMPARE(secondaryLoads.count(), 0);
+}
+
+void AppModelTests::multiviewFocusedControlsAndEpgFollowSlotWithoutRetune()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    harness.appController->initialize();
+    QTRY_VERIFY_WITH_TIMEOUT(!harness.appController->isBusy(), 5000);
+    const auto channels = harness.channelListModel->allChannels();
+    QVERIFY(channels.size() >= 2);
+    auto *multi = harness.multiViewController.get();
+    QVERIFY(harness.channelListModel->activateById(channels.first().id));
+    QVERIFY(multi->toggleGrid());
+    auto *primary = multi->primaryController();
+    auto *primaryBackend = primary->player();
+    primaryBackend->m_cachedTelemetry.pauseState = false;
+    emit primaryBackend->pauseStateChanged(false);
+    multi->focusTile(1);
+    auto *secondary = multi->focusedController();
+    QVERIFY(secondary != primary);
+    QVERIFY(!secondary->currentChannelValue());
+    QVERIFY(harness.playbackNowNextModel->channel().isEmpty());
+    QVERIFY(harness.channelListModel->activateById(channels.last().id));
+    auto *backend = secondary->player();
+    QVERIFY(backend != primaryBackend);
+    QCOMPARE(secondary->currentChannelValue()->id, channels.last().id);
+    QCOMPARE(harness.playbackNowNextModel->channel().value("id").toInt(), channels.last().id);
+    QSignalSpy primaryLoads(primaryBackend, &OKILTV::Player::MpvPlayer::fileLoaded);
+    QSignalSpy secondaryLoads(backend, &OKILTV::Player::MpvPlayer::fileLoaded);
+    backend->m_cachedTelemetry.pauseState = false;
+    emit backend->pauseStateChanged(false);
+    QVERIFY(secondary->isPlaying());
+    secondary->togglePause();
+    QVERIFY(secondary->isPlaying()); // Command must wait for backend acknowledgement.
+    backend->m_cachedTelemetry.pauseState = true;
+    emit backend->pauseStateChanged(true);
+    QVERIFY(!secondary->isPlaying());
+    QVERIFY(primary->isPlaying());
+    multi->focusTile(0);
+    QCOMPARE(multi->focusedController(), primary);
+    QCOMPARE(harness.playbackNowNextModel->channel().value("id").toInt(), channels.first().id);
+    multi->focusTile(1);
+    QCOMPARE(multi->focusedController(), secondary);
+    QVERIFY(!secondary->isPlaying()); // Focusing a paused tile must not resume it.
+    QCOMPARE(primary->player(), primaryBackend);
+    QCOMPARE(secondary->player(), backend);
+    QCOMPARE(primaryLoads.count(), 0);
+    QCOMPARE(secondaryLoads.count(), 0);
+
+    harness.settingsController->setMultiviewRetainSelectionOnPromotion(true);
+    harness.settingsController->save();
+    QVERIFY(multi->toggleGrid());
+    QCOMPARE(multi->focusedController(), primary);
+    QCOMPARE(primary->player(), backend);
+    backend->m_cachedTelemetry.pauseState = false;
+    emit backend->pauseStateChanged(false);
+    QVERIFY(primary->isPlaying()); // A previously observed backend can be promoted.
+    QVERIFY(multi->toggleGrid());
+    QCOMPARE(multi->focusedTileIndex(), 1);
+    QCOMPARE(multi->focusedController()->player(), backend);
+    QVERIFY(multi->stopRetainedPromotedAndRestoreGrid());
+    QCOMPARE(multi->focusedTileIndex(), 1);
+    QVERIFY(!multi->focusedController()->currentChannelValue());
+    QVERIFY(harness.playbackNowNextModel->channel().isEmpty());
+
+    // Upgrading a live PiP to a catch-up-capable session retires its legacy
+    // backend. Its old control adapter must not keep polling that stream.
+    multi->setLayoutMode(QStringLiteral("pip"));
+    QVERIFY(harness.channelListModel->activateById(channels.last().id));
+    auto *legacyControls = multi->focusedController();
+    auto *session = multi->prepareCatchupPictureInPicture();
+    QVERIFY(session);
+    QVERIFY(session != legacyControls);
+    QVERIFY(!legacyControls->usingSharedPlayback());
+    QVERIFY(!legacyControls->currentChannelValue());
+    QCOMPARE(multi->focusedController(), session);
 }
 
 void AppModelTests::multiviewPrimaryTileReflectsPlaybackPlayerObjectChanges()

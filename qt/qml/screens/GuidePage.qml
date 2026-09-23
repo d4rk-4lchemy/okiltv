@@ -28,7 +28,7 @@ Item {
     readonly property var channelList: channelListModel
     readonly property var dateTime: dateTimeFormatter
     readonly property var app: appController
-    readonly property var player: multiViewController.primaryController
+    readonly property var player: multiViewController.focusedController
     readonly property var dvr: dvrController
     // qmllint enable unqualified
     property real channelColumnWidth: root.shell.layoutBand === "compact" ? 246 : 284
