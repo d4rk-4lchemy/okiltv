@@ -213,6 +213,7 @@ private:
     QDateTime m_epgNextRefreshAt;
     QString m_epgLastRefreshError;
     QHash<int, qint64> m_watchSecondsByChannelId;
+    QHash<QUuid, QHash<int, qint64>> m_pendingWatchSeconds;
     QUuid m_watchTrackingProfileId;
     int m_watchTrackingChannelId { -1 };
     bool m_watchTrackingActive { false };

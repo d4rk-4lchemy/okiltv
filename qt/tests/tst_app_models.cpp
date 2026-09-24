@@ -525,6 +525,8 @@ private slots:
     void playerControllerDebugTimestampFormat();
     void appControllerTracksWatchTimeAndFlushesOnPlaybackBoundaries();
     void appControllerFlushTrackedWatchSecondsAllowsChannelIdZero();
+    void appControllerWatchStatsSurviveDatabaseLock();
+    void profileLoadReportsCacheFailure();
     void dateTimeFormatsApplyOnlyOnSaveAndRefreshCachedPrograms();
     void settingsControllerTracksDirtyStateForRegularSettings();
     void settingsControllerPreviewsUiTransparency();
@@ -5997,6 +5999,62 @@ void AppModelTests::appControllerFlushTrackedWatchSecondsAllowsChannelIdZero()
     QVERIFY2(
         watchSecondsByChannelId.value(0, 0) >= 1,
         "Watch stats flush should persist elapsed time for channel id 0.");
+}
+
+void AppModelTests::appControllerWatchStatsSurviveDatabaseLock()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    const auto profileId = harness.activeProfileId();
+    auto *controller = harness.appController.get();
+    controller->m_watchTrackingProfileId = profileId;
+    controller->m_watchTrackingChannelId = 0;
+    controller->m_watchTrackingActive = true;
+    controller->m_watchTrackingElapsed.start();
+    QTest::qWait(1100);
+
+    const auto connectionName = QUuid::createUuid().toString();
+    {
+        auto writer = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        writer.setDatabaseName(harness.database->databaseFilePath());
+        QVERIFY(writer.open());
+        QSqlQuery query(writer);
+        QVERIFY(query.exec(QStringLiteral("BEGIN IMMEDIATE")));
+        QElapsedTimer elapsed;
+        elapsed.start();
+        controller->flushTrackedWatchSeconds(); // Must not throw out of a timer/event handler.
+        QVERIFY(elapsed.elapsed() < 1000);
+        const auto pending = controller->m_pendingWatchSeconds.value(profileId).value(0);
+        QVERIFY(pending >= 1);
+        QVERIFY(harness.database->loadWatchSecondsByProfile(profileId).isEmpty());
+
+        // Playback may switch source before the database becomes available.
+        controller->m_watchTrackingProfileId = QUuid::createUuid();
+        controller->m_watchTrackingChannelId = 42;
+        QVERIFY(writer.rollback());
+        controller->flushTrackedWatchSeconds();
+        QCOMPARE(harness.database->loadWatchSecondsByProfile(profileId).value(0), pending);
+        QVERIFY(controller->m_pendingWatchSeconds.isEmpty());
+        controller->flushTrackedWatchSeconds();
+        QCOMPARE(harness.database->loadWatchSecondsByProfile(profileId).value(0), pending);
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+}
+
+void AppModelTests::profileLoadReportsCacheFailure()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    // Make both the fresh-channel write and the fallback cache open fail.
+    const auto path = harness.database->databaseFilePath();
+    QVERIFY(QFile::remove(path));
+    QVERIFY(QDir().mkdir(path));
+    QSignalSpy finished(harness.appController.get(), &AppController::profileLoadFinished);
+    harness.appController->loadProfile(guidToString(harness.activeProfileId()));
+    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 8000);
+    QVERIFY(!finished.first().at(1).toBool());
+    QVERIFY(!harness.appController->isBusy());
+    QVERIFY(harness.appController->statusText().contains(QStringLiteral("cached channels unavailable")));
 }
 
 void AppModelTests::dateTimeFormatsApplyOnlyOnSaveAndRefreshCachedPrograms()

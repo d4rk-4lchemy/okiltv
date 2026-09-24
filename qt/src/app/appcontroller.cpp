@@ -802,15 +802,19 @@ void AppController::loadProfile(const QString &profileId)
             result.statusText = QStringLiteral("%1 channels loaded").arg(result.channels.size());
         } catch (const std::exception &error) {
             result.profile = profile;
-            result.channels = m_database->loadChannels(profile.id);
-            if (!result.channels.isEmpty()) {
-                result.categories = buildM3uCategories(result.channels);
-                result.watchSecondsByChannelId = m_database->loadWatchSecondsByProfile(profile.id);
-                result.ok = true;
-                result.statusText =
-                    QStringLiteral("Using cached channels after refresh failure: %1").arg(QString::fromUtf8(error.what()));
-            } else {
-                result.errorText = QString::fromUtf8(error.what());
+            result.errorText = QString::fromUtf8(error.what());
+            try {
+                result.channels = m_database->loadChannels(profile.id);
+                if (!result.channels.isEmpty()) {
+                    result.categories = buildM3uCategories(result.channels);
+                    result.watchSecondsByChannelId = m_database->loadWatchSecondsByProfile(profile.id);
+                    result.ok = true;
+                    result.statusText = QStringLiteral("Using cached channels after refresh failure: %1")
+                        .arg(result.errorText);
+                }
+            } catch (const std::exception &cacheError) {
+                result.errorText += QStringLiteral("; cached channels unavailable: %1")
+                    .arg(QString::fromUtf8(cacheError.what()));
             }
         }
 
@@ -1447,33 +1451,40 @@ void AppController::beginWatchTrackingForCurrentChannel()
 
 void AppController::flushTrackedWatchSeconds()
 {
-    if (!m_watchTrackingActive
-        || m_watchTrackingChannelId < 0
-        || m_watchTrackingProfileId.isNull()
-        || !m_watchTrackingElapsed.isValid()) {
-        return;
-    }
-
-    const auto elapsedSeconds = std::max<qint64>(0, m_watchTrackingElapsed.elapsed() / 1000);
-    if (elapsedSeconds > 0) {
-        m_database->incrementWatchSeconds(
-            m_watchTrackingProfileId,
-            m_watchTrackingChannelId,
-            elapsedSeconds);
-        m_watchSecondsByChannelId[m_watchTrackingChannelId] =
-            m_watchSecondsByChannelId.value(m_watchTrackingChannelId, 0) + elapsedSeconds;
-        m_channelListModel->setWatchSeconds(m_watchSecondsByChannelId);
-        if (m_channelListModel->selectedCategoryId() == QString::fromUtf8(kFavouritesCategoryId)) {
-            rebuildGuideGridAsync();
+    if (m_watchTrackingActive && m_watchTrackingChannelId >= 0
+        && !m_watchTrackingProfileId.isNull() && m_watchTrackingElapsed.isValid()) {
+        const auto elapsedSeconds = std::max<qint64>(0, m_watchTrackingElapsed.elapsed() / 1000);
+        if (elapsedSeconds > 0) {
+            m_pendingWatchSeconds[m_watchTrackingProfileId][m_watchTrackingChannelId] += elapsedSeconds;
+        }
+        if (m_playerController->isPlaying()) {
+            m_watchTrackingElapsed.restart();
+        } else {
+            m_watchTrackingActive = false;
         }
     }
 
-    if (m_playerController->isPlaying()) {
-        m_watchTrackingElapsed.restart();
-        return;
+    for (auto profile = m_pendingWatchSeconds.begin(); profile != m_pendingWatchSeconds.end();) {
+        for (auto channel = profile->begin(); channel != profile->end();) {
+            try {
+                m_database->incrementWatchSeconds(profile.key(), channel.key(), channel.value());
+            } catch (const std::exception &error) {
+                Core::DebugLogger::instance().log(QStringLiteral("watch-stats"),
+                    QStringLiteral("Watch time save deferred: %1").arg(QString::fromUtf8(error.what())));
+                // Retain the original source/channel even across playback changes.
+                return;
+            }
+            if (guidToString(profile.key()) == m_channelListModel->activeProfileId()) {
+                m_watchSecondsByChannelId[channel.key()] += channel.value();
+                m_channelListModel->setWatchSeconds(m_watchSecondsByChannelId);
+                if (m_channelListModel->selectedCategoryId() == QString::fromUtf8(kFavouritesCategoryId)) {
+                    rebuildGuideGridAsync();
+                }
+            }
+            channel = profile->erase(channel);
+        }
+        profile = m_pendingWatchSeconds.erase(profile);
     }
-
-    m_watchTrackingActive = false;
 }
 
 void AppController::rebuildGuideGrid()
