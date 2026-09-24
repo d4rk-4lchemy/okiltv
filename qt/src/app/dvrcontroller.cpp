@@ -9,11 +9,14 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFutureWatcher>
+#include <QtConcurrentRun>
 #include <QHostAddress>
 #include <QProcess>
 #include <QPointer>
 #include <QRegularExpression>
 #include <QSet>
+#include <QTemporaryFile>
 #include <QUdpSocket>
 
 #include <algorithm>
@@ -34,7 +37,7 @@ namespace {
 
 constexpr int kDvrTickMs = 1000;
 constexpr int kDvrRestartRetryMs = 1000;
-constexpr int kTapStartupTimeoutMs = 8000;
+constexpr int kTapStartupTimeoutMs = 30000;
 constexpr int kProcessTerminateTimeoutMs = 1500;
 constexpr int kProcessKillTimeoutMs = 1200;
 constexpr int kProcessForceKillRetryMs = 500;
@@ -383,12 +386,12 @@ bool DvrController::attachPlaybackForChannel(const Channel &channel)
         return false;
     }
 
-    const auto tapChannel = channelFromWindow(session->window, session->tapUrl);
+    const auto &tapChannel = channel;
     const auto current = m_playerController->currentChannelValue();
     if (current.has_value()
         && current->id == tapChannel.id
         && current->profileId == tapChannel.profileId
-        && m_playerController->currentPlaybackUrl().trimmed() == tapChannel.streamUrl.trimmed()) {
+        && m_playerController->currentPlaybackUrl().trimmed() == session->tapUrl.trimmed()) {
         return true;
     }
 
@@ -396,7 +399,7 @@ bool DvrController::attachPlaybackForChannel(const Channel &channel)
         QStringLiteral("dvr"),
         QStringLiteral("Attaching playback to DVR tap for channel %1: %2")
             .arg(session->window.channelName, session->tapUrl));
-    m_playerController->playChannel(tapChannel);
+    m_playerController->playChannel(tapChannel, session->tapUrl);
     return true;
 }
 
@@ -590,18 +593,6 @@ QList<DvrController::MergedWindow> DvrController::mergedWindows() const
     return merged;
 }
 
-Channel DvrController::channelFromWindow(const MergedWindow &window, const QString &overrideUrl) const
-{
-    Channel channel;
-    channel.id = window.channelId;
-    channel.name = window.channelName;
-    channel.streamUrl = overrideUrl.trimmed().isEmpty() ? window.streamUrl : overrideUrl.trimmed();
-    channel.tvgId = window.tvgId;
-    channel.profileId = parseGuid(window.profileId);
-    channel.source = ChannelSource::M3U;
-    return channel;
-}
-
 void DvrController::loadSchedulesFromSettings()
 {
     m_schedules = m_settings->current().dvrSchedules;
@@ -666,6 +657,9 @@ void DvrController::emitRecordingChannelsChanged()
 
 void DvrController::tick()
 {
+    if (m_exitShutdownStarted) {
+        return;
+    }
     const auto now = QDateTime::currentDateTimeUtc();
     auto schedulesChanged = false;
 
@@ -693,7 +687,17 @@ void DvrController::tick()
     QMap<QString, MergedWindow> activeById;
     for (const auto &window : windows) {
         if (window.startAt <= now && now < window.stopAt) {
-            activeById.insert(window.id, window);
+            // Process callbacks retain their original session ID. Reconcile by
+            // channel so extending/pruning a merged window does not retune it.
+            auto activeWindow = window;
+            for (auto &entry : m_sessions) {
+                if (entry.second && entry.second->window.channelKey == window.channelKey) {
+                    activeWindow.id = entry.first;
+                    entry.second->window = activeWindow;
+                    break;
+                }
+            }
+            activeById.insert(activeWindow.id, activeWindow);
         }
     }
 
@@ -732,6 +736,25 @@ void DvrController::tick()
             continue;
         }
 
+        auto &session = *it->second;
+        const auto bytes = QFileInfo(session.recordTempPath).size();
+        if (bytes > session.lastRecordedBytes && session.state != SessionState::Stopping) {
+            session.lastRecordedBytes = bytes;
+            session.lastRecordingAdvanceAt = now;
+            if (session.state == SessionState::Starting) {
+                session.state = SessionState::Running;
+                session.recordingStarted = true;
+                maybeAutoHandoffToTap(session);
+            }
+        }
+        if (session.state == SessionState::Running
+            && session.lastRecordingAdvanceAt.isValid()
+            && session.lastRecordingAdvanceAt.msecsTo(now) >= kTapStartupTimeoutMs) {
+            staleSessionIds.push_back(it->first);
+            startupTimeoutIds.insert(it->first);
+            continue;
+        }
+
         if (it->second->state == SessionState::Starting
             && it->second->startRequestedAt.isValid()
             && it->second->startRequestedAt.msecsTo(now) >= kTapStartupTimeoutMs) {
@@ -758,6 +781,9 @@ void DvrController::tick()
 
 bool DvrController::startSession(const MergedWindow &window)
 {
+    if (m_exitShutdownStarted) {
+        return false;
+    }
     if (m_sessions.find(window.id) != m_sessions.end()) {
         return true;
     }
@@ -776,7 +802,7 @@ bool DvrController::startSession(const MergedWindow &window)
     session->startRequestedAt = QDateTime::currentDateTimeUtc();
     session->stopReason.clear();
     session->tapPort = tapPort.value();
-    session->tapUrl = QStringLiteral("udp://127.0.0.1:%1?overrun_nonfatal=1&fifo_size=50000000").arg(session->tapPort);
+    session->tapUrl = QStringLiteral("udp://127.0.0.1:%1?overrun_nonfatal=1&fifo_size=65536").arg(session->tapPort);
     session->remuxToMkv = m_settings->current().dvrRemuxToMkv && Core::ffmpegToolsAvailable();
     session->ingestProcess = std::make_unique<QProcess>();
     session->ingestProcess->setProcessChannelMode(QProcess::MergedChannels);
@@ -791,14 +817,24 @@ bool DvrController::startSession(const MergedWindow &window)
 #endif
 
     const auto outputDir = recordingOutputDirectory();
-    QDir().mkpath(outputDir);
+    if (!QDir().mkpath(outputDir)) {
+        return false;
+    }
     const auto timestamp = (window.startAt.isValid() ? window.startAt.toLocalTime() : QDateTime::currentDateTime())
                                .toString(QStringLiteral("yyyyMMdd_HHmmss"));
     const auto baseName = QStringLiteral("%1_%2_%3")
         .arg(sanitizeForFilename(window.channelName), sanitizeForFilename(window.displayTitle), timestamp);
-    session->recordTempPath = QDir(outputDir).filePath(baseName + QStringLiteral(".ts"));
+    // Reserve a new file for every attempt, including retries and simultaneous
+    // same-name channels from different sources. Never truncate an earlier part.
+    QTemporaryFile recording(QDir(outputDir).filePath(baseName + QStringLiteral("_XXXXXX.ts")));
+    if (!recording.open()) {
+        return false;
+    }
+    recording.setAutoRemove(false);
+    session->recordTempPath = recording.fileName();
+    recording.close();
     if (session->remuxToMkv) {
-        session->recordFinalPath = QDir(outputDir).filePath(baseName + QStringLiteral(".mkv"));
+        session->recordFinalPath = session->recordTempPath.chopped(3) + QStringLiteral(".mkv");
     }
 
     const auto ffmpeg = findFfmpegBinary();
@@ -846,11 +882,12 @@ bool DvrController::startSession(const MergedWindow &window)
             return;
         }
 
-        it->second->recordingStarted = true;
         it->second->failedToStart = false;
         it->second->finishedSignaled = false;
         it->second->processId = static_cast<qint64>(it->second->ingestProcess->processId());
-        it->second->state = SessionState::Running;
+        if (it->second->stopRequested) {
+            return;
+        }
         it->second->stopReason.clear();
         m_restartNotBeforeByWindowId.remove(sessionId);
         DebugLogger::instance().log(
@@ -861,7 +898,6 @@ bool DvrController::startSession(const MergedWindow &window)
                 .arg(it->second->tapUrl, ffmpeg, args.join(' ')));
         emitRecordingChannelsChanged();
         emit stateChanged();
-        maybeAutoHandoffToTap(*it->second);
     });
 
     connect(process, &QProcess::errorOccurred, this, [this, sessionId](const QProcess::ProcessError error) {
@@ -937,18 +973,19 @@ void DvrController::maybeAutoHandoffToTap(const Session &session)
     if (guidToString(current->profileId) != session.window.profileId || current->id != session.window.channelId) {
         return;
     }
-    if (m_playerController->timeshiftActive() || m_playerController->currentPlaybackUrl().trimmed() == session.tapUrl.trimmed()) {
+    if (m_playerController->inCatchupMode() || m_playerController->timeshiftActive()
+        || m_playerController->timeshiftPreparing()
+        || m_playerController->currentPlaybackUrl().trimmed() == session.tapUrl.trimmed()) {
         return;
     }
 
-    auto tapChannel = channelFromWindow(session.window, session.tapUrl);
-    tapChannel.name = current->name;
+    const auto &tapChannel = *current;
 
     DebugLogger::instance().log(
         QStringLiteral("dvr"),
         QStringLiteral("Auto-handoff playback to DVR tap for %1: %2")
             .arg(session.window.channelName, session.tapUrl));
-    m_playerController->playChannel(tapChannel);
+    m_playerController->playChannel(tapChannel, session.tapUrl);
 }
 
 void DvrController::scheduleRestartForWindow(const QString &windowId, const QString &reason)
@@ -1166,18 +1203,16 @@ void DvrController::finalizeStopSession(const QString &sessionId, const int exit
         return;
     }
 
-    const auto wasRecording = session->recordingStarted;
     session->recordingStarted = false;
 
     const auto current = m_playerController->currentChannelValue();
-    if (wasRecording
-        && current.has_value()
+    if (current.has_value()
         && guidToString(current->profileId) == session->window.profileId
         && current->id == session->window.channelId
         && !m_playerController->timeshiftActive()
         && m_playerController->currentPlaybackUrl().trimmed() == session->tapUrl.trimmed()) {
-        auto sourceChannel = channelFromWindow(session->window, session->window.streamUrl);
-        sourceChannel.name = current->name;
+        auto sourceChannel = *current;
+        sourceChannel.streamUrl = session->window.streamUrl;
         DebugLogger::instance().log(
             QStringLiteral("dvr"),
             QStringLiteral("DVR tap ended, falling back to source stream for %1")
@@ -1187,35 +1222,36 @@ void DvrController::finalizeStopSession(const QString &sessionId, const int exit
 
     const auto now = QDateTime::currentDateTimeUtc();
     auto activeWindowStillPresent = false;
+    QString restartWindowId;
     const auto windows = mergedWindows();
     for (const auto &window : windows) {
-        if (window.id != session->window.id) {
+        if (window.profileId != session->window.profileId || window.channelId != session->window.channelId) {
             continue;
         }
         if (window.startAt <= now && now < window.stopAt) {
             activeWindowStillPresent = true;
+            restartWindowId = window.id;
+            break;
         }
-        break;
     }
 
     if (!activeWindowStillPresent) {
         m_restartNotBeforeByWindowId.remove(session->window.id);
     }
 
-    if (wasRecording && !activeWindowStillPresent) {
+    // Every stopped attempt owns an independent part, safe to finalize even
+    // while the next attempt is recording the remainder of this window.
+    if (QFileInfo(session->recordTempPath).size() > 0) {
         maybeStartRemux(*session);
-    } else if (wasRecording && activeWindowStillPresent) {
-        DebugLogger::instance().log(
-            QStringLiteral("dvr"),
-            QStringLiteral("Skipping DVR remux for %1 because merged window is still active; scheduler may restart ingest.")
-                .arg(sessionId));
+    } else if (!session->recordTempPath.isEmpty()) {
+        QFile::remove(session->recordTempPath);
     }
 
     if (activeWindowStillPresent) {
         const auto stopReason = session->stopReason.trimmed().isEmpty()
             ? QStringLiteral("finalize-active-window")
             : session->stopReason.trimmed();
-        scheduleRestartForWindow(session->window.id, stopReason);
+        scheduleRestartForWindow(restartWindowId, stopReason);
     }
 
     DebugLogger::instance().log(
@@ -1294,58 +1330,78 @@ void DvrController::maybeStartRemux(const Session &session)
     });
 
     connect(process, &QProcess::finished, this, [this, process, tempPath = session.recordTempPath, finalPath = session.recordFinalPath](int exitCode, QProcess::ExitStatus exitStatus) {
-        const QFileInfo finalInfo(finalPath);
-        const auto finalExists = finalInfo.exists();
-        const auto finalSize = finalExists ? finalInfo.size() : 0;
-        const auto normalExit = exitStatus == QProcess::NormalExit;
-        std::optional<double> tempDurationSeconds;
-        std::optional<double> finalDurationSeconds;
-        QString tempDurationError;
-        QString finalDurationError;
-        auto durationDeltaSeconds = -1.0;
-        auto durationMatches = false;
-
-        if (finalExists && finalSize > 0) {
-            tempDurationSeconds = probeMediaDurationSeconds(tempPath, &tempDurationError);
-            finalDurationSeconds = probeMediaDurationSeconds(finalPath, &finalDurationError);
-            if (tempDurationSeconds.has_value() && finalDurationSeconds.has_value()) {
-                durationDeltaSeconds = std::abs(tempDurationSeconds.value() - finalDurationSeconds.value());
-                durationMatches = durationDeltaSeconds <= kRemuxDurationMatchToleranceSeconds;
-            }
-        }
-
-        const auto remuxAccepted = finalExists && finalSize > 0 && durationMatches;
-        if (remuxAccepted) {
-            DebugLogger::instance().log(
-                QStringLiteral("dvr"),
-                QStringLiteral("DVR remux accepted (exit=%1 status=%2 size=%3 ts-duration=%4 mkv-duration=%5 delta=%6): %7")
-                    .arg(exitCode)
-                    .arg(normalExit ? QStringLiteral("normal") : QStringLiteral("crash"))
-                    .arg(finalSize)
-                    .arg(tempDurationSeconds.value(), 0, 'f', 3)
-                    .arg(finalDurationSeconds.value(), 0, 'f', 3)
-                    .arg(durationDeltaSeconds, 0, 'f', 3)
-                    .arg(finalPath));
-            scheduleDeleteTempRecording(tempPath, kTempDeleteMaxRetries);
-        } else {
-            DebugLogger::instance().log(
-                QStringLiteral("dvr"),
-                QStringLiteral("DVR remux rejected (exit=%1 status=%2 output-exists=%3 size=%4 duration-match=%5 ts-duration=%6 mkv-duration=%7 ts-probe=%8 mkv-probe=%9): keeping %10")
-                    .arg(exitCode)
-                    .arg(normalExit ? QStringLiteral("normal") : QStringLiteral("crash"))
-                    .arg(finalExists ? QStringLiteral("true") : QStringLiteral("false"))
-                    .arg(finalSize)
-                    .arg(durationMatches ? QStringLiteral("true") : QStringLiteral("false"))
-                    .arg(tempDurationSeconds.has_value() ? QString::number(tempDurationSeconds.value(), 'f', 3) : QStringLiteral("n/a"))
-                    .arg(finalDurationSeconds.has_value() ? QString::number(finalDurationSeconds.value(), 'f', 3) : QStringLiteral("n/a"))
-                    .arg(tempDurationError.isEmpty() ? QStringLiteral("ok") : tempDurationError)
-                    .arg(finalDurationError.isEmpty() ? QStringLiteral("ok") : finalDurationError)
-                    .arg(tempPath));
-            if (finalExists) {
-                scheduleDeleteInvalidRemuxOutput(finalPath, kTempDeleteMaxRetries);
-            }
-        }
         process->deleteLater();
+        struct ProbeResult {
+            std::optional<double> tempDuration;
+            std::optional<double> finalDuration;
+            QString tempError;
+            QString finalError;
+        };
+        auto *watcher = new QFutureWatcher<ProbeResult>(this);
+        connect(watcher, &QFutureWatcher<ProbeResult>::finished, this,
+            [this, watcher, tempPath, finalPath, exitCode, exitStatus]() {
+            const QFileInfo finalInfo(finalPath);
+            const auto finalExists = finalInfo.exists();
+            const auto finalSize = finalExists ? finalInfo.size() : 0;
+            const auto normalExit = exitStatus == QProcess::NormalExit;
+            const auto result = watcher->result();
+            watcher->deleteLater();
+            const auto &tempDurationSeconds = result.tempDuration;
+            const auto &finalDurationSeconds = result.finalDuration;
+            const auto &tempDurationError = result.tempError;
+            const auto &finalDurationError = result.finalError;
+            auto durationDeltaSeconds = -1.0;
+            auto durationMatches = false;
+
+            if (finalExists && finalSize > 0) {
+                if (tempDurationSeconds.has_value() && finalDurationSeconds.has_value()) {
+                    durationDeltaSeconds = std::abs(tempDurationSeconds.value() - finalDurationSeconds.value());
+                    durationMatches = durationDeltaSeconds <= kRemuxDurationMatchToleranceSeconds;
+                }
+            }
+
+            const auto remuxAccepted = finalExists && finalSize > 0 && durationMatches;
+            if (remuxAccepted) {
+                DebugLogger::instance().log(
+                    QStringLiteral("dvr"),
+                    QStringLiteral("DVR remux accepted (exit=%1 status=%2 size=%3 ts-duration=%4 mkv-duration=%5 delta=%6): %7")
+                        .arg(exitCode)
+                        .arg(normalExit ? QStringLiteral("normal") : QStringLiteral("crash"))
+                        .arg(finalSize)
+                        .arg(tempDurationSeconds.value(), 0, 'f', 3)
+                        .arg(finalDurationSeconds.value(), 0, 'f', 3)
+                        .arg(durationDeltaSeconds, 0, 'f', 3)
+                        .arg(finalPath));
+                scheduleDeleteTempRecording(tempPath, kTempDeleteMaxRetries);
+            } else {
+                DebugLogger::instance().log(
+                    QStringLiteral("dvr"),
+                    QStringLiteral("DVR remux rejected (exit=%1 status=%2 output-exists=%3 size=%4 duration-match=%5 ts-duration=%6 mkv-duration=%7 ts-probe=%8 mkv-probe=%9): keeping %10")
+                        .arg(exitCode)
+                        .arg(normalExit ? QStringLiteral("normal") : QStringLiteral("crash"))
+                        .arg(finalExists ? QStringLiteral("true") : QStringLiteral("false"))
+                        .arg(finalSize)
+                        .arg(durationMatches ? QStringLiteral("true") : QStringLiteral("false"))
+                        .arg(tempDurationSeconds.has_value() ? QString::number(tempDurationSeconds.value(), 'f', 3) : QStringLiteral("n/a"))
+                        .arg(finalDurationSeconds.has_value() ? QString::number(finalDurationSeconds.value(), 'f', 3) : QStringLiteral("n/a"))
+                        .arg(tempDurationError.isEmpty() ? QStringLiteral("ok") : tempDurationError)
+                        .arg(finalDurationError.isEmpty() ? QStringLiteral("ok") : finalDurationError)
+                        .arg(tempPath));
+                if (finalExists) {
+                    scheduleDeleteInvalidRemuxOutput(finalPath, kTempDeleteMaxRetries);
+                }
+            }
+        });
+        // ffprobe may take seconds on damaged captures. Its processes and waits
+        // belong to the worker; only the deletion decision returns to the UI.
+        watcher->setFuture(QtConcurrent::run([tempPath, finalPath]() {
+            ProbeResult result;
+            if (QFileInfo(finalPath).size() > 0) {
+                result.tempDuration = probeMediaDurationSeconds(tempPath, &result.tempError);
+                result.finalDuration = probeMediaDurationSeconds(finalPath, &result.finalError);
+            }
+            return result;
+        }));
     });
     connect(process, &QProcess::errorOccurred, this, [process, tempPath = session.recordTempPath](QProcess::ProcessError error) {
         DebugLogger::instance().log(

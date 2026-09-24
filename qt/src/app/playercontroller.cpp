@@ -3733,7 +3733,7 @@ QString PlayerController::recoveryLoadfileOptions() const
     return m_currentLoadfileOptions.trimmed();
 }
 
-void PlayerController::playChannel(const Channel &channel)
+void PlayerController::playChannel(const Channel &channel, const QString &playbackUrl)
 {
     ++m_playbackGeneration;
     checkpointCatchupProgress();
@@ -3783,7 +3783,7 @@ void PlayerController::playChannel(const Channel &channel)
     clearCatchupState();
     m_currentChannel = channel;
     const auto previousPlaybackUrl = m_currentPlaybackUrl;
-    m_currentPlaybackUrl = channel.streamUrl;
+    m_currentPlaybackUrl = playbackUrl.isEmpty() ? channel.streamUrl : playbackUrl;
     m_nowPlayingName = channel.name;
     emit currentChannelChanged();
     if (previousPlaybackUrl != m_currentPlaybackUrl) {
@@ -3797,7 +3797,7 @@ void PlayerController::playChannel(const Channel &channel)
         }
         return;
     }
-    startPlaybackRequest(activePlayer, channel.streamUrl, false);
+    startPlaybackRequest(activePlayer, m_currentPlaybackUrl, false);
 }
 
 void PlayerController::playCatchupChannel(

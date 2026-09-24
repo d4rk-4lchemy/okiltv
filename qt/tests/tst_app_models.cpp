@@ -57,6 +57,7 @@
 #include <QImage>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFutureWatcher>
 #include <QHash>
 #include <QMutex>
 #include <QRegularExpression>
@@ -513,7 +514,19 @@ private slots:
     void playerControllerReconnectReserveHonorsStopAndFailure();
     void playerControllerReconnectReserveTimesOutWithoutProgress();
     void playerControllerLiveWatchdogRespectsTuneGrace();
+    void timeshiftSettingsDoNotInterruptCatchup();
+    void timeshiftRollingWindowPreservesPlaybackOrigin();
+    void timeshiftFailedProcessDeletionIsDeferred();
+    void timeshiftStalledStartupFallsBackToLive();
+    void timeshiftRemovesEmptyFailedGenerations();
+    void dvrMergedWindowChangesKeepExistingSession();
+    void dvrRetriesPreserveRecordedParts();
+    void dvrTapPreservesChannelMetadata();
+    void timeshiftStorageBudgetAndSubtitleCleanup();
+    void timeshiftDisableDuringPendingAttachRestoresLive();
+    void dvrReadinessRequiresDataAndStalledIngestRestarts();
     void timeshiftControllerPreparingUntilPlaybackAttached();
+    void timeshiftControllerProbeKeepsMetadataWithStderr_data();
     void timeshiftControllerProbeKeepsMetadataWithStderr();
     void playerControllerReconnectDepletionTimeoutFollowsWaitForDataRule();
     void playerControllerPreemptiveReconnectHeuristic();
@@ -5784,6 +5797,395 @@ void AppModelTests::playerControllerLiveWatchdogRespectsTuneGrace()
     QVERIFY(controller.m_recovery.waitingStop());
 }
 
+void AppModelTests::timeshiftSettingsDoNotInterruptCatchup()
+{
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    PlayerController player;
+    DvrController dvr(&settings, &player);
+    MultiViewController multiview(&settings, nullptr, &player);
+    TimeshiftController controller(&settings, &player, &dvr, &multiview);
+    Channel channel;
+    channel.id = 19;
+    channel.profileId = QUuid::createUuid();
+    channel.streamUrl = QStringLiteral("http://127.0.0.1/live");
+    player.playCatchupChannel(channel, QStringLiteral("http://127.0.0.1/archive"), QStringLiteral("Archive"));
+    settings.current().timeshiftEnabled = true;
+    controller.applySettings();
+    QVERIFY(!controller.m_session);
+    QVERIFY(player.inCatchupMode());
+    QCOMPARE(player.currentPlaybackUrl(), QStringLiteral("http://127.0.0.1/archive"));
+
+    DvrController::Session recording;
+    recording.window.profileId = guidToString(channel.profileId);
+    recording.window.channelId = channel.id;
+    recording.tapUrl = QStringLiteral("udp://127.0.0.1:12345");
+    dvr.maybeAutoHandoffToTap(recording);
+    QVERIFY(player.inCatchupMode());
+    QCOMPARE(player.currentPlaybackUrl(), QStringLiteral("http://127.0.0.1/archive"));
+}
+
+void AppModelTests::timeshiftRollingWindowPreservesPlaybackOrigin()
+{
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    PlayerController player;
+    DvrController dvr(&settings, &player);
+    MultiViewController multiview(&settings, nullptr, &player);
+    TimeshiftController controller(&settings, &player, &dvr, &multiview);
+    controller.m_session.emplace();
+    auto &session = *controller.m_session;
+    session.state = TimeshiftController::SessionState::Running;
+    session.playbackAttached = true;
+    session.attachedWindowStartEpochMs = 1000;
+    session.playlistInfo.valid = true;
+    session.playlistInfo.windowStartUtc = QDateTime::fromMSecsSinceEpoch(5000, QTimeZone::UTC);
+    session.playlistInfo.liveEdgeUtc = QDateTime::fromMSecsSinceEpoch(61000, QTimeZone::UTC);
+    session.playlistInfo.availableSeconds = 56;
+    player.player()->m_cachedTelemetry.positionSeconds = 20;
+    QCOMPARE(controller.currentPlaybackEpochMs(), 21000);
+    controller.attachSessionPlaybackIfReady();
+    QCOMPARE(controller.attachedWindowStartEpochMs(), 1000);
+    QCOMPARE(controller.currentPlaybackEpochMs(), 21000);
+    QVERIFY(!session.playbackLoadPending);
+}
+
+void AppModelTests::timeshiftFailedProcessDeletionIsDeferred()
+{
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    PlayerController player;
+    DvrController dvr(&settings, &player);
+    MultiViewController multiview(&settings, nullptr, &player);
+    TimeshiftController controller(&settings, &player, &dvr, &multiview);
+    controller.m_session.emplace();
+    auto &session = *controller.m_session;
+    session.playbackAttached = true;
+    session.ingestProcess = std::make_unique<QProcess>(&controller);
+    QPointer<QProcess> process(session.ingestProcess.get());
+    connect(process, &QProcess::errorOccurred, &controller, [&]() {
+        controller.handleRuntimeIngestFailure(session, QStringLiteral("test"), false);
+    });
+    bool senderSurvived = false;
+    connect(process, &QProcess::errorOccurred, &player, [&]() { senderSurvived = !process.isNull(); });
+    process->start(dir.filePath(QStringLiteral("missing-ffmpeg")));
+    QTRY_VERIFY(senderSurvived);
+    QTRY_VERIFY(process.isNull());
+    QVERIFY(!session.ingestProcess);
+    QCOMPARE(session.state, TimeshiftController::SessionState::Failed);
+}
+
+void AppModelTests::timeshiftStalledStartupFallsBackToLive()
+{
+#if defined(Q_OS_WIN)
+    QSKIP("Uses a POSIX helper process.");
+#else
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    PlayerController player;
+    DvrController dvr(&settings, &player);
+    MultiViewController multiview(&settings, nullptr, &player);
+    TimeshiftController controller(&settings, &player, &dvr, &multiview);
+    Channel channel;
+    channel.streamUrl = QStringLiteral("http://127.0.0.1/live");
+    player.m_currentChannel = channel;
+    controller.m_session.emplace();
+    auto &session = *controller.m_session;
+    session.id = QStringLiteral("stalled-startup");
+    session.channel = channel;
+    session.fallbackPlaybackUrl = channel.streamUrl;
+    session.state = TimeshiftController::SessionState::Starting;
+    session.ingestStartedAt = QDateTime::currentDateTimeUtc().addSecs(-120);
+    session.ingestProcess = std::make_unique<QProcess>(&controller);
+    session.ingestProcess->start(QStringLiteral("/bin/sleep"), {QStringLiteral("30")});
+    QVERIFY(session.ingestProcess->waitForStarted());
+    QPointer<QProcess> process(session.ingestProcess.get());
+    controller.handlePlaylistPoll();
+    QVERIFY(!controller.m_session);
+    QCOMPARE(player.currentPlaybackUrl(), channel.streamUrl);
+    QTRY_VERIFY(process.isNull());
+#endif
+}
+
+void AppModelTests::timeshiftRemovesEmptyFailedGenerations()
+{
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    PlayerController player;
+    DvrController dvr(&settings, &player);
+    MultiViewController multiview(&settings, nullptr, &player);
+    TimeshiftController controller(&settings, &player, &dvr, &multiview);
+    TimeshiftController::Session failed;
+    failed.state = TimeshiftController::SessionState::Failed;
+    failed.sessionDirectory = dir.filePath(QStringLiteral("failed"));
+    QVERIFY(QDir().mkpath(failed.sessionDirectory));
+    controller.m_retainedSessions.push_back(std::move(failed));
+    controller.cleanupUnreachableRetainedSessions();
+    QVERIFY(controller.m_retainedSessions.empty());
+    QVERIFY(!QFileInfo::exists(dir.filePath(QStringLiteral("failed"))));
+}
+
+void AppModelTests::dvrMergedWindowChangesKeepExistingSession()
+{
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    settings.current().dvrStartOffsetMinutes = 0;
+    settings.current().dvrEndOffsetMinutes = 0;
+    PlayerController player;
+    DvrController controller(&settings, &player);
+    controller.m_tickTimer.stop();
+    const auto now = QDateTime::currentDateTimeUtc();
+    DvrScheduleEntry first;
+    first.id = QStringLiteral("first");
+    first.profileId = guidToString(QUuid::createUuid());
+    first.channelId = 12;
+    first.streamUrl = QStringLiteral("http://127.0.0.1/live");
+    first.start = now.addSecs(-60);
+    first.stop = now.addSecs(60);
+    auto second = first;
+    second.id = QStringLiteral("second");
+    second.start = first.stop;
+    second.stop = now.addSecs(600);
+    controller.m_schedules = {first};
+    const auto window = controller.mergedWindows().front();
+    auto session = std::make_unique<DvrController::Session>();
+    session->window = window;
+    session->state = DvrController::SessionState::Running;
+    session->recordingStarted = true;
+    auto *original = session.get();
+    controller.m_sessions.emplace(window.id, std::move(session));
+    controller.m_schedules.push_back(second);
+    controller.tick();
+    QCOMPARE(controller.m_sessions.size(), size_t(1));
+    QCOMPARE(controller.m_sessions.begin()->second.get(), original);
+    QCOMPARE(original->window.stopAt, second.stop);
+    QVERIFY(!original->stopRequested);
+    // Simulate expiration of the first programme in an already merged capture.
+    controller.m_schedules.front().stop = now.addSecs(-1);
+    controller.m_schedules.back().start = now.addSecs(-1);
+    controller.tick();
+    QCOMPARE(controller.m_sessions.size(), size_t(1));
+    QCOMPARE(controller.m_sessions.begin()->second.get(), original);
+    QVERIFY(!original->stopRequested);
+    QCOMPARE(controller.scheduledCount(), 1);
+}
+
+void AppModelTests::dvrRetriesPreserveRecordedParts()
+{
+    const auto ffmpeg = DvrController::findFfmpegBinary();
+    if (ffmpeg.isEmpty()) {
+        QSKIP("ffmpeg is required for recording integration.");
+    }
+    QTemporaryDir dir;
+    const auto source = dir.filePath(QStringLiteral("source.ts"));
+    QProcess generator;
+    generator.start(ffmpeg, {QStringLiteral("-v"), QStringLiteral("error"),
+        QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"),
+        QStringLiteral("testsrc2=size=64x48:rate=10:duration=2"),
+        QStringLiteral("-c:v"), QStringLiteral("mpeg2video"), QStringLiteral("-f"), QStringLiteral("mpegts"), source});
+    QVERIFY(generator.waitForFinished(10000));
+    QCOMPARE(generator.exitCode(), 0);
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    settings.current().dvrRemuxToMkv = false;
+    settings.current().dvrRecordingsDirectory = dir.filePath(QStringLiteral("recordings"));
+    PlayerController player;
+    DvrController controller(&settings, &player);
+    controller.m_tickTimer.stop();
+    DvrController::MergedWindow window;
+    window.id = QStringLiteral("recording-window");
+    window.streamUrl = source;
+    window.channelName = QStringLiteral("Same channel");
+    window.displayTitle = QStringLiteral("Same programme");
+    window.startAt = QDateTime::currentDateTimeUtc();
+    QVERIFY(controller.startSession(window));
+    const auto firstPath = controller.m_sessions.at(window.id)->recordTempPath;
+    QTRY_VERIFY_WITH_TIMEOUT(controller.m_sessions.empty(), 10000);
+    QFile first(firstPath);
+    QVERIFY(first.open(QIODevice::ReadOnly));
+    const auto original = first.readAll();
+    QVERIFY(!original.isEmpty());
+    first.close();
+    QVERIFY(controller.startSession(window));
+    const auto secondPath = controller.m_sessions.at(window.id)->recordTempPath;
+    QVERIFY(firstPath != secondPath);
+    QTRY_VERIFY_WITH_TIMEOUT(controller.m_sessions.empty(), 10000);
+    QVERIFY(first.open(QIODevice::ReadOnly));
+    QCOMPARE(first.readAll(), original);
+    QVERIFY(QFileInfo(secondPath).size() > 0);
+    controller.shutdownForApplicationExit();
+    QVERIFY(!controller.startSession(window));
+}
+
+void AppModelTests::dvrTapPreservesChannelMetadata()
+{
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    PlayerController player;
+    DvrController controller(&settings, &player);
+    Channel channel;
+    channel.id = 7;
+    channel.profileId = QUuid::createUuid();
+    channel.name = QStringLiteral("Live channel");
+    channel.streamUrl = QStringLiteral("http://127.0.0.1/live");
+    channel.catchupSupported = true;
+    channel.catchupWindowHours = 48;
+    auto session = std::make_unique<DvrController::Session>();
+    session->window.id = QStringLiteral("test");
+    session->window.profileId = guidToString(channel.profileId);
+    session->window.channelId = channel.id;
+    session->window.streamUrl = channel.streamUrl;
+    session->state = DvrController::SessionState::Running;
+    session->recordingStarted = true;
+    session->tapUrl = QStringLiteral("udp://127.0.0.1:12345");
+    controller.m_sessions.emplace(QStringLiteral("test"), std::move(session));
+    QVERIFY(controller.attachPlaybackForChannel(channel));
+    QCOMPARE(player.currentChannelValue()->streamUrl, channel.streamUrl);
+    QVERIFY(player.currentChannelValue()->catchupSupported);
+    QCOMPARE(player.currentPlaybackUrl(), QStringLiteral("udp://127.0.0.1:12345"));
+    controller.finalizeStopSession(QStringLiteral("test"), 0, QProcess::NormalExit);
+    QCOMPARE(player.currentPlaybackUrl(), channel.streamUrl);
+    QVERIFY(player.currentChannelValue()->catchupSupported);
+}
+
+void AppModelTests::timeshiftStorageBudgetAndSubtitleCleanup()
+{
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    settings.current().timeshiftMaxDiskGb = 1;
+    settings.current().timeshiftStorageDirectory = dir.path();
+    PlayerController player;
+    DvrController dvr(&settings, &player);
+    MultiViewController multiview(&settings, nullptr, &player);
+    TimeshiftController controller(&settings, &player, &dvr, &multiview);
+    Channel channel;
+    channel.streamUrl = QStringLiteral("http://127.0.0.1/live");
+    player.m_currentChannel = channel;
+    player.m_currentPlaybackUrl = QStringLiteral("http://127.0.0.1:12345/buffer");
+    controller.m_session.emplace();
+    auto &session = *controller.m_session;
+    session.channel = channel;
+    session.sessionDirectory = dir.filePath(QStringLiteral("session"));
+    QVERIFY(QDir().mkpath(session.sessionDirectory));
+    TimeshiftController::SubtitleRendition subtitle;
+    subtitle.playlistPath = QDir(session.sessionDirectory).filePath(QStringLiteral("subtitle_0.m3u8"));
+    session.subtitleRenditions.push_back(subtitle);
+    QFile playlist(subtitle.playlistPath);
+    QVERIFY(playlist.open(QIODevice::WriteOnly));
+    playlist.write("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:2,\nsubtitle_0_000001.vtt\n");
+    playlist.close();
+    const auto oldPath = QDir(session.sessionDirectory).filePath(QStringLiteral("subtitle_0_000000.vtt"));
+    const auto keptPath = QDir(session.sessionDirectory).filePath(QStringLiteral("subtitle_0_000001.vtt"));
+    for (const auto &path : {oldPath, keptPath}) {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("WEBVTT\n");
+        QVERIFY(file.flush());
+        QVERIFY(file.setFileTime(QDateTime::currentDateTimeUtc().addSecs(-120), QFileDevice::FileModificationTime));
+    }
+    QVERIFY(controller.maintainStorageBudget());
+    QVERIFY(!QFileInfo::exists(oldPath));
+    QVERIFY(QFileInfo::exists(keptPath));
+    const auto sessionPath = session.sessionDirectory;
+    QFile sparse(QDir(sessionPath).filePath(QStringLiteral("large.ts")));
+    QVERIFY(sparse.open(QIODevice::WriteOnly));
+    QVERIFY(sparse.resize(1024LL * 1024 * 1024 + 1));
+    sparse.close();
+    controller.m_storageCheckTimer.invalidate();
+    QSignalSpy notices(&controller, &TimeshiftController::statusMessageRequested);
+    QVERIFY(!controller.maintainStorageBudget());
+    QVERIFY(!controller.m_session);
+    QVERIFY(!QFileInfo::exists(sessionPath));
+    QCOMPARE(player.currentPlaybackUrl(), channel.streamUrl);
+    QCOMPARE(notices.size(), 1);
+}
+
+void AppModelTests::timeshiftDisableDuringPendingAttachRestoresLive()
+{
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    PlayerController player;
+    DvrController dvr(&settings, &player);
+    MultiViewController multiview(&settings, nullptr, &player);
+    TimeshiftController controller(&settings, &player, &dvr, &multiview);
+    Channel channel;
+    channel.id = 18;
+    channel.profileId = QUuid::createUuid();
+    channel.streamUrl = QStringLiteral("http://127.0.0.1/live");
+    player.m_currentChannel = channel;
+    player.m_currentPlaybackUrl = QStringLiteral("http://127.0.0.1:12345/pending");
+    controller.m_session.emplace();
+    controller.m_session->channel = channel;
+    controller.m_session->playbackLoadPending = true;
+    controller.m_session->pendingPlaybackUrl = player.currentPlaybackUrl();
+    controller.m_session->fallbackPlaybackUrl = QStringLiteral("udp://127.0.0.1:12345");
+    controller.m_session->ingestProcess = std::make_unique<QProcess>(&controller);
+    QPointer<QProcess> currentIngest(controller.m_session->ingestProcess.get());
+    TimeshiftController::Session retained;
+    retained.ingestProcess = std::make_unique<QProcess>(&controller);
+    QPointer<QProcess> retainedIngest(retained.ingestProcess.get());
+    controller.m_retainedSessions.push_back(std::move(retained));
+    bool releasedBeforeRestore = false;
+    connect(&controller, &TimeshiftController::uiTestPlaybackUrlObserved, this,
+        [&](const QString &layer, const QString &) {
+            if (layer == QStringLiteral("timeshift.restore-live")) {
+                releasedBeforeRestore = currentIngest.isNull() && retainedIngest.isNull();
+            }
+        });
+    controller.applySettings();
+    QVERIFY(releasedBeforeRestore);
+    QVERIFY(!controller.m_session);
+    QCOMPARE(player.currentPlaybackUrl(), channel.streamUrl);
+}
+
+void AppModelTests::dvrReadinessRequiresDataAndStalledIngestRestarts()
+{
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    settings.current().dvrStartOffsetMinutes = 0;
+    settings.current().dvrEndOffsetMinutes = 0;
+    PlayerController player;
+    DvrController controller(&settings, &player);
+    controller.m_tickTimer.stop();
+    DvrScheduleEntry entry;
+    entry.profileId = guidToString(QUuid::createUuid());
+    entry.channelId = 15;
+    entry.start = QDateTime::currentDateTimeUtc().addSecs(-60);
+    entry.stop = entry.start.addSecs(600);
+    controller.m_schedules = {entry};
+    const auto window = controller.mergedWindows().front();
+    auto session = std::make_unique<DvrController::Session>();
+    session->window = window;
+    session->startRequestedAt = QDateTime::currentDateTimeUtc();
+    session->recordTempPath = dir.filePath(QStringLiteral("record.ts"));
+    session->remuxToMkv = false;
+    auto *active = session.get();
+    controller.m_sessions.emplace(window.id, std::move(session));
+    controller.tick();
+    QCOMPARE(controller.activeRecordingCount(), 0);
+    QFile data(active->recordTempPath);
+    QVERIFY(data.open(QIODevice::WriteOnly));
+    data.write("recorded data");
+    data.close();
+    controller.tick();
+    QCOMPARE(controller.activeRecordingCount(), 1);
+    active->lastRecordingAdvanceAt = QDateTime::currentDateTimeUtc().addSecs(-60);
+    controller.tick();
+    QVERIFY(controller.m_sessions.empty());
+    QVERIFY(controller.m_restartNotBeforeByWindowId.contains(window.id));
+    QVERIFY(QFileInfo::exists(data.fileName()));
+}
+
 void AppModelTests::timeshiftControllerPreparingUntilPlaybackAttached()
 {
     QTemporaryDir tempDir;
@@ -5808,11 +6210,19 @@ void AppModelTests::timeshiftControllerPreparingUntilPlaybackAttached()
     QVERIFY(!timeshift.isPreparing());
 }
 
+void AppModelTests::timeshiftControllerProbeKeepsMetadataWithStderr_data()
+{
+    QTest::addColumn<bool>("dvrTap");
+    QTest::newRow("direct-source") << false;
+    QTest::newRow("existing-dvr-tap") << true;
+}
+
 void AppModelTests::timeshiftControllerProbeKeepsMetadataWithStderr()
 {
 #if defined(Q_OS_WIN)
     QSKIP("POSIX process shims are used by this test.");
 #else
+    QFETCH(bool, dvrTap);
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     const auto toolsDir = tempDir.filePath(QStringLiteral("tools"));
@@ -5839,8 +6249,28 @@ void AppModelTests::timeshiftControllerProbeKeepsMetadataWithStderr()
     channel.profileId = QUuid::createUuid();
     channel.streamUrl = QStringLiteral("http://127.0.0.1/live177");
     player.m_currentChannel = channel;
+    if (dvrTap) {
+        auto recording = std::make_unique<DvrController::Session>();
+        recording->window.profileId = guidToString(channel.profileId);
+        recording->window.channelId = channel.id;
+        recording->recordingStarted = true;
+        recording->state = DvrController::SessionState::Running;
+        recording->tapUrl = QStringLiteral("udp://127.0.0.1:12345");
+        player.m_currentPlaybackUrl = recording->tapUrl;
+        dvr.m_sessions.emplace(QStringLiteral("test-tap"), std::move(recording));
+    }
     QVERIFY(timeshift.startSessionForCurrentChannel(false, QStringLiteral("test")));
+    QPointer<QProcess> probe(timeshift.m_session->probeProcess.get());
+    bool probeSurvivedSignal = false;
+    connect(probe, &QProcess::finished, &player, [&]() { probeSurvivedSignal = !probe.isNull(); });
+    if (dvrTap) {
+        QVERIFY(probe->program().isEmpty());
+        emit player.player()->playbackStopped();
+        QVERIFY(!probe->program().isEmpty());
+    }
     QTRY_VERIFY_WITH_TIMEOUT(timeshift.m_session && timeshift.m_session->probeCompletionHandled, 3000);
+    QVERIFY(probeSurvivedSignal);
+    QCOMPARE(timeshift.m_session->fallbackPlaybackUrl, channel.streamUrl);
     QCOMPARE(timeshift.m_session->audioTrackCount, 1);
     QCOMPARE(timeshift.m_session->subtitleTrackCount, 1);
     QVERIFY(!timeshift.m_session->avMasterPlaylistPath.isEmpty());
@@ -9883,6 +10313,7 @@ void AppModelTests::dvrControllerRemuxDeletesTempWhenDurationMatchesRegardlessOf
         "exit 23\n");
     const QString ffprobeScript = QStringLiteral(
         "#!/usr/bin/env bash\n"
+        "sleep 0.2\n"
         "target=\"${@: -1}\"\n"
         "if [[ \"$target\" == *.ts ]]; then\n"
         "  echo \"150.000\"\n"
@@ -9911,11 +10342,17 @@ void AppModelTests::dvrControllerRemuxDeletesTempWhenDurationMatchesRegardlessOf
     session.recordTempPath = tempPath;
     session.recordFinalPath = finalPath;
 
+    int uiTicks = 0;
+    QTimer responsivenessTimer;
+    responsivenessTimer.setInterval(10);
+    connect(&responsivenessTimer, &QTimer::timeout, this, [&]() { ++uiTicks; });
+    responsivenessTimer.start();
     dvrController.maybeStartRemux(session);
 
     QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(finalPath), 5000);
     QVERIFY(QFileInfo(finalPath).size() > 0);
     QTRY_VERIFY_WITH_TIMEOUT(!QFileInfo::exists(tempPath), 5000);
+    QVERIFY2(uiTicks >= 10, "DVR duration verification blocked the UI event loop");
 #endif
 }
 
@@ -9978,7 +10415,9 @@ void AppModelTests::dvrControllerRemuxKeepsTempWhenDurationMismatched()
 
     dvrController.maybeStartRemux(session);
 
-    QTRY_VERIFY_WITH_TIMEOUT(!QFileInfo::exists(finalPath), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(dvrController.findChildren<QProcess *>().isEmpty(), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(dvrController.findChildren<QFutureWatcherBase *>().isEmpty(), 5000);
+    QVERIFY(!QFileInfo::exists(finalPath));
     QVERIFY(QFileInfo::exists(tempPath));
 #endif
 }

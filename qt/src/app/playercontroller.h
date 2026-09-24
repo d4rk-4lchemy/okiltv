@@ -186,7 +186,7 @@ public:
         bool remuxRecordingsToMkv = true,
         bool imageSmoothingEnabled = false,
         const QString &picturePreset = QStringLiteral("standard"));
-    void playChannel(const Core::Channel &channel);
+    void playChannel(const Core::Channel &channel, const QString &playbackUrl = {});
     void playCatchupChannel(const Core::Channel &channel, const QString &catchupUrl, const QString &programLabel);
     void playCatchupChannel(
         const Core::Channel &channel,

@@ -3,6 +3,7 @@
 #include "../core/models.h"
 
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QObject>
 #include <QPointer>
 #include <QProcess>
@@ -140,6 +141,7 @@ private:
         int subtitleTrackCount { 0 };
         QStringList droppedSubtitleCodecs;
         QDateTime lastPlaylistAdvanceUtc;
+        QDateTime ingestStartedAt;
         qint64 reconnectReadyOldestEpochMs { 0 };
         qint64 attachedWindowStartEpochMs { 0 };
         qint64 attachedWindowEndEpochMs { 0 };
@@ -253,6 +255,7 @@ private:
     void handleMultiviewLayoutChanged();
     void handlePlaylistPoll();
     void cleanupStaleSessions() const;
+    bool maintainStorageBudget();
     bool ensureDiskAdmission(const QString &inputUrl, QString *failureMessage) const;
     QString selectInputUrlForChannel(const Core::Channel &channel) const;
     void updateDerivedState();
@@ -265,6 +268,7 @@ private:
     QTcpServer m_playbackServer;
     QTimer m_readyPollTimer;
     QTimer m_playlistPollTimer;
+    QElapsedTimer m_storageCheckTimer;
     QTimer m_noticeClearTimer;
     QTimer m_reconnectGenerationTimer;
     QString m_noticeAutoClearSessionId;

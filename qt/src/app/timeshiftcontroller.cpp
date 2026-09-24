@@ -1906,11 +1906,13 @@ void TimeshiftController::cleanupSessionFiles(Session &session, const bool force
     session.stopRequested = true;
     session.probeCompletionHandled = true;
     if (session.probeProcess) {
+        session.probeProcess->disconnect(this);
         session.probeProcess->kill();
         session.probeProcess.reset();
     }
     if (session.ingestProcess) {
         session.state = SessionState::Stopping;
+        session.ingestProcess->disconnect(this);
         if (forceImmediateProcessKill) {
             session.ingestProcess->kill();
             session.ingestProcess->waitForFinished(250);
@@ -1936,14 +1938,12 @@ void TimeshiftController::cleanupUnreachableRetainedSessions()
     }
 
     const auto globalLive = globalLiveEdgeEpochMs();
-    if (globalLive <= 0) {
-        return;
-    }
     const auto floorEpoch = globalLive - static_cast<qint64>(windowSeconds()) * 1000;
     for (auto index = static_cast<int>(m_retainedSessions.size()) - 1; index >= 0; --index) {
         auto &session = m_retainedSessions[index];
         const auto endEpoch = sessionLiveEdgeEpochMs(session);
-        if (endEpoch <= 0 || endEpoch >= floorEpoch) {
+        const auto emptyFailed = endEpoch <= 0 && session.state == SessionState::Failed;
+        if (!emptyFailed && (endEpoch <= 0 || endEpoch >= floorEpoch)) {
             continue;
         }
         cleanupSessionFiles(session);
@@ -1964,7 +1964,14 @@ void TimeshiftController::handleRuntimeIngestFailure(
     session.stopRequested = true;
     session.probeCompletionHandled = true;
     if (session.ingestProcess) {
-        session.ingestProcess.reset();
+        // This path also runs inside errorOccurred/finished. Keep the signal
+        // sender alive until Qt has returned from dispatching the event.
+        auto *process = session.ingestProcess.release();
+        process->disconnect(this);
+        if (process->state() != QProcess::NotRunning) {
+            process->kill();
+        }
+        process->deleteLater();
     }
 
     if (fromStartup && isCurrent && !wasPlaybackAttached) {
@@ -2019,7 +2026,7 @@ bool TimeshiftController::startDetachedGeneration(const QString &reason)
     session.startReason = reason;
     session.channel = channel;
     session.inputUrl = inputUrl;
-    session.fallbackPlaybackUrl = inputUrl;
+    session.fallbackPlaybackUrl = channel.streamUrl;
     session.pauseWhenReady = false;
     session.sessionDirectory = QDir(rootDirectory()).filePath(sessionFolderName(channel));
     QDir().mkpath(session.sessionDirectory);
@@ -2103,6 +2110,7 @@ bool TimeshiftController::startDetachedGeneration(const QString &reason)
         QStringLiteral("Starting detached reconnect generation %1 (%2).")
             .arg(created.id)
             .arg(reason));
+    created.ingestStartedAt = QDateTime::currentDateTimeUtc();
     created.ingestProcess->start(ffmpeg, args);
     emit stateChanged();
     return true;
@@ -2763,7 +2771,8 @@ void TimeshiftController::handlePlaybackServerRequest(QTcpSocket *socket)
 
 bool TimeshiftController::channelEligibleForTimeshift(const std::optional<Channel> &channel) const
 {
-    return channel.has_value() && !m_multiViewController->isActive();
+    return channel.has_value() && !m_multiViewController->isActive()
+        && !m_playerController->inCatchupMode();
 }
 
 bool TimeshiftController::startSessionForCurrentChannel(const bool pauseWhenReady, const QString &reason)
@@ -2812,7 +2821,7 @@ bool TimeshiftController::startSessionForCurrentChannel(const bool pauseWhenRead
     session.startReason = reason;
     session.channel = channel;
     session.inputUrl = inputUrl;
-    session.fallbackPlaybackUrl = inputUrl;
+    session.fallbackPlaybackUrl = channel.streamUrl;
     emit uiTestPlaybackUrlObserved(
         QStringLiteral("timeshift.fallback"),
         redactSensitiveText(session.fallbackPlaybackUrl));
@@ -2835,7 +2844,10 @@ bool TimeshiftController::startSessionForCurrentChannel(const bool pauseWhenRead
 
         auto &sessionRef = *m_session;
         sessionRef.probeCompletionHandled = true;
-        sessionRef.probeProcess.reset();
+        if (auto *probe = sessionRef.probeProcess.release()) {
+            probe->disconnect(this);
+            probe->deleteLater();
+        }
 
         const auto segmentSeconds = std::clamp(m_settings->current().timeshiftSegmentSeconds, 2, 60);
         const auto listSize = std::max(8, static_cast<int>(std::ceil(windowSeconds() / static_cast<double>(segmentSeconds))));
@@ -3028,6 +3040,7 @@ bool TimeshiftController::startSessionForCurrentChannel(const bool pauseWhenRead
                 .arg(sessionRef.droppedSubtitleCodecs.isEmpty()
                     ? QStringLiteral("none")
                     : sessionRef.droppedSubtitleCodecs.join(QStringLiteral(","))));
+        sessionRef.ingestStartedAt = QDateTime::currentDateTimeUtc();
         process->start(ffmpeg, args);
         m_readyPollTimer.start();
         m_playlistPollTimer.start();
@@ -3096,7 +3109,26 @@ bool TimeshiftController::startSessionForCurrentChannel(const bool pauseWhenRead
         QStringLiteral("Starting async ffprobe preflight for %1 (%2).")
             .arg(m_session->channel.name)
             .arg(m_session->startReason));
-    probeProcess->start(ffprobe, probeArgs);
+    if (QUrl(inputUrl).scheme() == QLatin1String("udp")
+        && m_playerController->currentPlaybackUrl().trimmed() == inputUrl.trimmed()) {
+        // A unicast DVR tap has one reader. Release mpv's socket before the
+        // sequential probe/ingest readers bind it when enabling Timeshift.
+        auto stopConnection = std::make_shared<QMetaObject::Connection>();
+        const auto launchProbe = [this, sessionId, ffprobe, probeArgs, stopConnection]() {
+            QObject::disconnect(*stopConnection);
+            if (!m_session || m_session->id != sessionId || m_session->stopRequested
+                || !m_session->probeProcess || !m_session->probeProcess->program().isEmpty()) {
+                return;
+            }
+            m_session->probeProcess->start(ffprobe, probeArgs);
+        };
+        *stopConnection = connect(m_playerController->player(), &Player::MpvPlayer::playbackStopped,
+            this, launchProbe);
+        m_playerController->player()->stop();
+        QTimer::singleShot(1000, this, launchProbe);
+    } else {
+        probeProcess->start(ffprobe, probeArgs);
+    }
     emit stateChanged();
     return true;
 }
@@ -3118,9 +3150,11 @@ void TimeshiftController::attachSessionPlaybackIfReady()
     if (m_session->playbackAttached) {
         const auto sessionStartEpochMs = sessionWindowStartEpochMs(*m_session);
         if (sessionStartEpochMs > 0 && m_session->attachedWindowStartEpochMs < sessionStartEpochMs) {
-            m_session->attachedWindowStartEpochMs = sessionStartEpochMs;
-            m_session->delayedStartEpochMs = sessionStartEpochMs;
-            setNoticeText(QStringLiteral("The oldest retained part of the buffer was pruned. Playback moved to the oldest available point."));
+            if (!m_session->playbackLoadPending && currentPlaybackEpochMs() < sessionStartEpochMs) {
+                const auto paused = m_playerController->player()->pauseState().value_or(false);
+                playSessionFromAnchor(sessionReliableStartEpochMs(*m_session), paused);
+                setNoticeText(QStringLiteral("The oldest retained part of the buffer was pruned. Playback moved to the oldest available point."));
+            }
         }
         m_session->attachedWindowEndEpochMs =
             std::max(m_session->attachedWindowStartEpochMs, sessionLiveEdgeEpochMs(*m_session));
@@ -3208,6 +3242,7 @@ void TimeshiftController::stopSession(
     m_noticeAutoClearText.clear();
     m_restartWhenSinglePlaybackReturns = markForSinglePlaybackRestart;
 
+    QString restorePlaybackUrl;
     if (m_session.has_value()) {
         auto session = std::move(m_session.value());
         m_session.reset();
@@ -3216,22 +3251,26 @@ void TimeshiftController::stopSession(
             QStringLiteral("timeshift.session.stop"),
             QStringLiteral("Stopping timeshift session %1 (%2).").arg(session.id, reason));
 
-        if (restoreLivePlayback
-            && session.playbackAttached
-            && m_playerController->currentPlaybackUrl().trimmed() == session.playbackUrl.trimmed()) {
-            emit uiTestPlaybackUrlObserved(
-                QStringLiteral("timeshift.restore-live"),
-                redactSensitiveText(session.fallbackPlaybackUrl));
-            m_playerController->playCurrentPlaybackUrl(session.fallbackPlaybackUrl, false);
-        }
-
+        const auto currentChannel = m_playerController->currentChannelValue();
+        const auto shouldRestore = restoreLivePlayback && !m_playerController->inCatchupMode()
+            && currentChannel && currentChannel->id == session.channel.id
+            && currentChannel->profileId == session.channel.profileId;
+        // Release ingest/probe UDP sockets before mpv reopens a DVR tap.
         cleanupSessionFiles(session, forceImmediateProcessKill);
+        if (shouldRestore) {
+            restorePlaybackUrl = selectInputUrlForChannel(session.channel);
+        }
     }
 
     for (auto &retained : m_retainedSessions) {
         cleanupSessionFiles(retained, forceImmediateProcessKill);
     }
     m_retainedSessions.clear();
+    if (!restorePlaybackUrl.isEmpty()) {
+        emit uiTestPlaybackUrlObserved(
+            QStringLiteral("timeshift.restore-live"), redactSensitiveText(restorePlaybackUrl));
+        m_playerController->playCurrentPlaybackUrl(restorePlaybackUrl, false);
+    }
 
     emit stateChanged();
 }
@@ -3245,7 +3284,7 @@ bool TimeshiftController::restoreLivePlaybackPath()
     emit uiTestPlaybackUrlObserved(
         QStringLiteral("timeshift.restore-live"),
         redactSensitiveText(m_session->fallbackPlaybackUrl));
-    m_playerController->playCurrentPlaybackUrl(m_session->fallbackPlaybackUrl, false);
+    m_playerController->playCurrentPlaybackUrl(selectInputUrlForChannel(m_session->channel), false);
     return true;
 }
 
@@ -3269,7 +3308,7 @@ void TimeshiftController::handleCurrentChannelChanged()
 
 bool TimeshiftController::handlePrimaryPlaybackActivation()
 {
-    if (!enabled() || m_multiViewController->isActive()) {
+    if (!enabled() || m_multiViewController->isActive() || m_playerController->inCatchupMode()) {
         return false;
     }
 
@@ -3323,17 +3362,82 @@ void TimeshiftController::handlePlaylistPoll()
     if (!m_session.has_value()) {
         return;
     }
+    if (!maintainStorageBudget()) {
+        return;
+    }
     finalizePendingPlaybackLoadIfReady(QStringLiteral("playlist-poll"));
     applyPendingPostLoadSeekIfReady(QStringLiteral("playlist-poll"));
 
-    if (m_session->state != SessionState::Failed
-        && m_session->playlistInfo.valid
-        && m_session->lastPlaylistAdvanceUtc.isValid()
-        && m_session->lastPlaylistAdvanceUtc.msecsTo(QDateTime::currentDateTimeUtc()) >= kPlaylistStallTimeoutMs
-        && isActive()
-        && !m_playerController->player()->pauseState().value_or(false)) {
-        handlePlaybackFailure(QStringLiteral("playlist-stall"));
+    // Ingest must recover even while playback is paused or startup has not
+    // produced its first playlist. A live but silent ffmpeg is not healthy.
+    const auto now = QDateTime::currentDateTimeUtc();
+    const auto timeoutMs = std::max(kPlaylistStallTimeoutMs, configuredSegmentSeconds() * 3000);
+    QStringList stalledIds;
+    for (const auto *session : allSessionsSortedByStart()) {
+        const auto lastAdvance = session->lastPlaylistAdvanceUtc.isValid()
+            ? session->lastPlaylistAdvanceUtc : session->ingestStartedAt;
+        if (session->ingestProcess && !session->stopRequested
+            && lastAdvance.isValid() && lastAdvance.msecsTo(now) >= timeoutMs) {
+            stalledIds.push_back(session->id);
+        }
     }
+    for (const auto &id : stalledIds) {
+        auto *session = findAnySessionById(id);
+        if (session == nullptr) {
+            continue;
+        }
+        handleRuntimeIngestFailure(*session, QStringLiteral("playlist-stall"),
+            m_session && session == &*m_session && !session->playbackAttached,
+            QStringLiteral("Live timeshift stalled during startup. Falling back to direct playback."));
+    }
+}
+
+bool TimeshiftController::maintainStorageBudget()
+{
+    if (m_storageCheckTimer.isValid() && m_storageCheckTimer.elapsed() < 5000) {
+        return true;
+    }
+    m_storageCheckTimer.start();
+    qint64 retainedBytes = 0;
+    const auto deleteBefore = QDateTime::currentDateTimeUtc().addSecs(-std::max<qint64>(10, static_cast<qint64>(configuredSegmentSeconds()) * 2));
+    for (const auto *session : allSessionsSortedByStart()) {
+        if (session->sessionDirectory.isEmpty()) {
+            continue;
+        }
+        // The segment muxer rolls its subtitle playlist but does not delete
+        // old WebVTT files. Keep listed segments plus a grace period for readers.
+        QSet<QString> retainedSubtitles;
+        auto subtitlesValid = !session->subtitleRenditions.isEmpty();
+        for (const auto &rendition : session->subtitleRenditions) {
+            const auto playlist = parsePlaylistSnapshot(rendition.playlistPath);
+            subtitlesValid = subtitlesValid && playlist.valid;
+            for (const auto &segment : playlist.segments) {
+                retainedSubtitles.insert(segment.relativePath);
+            }
+        }
+        const QDir directory(session->sessionDirectory);
+        const auto files = directory.entryInfoList(QDir::Files | QDir::NoSymLinks);
+        static const QRegularExpression subtitleSegment(QStringLiteral("^subtitle_[0-9]+_[0-9]+\\.vtt$"));
+        for (const auto &file : files) {
+            if (subtitlesValid && subtitleSegment.match(file.fileName()).hasMatch()
+                && !retainedSubtitles.contains(file.fileName()) && file.lastModified() < deleteBefore
+                && QFile::remove(file.absoluteFilePath())) {
+                continue;
+            }
+            retainedBytes += file.size();
+        }
+    }
+    const auto quotaBytes = static_cast<qint64>(normalizeTimeshiftMaxDiskGb(m_settings->current().timeshiftMaxDiskGb))
+        * 1024 * 1024 * 1024;
+    const QStorageInfo storage(rootDirectory());
+    const auto diskFull = storage.isValid() && storage.isReady() && storage.bytesAvailable() >= 0
+        && storage.bytesAvailable() < 16LL * 1024 * 1024;
+    if (retainedBytes <= quotaBytes && !diskFull) {
+        return true;
+    }
+    stopSession(true, QStringLiteral("storage-limit"));
+    emit statusMessageRequested(QStringLiteral("Live timeshift reached its storage limit. Returned to live playback."));
+    return false;
 }
 
 void TimeshiftController::cleanupStaleSessions() const

@@ -101,6 +101,8 @@ private:
         int lastExitCode { 0 };
         QProcess::ExitStatus lastExitStatus { QProcess::NormalExit };
         QDateTime startRequestedAt;
+        QDateTime lastRecordingAdvanceAt;
+        qint64 lastRecordedBytes { 0 };
         QString stopReason;
     };
 
@@ -120,7 +122,6 @@ private:
 
     std::pair<QDateTime, QDateTime> effectiveWindow(const Core::DvrScheduleEntry &entry) const;
     QList<MergedWindow> mergedWindows() const;
-    Core::Channel channelFromWindow(const MergedWindow &window, const QString &overrideUrl = QString {}) const;
     void loadSchedulesFromSettings();
     void persistSchedules();
     void emitRecordingChannelsChanged();

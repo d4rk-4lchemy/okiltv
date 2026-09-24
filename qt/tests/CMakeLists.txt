@@ -311,6 +311,8 @@ endif ()
 
 qt_add_executable(OKILTVQtDownloadTests
     tst_catchup_downloads.cpp
+    ../src/core/epgcache_service.cpp
+    ../src/core/epgstore.cpp
     ../src/player/catchuptsjoiner.cpp
     ../src/core/database_service.cpp
     ../src/app/catchupdownloadcontroller.cpp
