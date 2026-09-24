@@ -39,7 +39,8 @@ public:
         IsDvrRecordingRole,
         CurrentProgramTitleRole,
         CurrentProgramTimeRangeRole,
-        CatchupSupportedRole
+        CatchupSupportedRole,
+        CurrentProgramProgressRole
     };
     Q_ENUM(Roles)
 

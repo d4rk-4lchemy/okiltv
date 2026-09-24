@@ -1,6 +1,7 @@
 #include "epgservice.h"
 
 #include <QBuffer>
+#include "debuglogger.h"
 #include <QRegularExpression>
 #include <QTimeZone>
 #include <QXmlStreamReader>
@@ -61,126 +62,111 @@ bool looksCompressedPayload(const QByteArray &payload)
     return isGzip || looksLikeZlibHeader(payload);
 }
 
-QByteArray inflatePayload(const QByteArray &payload)
+// Pull-based decompression: QXmlStreamReader never owns a complete XML payload.
+class XmlInput final : public QIODevice
 {
-    if (payload.isEmpty()) {
-        return {};
+public:
+    XmlInput(QIODevice *source, EpgStore::Cancelled cancelled, qint64 maximum)
+        : m_source(source), m_cancelled(std::move(cancelled)), m_maximum(maximum)
+    {
+        m_compressed = looksCompressedPayload(source->peek(2));
+        if (m_compressed && inflateInit2(&m_stream, MAX_WBITS + 32) != Z_OK)
+            throw std::runtime_error("Failed to initialize XMLTV decompressor.");
+        open(QIODevice::ReadOnly);
     }
-
-    constexpr int kChunkSize = 16 * 1024;
-    constexpr qsizetype kMaxOutputBytes = 128 * 1024 * 1024;
-
-    z_stream stream {};
-    stream.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(payload.constData()));
-    stream.avail_in = static_cast<uInt>(payload.size());
-
-    if (inflateInit2(&stream, MAX_WBITS + 32) != Z_OK) {
-        throw std::runtime_error("Failed to initialize XMLTV decompressor.");
-    }
-
-    QByteArray inflated;
-    inflated.reserve(std::min<qsizetype>(payload.size() * 2, 512 * 1024));
-    char outputBuffer[kChunkSize];
-    int inflateCode = Z_OK;
-    do {
-        stream.next_out = reinterpret_cast<Bytef *>(outputBuffer);
-        stream.avail_out = kChunkSize;
-
-        inflateCode = inflate(&stream, Z_NO_FLUSH);
-        if (inflateCode != Z_OK && inflateCode != Z_STREAM_END) {
-            inflateEnd(&stream);
-            throw std::runtime_error("Failed to decompress XMLTV payload.");
-        }
-
-        const auto produced = kChunkSize - static_cast<int>(stream.avail_out);
-        if (produced > 0) {
-            inflated.append(outputBuffer, produced);
-            if (inflated.size() > kMaxOutputBytes) {
-                inflateEnd(&stream);
-                throw std::runtime_error("XMLTV payload is too large after decompression.");
+    ~XmlInput() override { if (m_compressed) inflateEnd(&m_stream); }
+    bool isSequential() const override { return true; }
+    qint64 bytesAvailable() const override { return QIODevice::bytesAvailable() + (m_finished ? 0 : 1); }
+    bool atEnd() const override { return m_finished && QIODevice::bytesAvailable() == 0; }
+protected:
+    qint64 readData(char *data, qint64 maximum) override
+    {
+        if (m_cancelled && m_cancelled()) throw std::runtime_error("EPG import cancelled.");
+        if (m_finished || maximum <= 0) return 0;
+        maximum = std::min<qint64>(maximum, sizeof(m_input));
+        qint64 produced = 0;
+        if (!m_compressed) {
+            produced = m_source->read(data, maximum);
+            if (produced < 0) throw std::runtime_error("Cannot read XMLTV input.");
+            m_finished = produced == 0;
+        } else {
+            while (produced == 0 && !m_finished) {
+                if (!m_stream.avail_in) {
+                    const auto n = m_source->read(m_input, sizeof(m_input));
+                    if (n <= 0) throw std::runtime_error("Truncated compressed XMLTV payload.");
+                    m_stream.next_in = reinterpret_cast<Bytef *>(m_input);
+                    m_stream.avail_in = static_cast<uInt>(n);
+                }
+                m_stream.next_out = reinterpret_cast<Bytef *>(data);
+                m_stream.avail_out = static_cast<uInt>(maximum);
+                const auto code = inflate(&m_stream, Z_NO_FLUSH);
+                produced = maximum - m_stream.avail_out;
+                if (code == Z_STREAM_END) {
+                    // RFC 1952 permits concatenated gzip members.
+                    if (m_stream.avail_in || !m_source->atEnd()) {
+                        if (inflateReset2(&m_stream, MAX_WBITS + 32) != Z_OK)
+                            throw std::runtime_error("Cannot reset XMLTV decompressor.");
+                    } else m_finished = true;
+                } else if (code != Z_OK) throw std::runtime_error("Failed to decompress XMLTV payload.");
             }
         }
-    } while (inflateCode != Z_STREAM_END);
-
-    inflateEnd(&stream);
-    return inflated;
-}
+        m_bytes += produced;
+        if (m_bytes > m_maximum) throw std::runtime_error("XMLTV exceeds the 2 GiB import limit.");
+        return produced;
+    }
+    qint64 writeData(const char *, qint64) override { return -1; }
+private:
+    QIODevice *m_source;
+    EpgStore::Cancelled m_cancelled;
+    qint64 m_maximum;
+    qint64 m_bytes = 0;
+    bool m_compressed = false;
+    bool m_finished = false;
+    z_stream m_stream {};
+    char m_input[64 * 1024];
+};
 
 } // namespace
 
 QList<EpgEntry> EpgService::parseEntries(const QByteArray &payload)
 {
-    if (payload.trimmed().isEmpty()) {
-        throw std::runtime_error("XMLTV payload is empty.");
-    }
-
-    auto normalizedPayload = payload;
-    if (looksCompressedPayload(payload)) {
-        normalizedPayload = inflatePayload(payload);
-    }
-    if (normalizedPayload.trimmed().isEmpty()) {
-        throw std::runtime_error("XMLTV payload is empty.");
-    }
-
     QBuffer buffer;
-    buffer.setData(normalizedPayload);
+    buffer.setData(payload);
     buffer.open(QIODevice::ReadOnly);
     return parseEntries(&buffer);
 }
 
 QList<EpgEntry> EpgService::parseEntries(QIODevice *device)
 {
-    if (device == nullptr) {
-        throw std::runtime_error("XMLTV payload device is null.");
-    }
-
     QList<EpgEntry> entries;
-    QXmlStreamReader reader(device);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
-    reader.setEntityExpansionLimit(1024);
-#endif
-
-    bool sawRootElement = false;
-    while (!reader.atEnd()) {
-        const auto token = reader.readNext();
-        if (token != QXmlStreamReader::StartElement) {
-            continue;
-        }
-
-        const auto name = reader.name();
-        if (!sawRootElement) {
-            sawRootElement = true;
-            if (name != QStringLiteral("tv")) {
-                throw std::runtime_error(
-                    QStringLiteral("Unexpected XMLTV root element '%1'. Expected <tv>.")
-                        .arg(name.toString())
-                        .toStdString());
-            }
-        }
-
-        if (name != QStringLiteral("programme")) {
-            continue;
-        }
-
-        const auto parsed = parseProgramme(reader);
-        if (parsed.has_value()) {
-            entries.push_back(parsed.value());
-        }
-    }
-
-    if (reader.hasError()) {
-        throw std::runtime_error(
-            QStringLiteral("XMLTV parse failed at line %1, column %2: %3")
-                .arg(reader.lineNumber())
-                .arg(reader.columnNumber())
-                .arg(reader.errorString())
-                .toStdString());
-    }
-    if (!sawRootElement) {
-        throw std::runtime_error("XMLTV payload does not contain a root element.");
-    }
-
+    streamEntries(device, [&](const EpgEntry &entry) { entries.push_back(entry); });
     return entries;
+}
+
+void EpgService::streamEntries(QIODevice *device, const EpgStore::Sink &sink,
+    const EpgStore::Cancelled &cancelled, qint64 maximumBytes)
+{
+    if (!device || !device->isReadable()) throw std::runtime_error("XMLTV input is not readable.");
+    XmlInput input(device, cancelled, maximumBytes);
+    QXmlStreamReader reader(&input);
+    reader.setEntityExpansionLimit(1024);
+    bool sawRoot = false;
+    while (!reader.atEnd()) {
+        if (cancelled && cancelled()) throw std::runtime_error("EPG import cancelled.");
+        if (reader.readNext() != QXmlStreamReader::StartElement) continue;
+        if (!sawRoot) {
+            sawRoot = true;
+            if (reader.name() != QStringLiteral("tv"))
+                throw std::runtime_error("Unexpected XMLTV root element. Expected <tv>.");
+        }
+        if (reader.name() == QStringLiteral("programme")) {
+            if (const auto parsed = parseProgramme(reader)) sink(*parsed);
+        }
+    }
+    if (reader.hasError()) throw std::runtime_error(
+        QStringLiteral("XMLTV parse failed at line %1, column %2: %3")
+            .arg(reader.lineNumber()).arg(reader.columnNumber()).arg(reader.errorString()).toStdString());
+    if (!sawRoot) throw std::runtime_error("XMLTV payload does not contain a root element.");
 }
 
 EpgService::Snapshot EpgService::buildSnapshot(const QList<EpgEntry> &entries)
@@ -233,6 +219,46 @@ void EpgService::applySnapshot(std::shared_ptr<const Snapshot> snapshot)
     m_snapshot = std::move(snapshot);
 }
 
+std::shared_ptr<const EpgService::Snapshot> EpgService::snapshot() const
+{
+    QReadLocker lock(&m_lock);
+    return m_snapshot;
+}
+
+QThreadPool *EpgService::readPool()
+{
+    static QThreadPool pool;
+    static const bool configured = [] { pool.setMaxThreadCount(2); return true; }();
+    Q_UNUSED(configured);
+    return &pool;
+}
+
+QThreadPool *EpgService::importPool()
+{
+    static QThreadPool pool;
+    static const bool configured = [] { pool.setMaxThreadCount(1); return true; }();
+    Q_UNUSED(configured);
+    return &pool;
+}
+
+QHash<QString, QList<EpgEntry>> EpgService::programsForChannels(const QStringList &channels,
+    const QDateTime &from, const QDateTime &to, int limit, bool summaries) const
+{
+    const auto pinned = snapshot();
+    if (pinned->store) {
+        try { return pinned->store->ranges(channels, from, to, limit, summaries); }
+        catch (const std::exception &error) {
+            DebugLogger::instance().log(QStringLiteral("epg.read"), QString::fromUtf8(error.what()));
+            return {};
+        }
+    }
+    EpgService reader;
+    reader.applySnapshot(pinned);
+    QHash<QString, QList<EpgEntry>> result;
+    for (const auto &channel : channels) result.insert(channel.trimmed().toLower(), reader.programsInRange(channel, from, to, limit));
+    return result;
+}
+
 void EpgService::clear()
 {
     applySnapshot(Snapshot {});
@@ -282,6 +308,14 @@ QList<EpgEntry> EpgService::programsInRange(const QString &tvgId, const QDateTim
         return {};
     }
 
+    if (snapshot->store) {
+        try { return snapshot->store->range(tvgId, from, to, limit); }
+        catch (const std::exception &error) {
+            DebugLogger::instance().log(QStringLiteral("epg.read"), QString::fromUtf8(error.what()));
+            return {};
+        }
+    }
+
     const auto it = snapshot->index.constFind(normalizeKey(tvgId));
     if (it == snapshot->index.cend()) {
         return {};
@@ -323,7 +357,7 @@ QList<EpgEntry> EpgService::allEntries() const
         return {};
     }
 
-    return snapshot->allEntries;
+    return snapshot->store ? snapshot->store->allEntries() : snapshot->allEntries;
 }
 
 QDateTime EpgService::channelMaxStop(const QString &tvgId) const
@@ -338,6 +372,7 @@ QDateTime EpgService::channelMaxStop(const QString &tvgId) const
         return {};
     }
 
+    if (snapshot->store) return snapshot->store->maxStop(tvgId);
     return snapshot->maxStopByChannelId.value(normalizeKey(tvgId));
 }
 

@@ -25,7 +25,7 @@
 - **PiP + Multiview** - Keep multiple live sessions and switch/swap quickly.
 - **Keyboard-First Controls** - Full shortcut workflow for playback and navigation.
 
-## Screenshots
+## Screenshots (as of version 0.5.4)
 
 ![Live TV main screen](docs/screenshots/01-live-tv-main.jpg)
 

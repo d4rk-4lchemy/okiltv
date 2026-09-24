@@ -5,6 +5,7 @@
 
 #include <QDateTime>
 #include <QUuid>
+#include <atomic>
 
 namespace OKILTV::Core {
 
@@ -32,8 +33,16 @@ public:
         CacheData data;
     };
 
-    LoadResult load(const QUuid &profileId) const;
-    void save(const CacheData &data) const;
+    using Cancellation = std::shared_ptr<std::atomic_bool>;
+    static Cancellation beginImport(const QUuid &profileId);
+    static void cancel(const Cancellation &token);
+    static void invalidateSource(const QUuid &profileId);
+    static QString manifestFile(const QUuid &profileId);
+    CacheData build(const QUuid &profileId, const QString &fingerprint,
+        const EpgStore::Producer &producer, bool deduplicate = false,
+        const Cancellation &token = {}) const;
+    LoadResult load(const QUuid &profileId, const Cancellation &token = {}) const;
+    void save(const CacheData &data, const Cancellation &token = {}) const;
     void remove(const QUuid &profileId) const;
 
     static QString sourceFingerprint(const ServerProfile &profile);

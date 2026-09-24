@@ -89,20 +89,6 @@ void NowNextModel::setChannel(const std::optional<Channel> &channel)
     m_channel = channel;
     emit channelChanged();
 
-    if (channel.has_value() && !channel->tvgId.trimmed().isEmpty()) {
-        const auto lookAheadHours = normalizeGuideHours(m_settings->current().epgLookAheadHours);
-        const auto cacheKey = cacheKeyFor(channel.value(), lookAheadHours);
-        const auto it = m_resultCache.constFind(cacheKey);
-        if (it != m_resultCache.constEnd()) {
-            m_loading = false;
-            m_currentProgramVariant = it->currentProgramVariant;
-            m_nextProgramVariant = it->nextProgramVariant;
-            m_upcomingProgramsVariant = it->upcomingProgramsVariant;
-            m_pastProgramsVariant = it->pastProgramsVariant;
-            m_skipNextLoadingState = true;
-            emit dataChanged();
-        }
-    }
 
     refresh();
 }
@@ -138,14 +124,13 @@ void NowNextModel::refresh()
 void NowNextModel::startRefreshJob(const quint64 generation, const Channel &channel, const int lookAheadHours)
 {
     m_refreshInFlight = true;
-    m_backgroundTasks.addFuture(QtConcurrent::run([this, generation, channel, lookAheadHours]() {
+    m_backgroundTasks.addFuture(QtConcurrent::run(EpgService::readPool(), [this, generation, channel, lookAheadHours, snapshot = m_epg->snapshot()]() {
+        EpgService reader; reader.applySnapshot(snapshot);
         const auto now = QDateTime::currentDateTimeUtc();
         const auto historyStart = channel.catchupSupported && channel.catchupWindowHours > 0
             ? now.addSecs(-static_cast<qint64>(channel.catchupWindowHours) * 3600) : now;
-        const auto candidates = m_epg->programsInRange(
-            channel.tvgId,
-            historyStart,
-            now.addSecs(static_cast<qint64>(lookAheadHours) * 3600));
+        const auto candidates = reader.programsForChannels({channel.tvgId}, historyStart,
+            now.addSecs(static_cast<qint64>(lookAheadHours) * 3600), -1, true).value(channel.tvgId.trimmed().toLower());
 
         // XMLTV can contain duplicate entries. Programme identity does not depend on its title.
         QList<EpgEntry> entries;
@@ -192,6 +177,12 @@ void NowNextModel::startRefreshJob(const quint64 generation, const Channel &chan
             }
         }
 
+        for (auto *selected : {&result.currentProgram, &result.nextProgram}) {
+            if (!selected->has_value()) continue;
+            const auto start = selected->value().start;
+            for (const auto &entry : reader.programsInRange(channel.tvgId, start, start.addMSecs(1)))
+                if (entry.start == start) { *selected = entry; break; }
+        }
         if (result.currentProgram.has_value()) {
             result.currentProgramVariant = toVariantMap(result.currentProgram.value());
         }
@@ -199,18 +190,14 @@ void NowNextModel::startRefreshJob(const quint64 generation, const Channel &chan
             result.nextProgramVariant = toVariantMap(result.nextProgram.value());
         }
         result.upcomingProgramsVariant = toVariantList(result.upcomingPrograms);
+        if (snapshot->store) {
+            for (auto *list : {&result.pastProgramsVariant, &result.upcomingProgramsVariant})
+                for (auto &value : *list) { auto map = value.toMap(); map.insert(QStringLiteral("detailsPending"), true); value = map; }
+        }
 
         QMetaObject::invokeMethod(
             this,
-            [this, generation, cacheKey = cacheKeyFor(channel, lookAheadHours), result = std::move(result)]() mutable {
-                if (generation == m_refreshGeneration) {
-                    m_resultCache[cacheKey] = CachedResult {
-                        result.currentProgramVariant,
-                        result.nextProgramVariant,
-                        result.upcomingProgramsVariant,
-                        result.pastProgramsVariant
-                    };
-                }
+            [this, generation, result = std::move(result)]() mutable {
                 applyRefreshResult(generation, std::move(result));
             },
             Qt::QueuedConnection);

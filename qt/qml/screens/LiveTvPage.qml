@@ -226,6 +226,20 @@ Item {
     property int guideInitialChannelId: -1
     property bool suppressSelectionInteraction: false
     property var hoveredProgramData: ({})
+    property double epgDetailsRequestId: 0
+    onHoveredProgramDataChanged: {
+        if (hoveredProgramData.detailsPending)
+            epgDetailsRequestId = root.app.requestEpgDetails(epgTimeline.channelData, hoveredProgramData)
+        else epgDetailsRequestId = 0
+    }
+    Connections {
+        target: root.app
+        function onEpgDetailsReady(requestId, program, error) {
+            if (requestId !== root.epgDetailsRequestId) return
+            if (error.length === 0) root.hoveredProgramData = program
+            else root.hoveredProgramData = Object.assign({}, root.hoveredProgramData, {detailsPending: false, detailsError: error})
+        }
+    }
     property Item hoverAnchorItem: null
     property bool hoverBubbleVisible: false
     property bool hoverBubbleRowActive: false
@@ -1055,7 +1069,7 @@ Item {
             || (channel.streamUrl || "").length === 0) {
             return false
         }
-        return root.dvr.toggleProgramSchedule(channel, program)
+        return root.app.toggleEpgRecording(channel, program)
     }
 
     function toggleSelectedRightPaneDvrSchedule() {
@@ -1072,7 +1086,7 @@ Item {
             || (channel.streamUrl || "").length === 0) {
             return false
         }
-        return root.dvr.toggleProgramSchedule(channel, program)
+        return root.app.toggleEpgRecording(channel, program)
     }
 
     function togglePreferredRightPaneDvrSchedule() {
@@ -5302,6 +5316,7 @@ Item {
                         property bool channelIsDvrRecording: model.isDvrRecording
                         property string channelProgramTitle: model.currentProgramTitle
                         property string channelProgramTimeRange: model.currentProgramTimeRange
+                        property real channelProgramProgress: model.currentProgramProgress
                         property bool rowHovered: false
 
                         width: ListView.view.width
@@ -5385,13 +5400,34 @@ Item {
                                     elide: Text.ElideRight
                                 }
 
-                                Text {
+                                RowLayout {
                                     Layout.fillWidth: true
-                                    text: channelProgramTimeRange
                                     visible: channelProgramTimeRange.length > 0
-                                    color: Theme.textMuted
-                                    font.pixelSize: 10
-                                    elide: Text.ElideRight
+                                    spacing: 8
+
+                                    Text {
+                                        Layout.maximumWidth: Math.max(0, parent.width - 40)
+                                        text: channelProgramTimeRange
+                                        color: Theme.textMuted
+                                        font.pixelSize: 10
+                                        elide: Text.ElideRight
+                                    }
+
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        Layout.minimumWidth: 32
+                                        Layout.preferredHeight: 3
+                                        Layout.alignment: Qt.AlignVCenter
+                                        radius: height / 2
+                                        color: Theme.channelProgressTrack
+
+                                        Rectangle {
+                                            width: parent.width * Math.max(0, Math.min(100, liveChannelRow.channelProgramProgress)) / 100
+                                            height: parent.height
+                                            radius: parent.radius
+                                            color: Theme.channelProgressFill
+                                        }
+                                    }
                                 }
                             }
 
@@ -5411,13 +5447,13 @@ Item {
                             }
 
                             Item {
-                                Layout.preferredWidth: channelIsFavorite ? 16 : 0
+                                Layout.preferredWidth: 16
                                 Layout.preferredHeight: 16
                                 Layout.alignment: Qt.AlignVCenter
-                                visible: channelIsFavorite
 
                                 Image {
                                     anchors.fill: parent
+                                    visible: channelIsFavorite
                                     fillMode: Image.PreserveAspectFit
                                     source: channelIsFavorite ? root.iconPath("favourites.svg") : ""
                                     sourceSize.width: 16

@@ -8,6 +8,8 @@
 #include "../core/networkaccess.h"
 #include "../core/settingsmanager.h"
 
+#include "playercontroller.h"
+#include <QPointer>
 #include <QObject>
 #include <QElapsedTimer>
 #include <QFutureSynchronizer>
@@ -87,6 +89,8 @@ public slots:
     Q_INVOKABLE QVariantMap catchupActionState(const QVariantMap &channel, const QVariantMap &program) const;
     Q_INVOKABLE QVariantMap catchupDownloadActionState(const QVariantMap &channel, const QVariantMap &program) const;
     Q_INVOKABLE QString enqueueCatchupDownload(const QVariantMap &channel, const QVariantMap &program, const QUrl &destination);
+    Q_INVOKABLE quint64 requestEpgDetails(const QVariantMap &channel, const QVariantMap &program);
+    Q_INVOKABLE bool toggleEpgRecording(const QVariantMap &channel, const QVariantMap &program);
     void dumpDebugReport();
     Q_INVOKABLE QString debugSummary() const;
 
@@ -98,8 +102,12 @@ signals:
     void epgRefreshStateChanged();
     void profileLoadFinished(const QString &profileId, bool ok);
     void catchupProgressChanged();
+    void epgDetailsReady(quint64 requestId, const QVariantMap &program, const QString &error);
 
 private:
+    void resolveEpgDetails(const QVariantMap &channel, const QVariantMap &program,
+        const std::function<void(QVariantMap, QString)> &completed);
+    quint64 m_epgDetailsRequest = 0;
     QString buildDebugSummary() const;
     void setStatusText(const QString &value);
     void setBusy(bool value);
@@ -185,6 +193,17 @@ private:
     QFutureSynchronizer<void> m_backgroundTasks;
     quint64 m_profileLoadGeneration { 0 };
     quint64 m_epgLoadGeneration { 0 };
+    Core::EpgCacheService::Cancellation m_epgImportCancellation;
+    struct CatchupEpgWindow {
+        std::shared_ptr<const Core::EpgService::Snapshot> snapshot;
+        QDateTime from, to;
+        QList<Core::EpgEntry> entries;
+    };
+    QHash<QString, CatchupEpgWindow> m_catchupEpgWindows;
+    QSet<QString> m_catchupEpgPending;
+    QHash<PlayerController *, QPair<QPointer<PlayerController>, CatchupProgressSample>> m_pendingCatchupSamples;
+    void requestCatchupPrograms(const Core::Channel &channel, const QDateTime &time);
+
     quint64 m_programInfoGeneration { 0 };
     quint64 m_catchupPlayGeneration { 0 };
     bool m_programInfoRefreshInFlight { false };

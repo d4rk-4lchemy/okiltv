@@ -33,6 +33,8 @@ Item {
     }
     readonly property string episodeText: textValue("episodeNum").trim()
     readonly property string descriptionText: {
+        if (programData.detailsPending) return "Loading programme details…"
+        if (programData.detailsError) return programData.detailsError
         const value = textValue("description").trim()
         return value.length > 0 ? value : "No programme description available."
     }

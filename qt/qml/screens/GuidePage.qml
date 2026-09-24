@@ -33,6 +33,7 @@ Item {
     // qmllint enable unqualified
     property real channelColumnWidth: root.shell.layoutBand === "compact" ? 246 : 284
     property real pixelsPerMinute: root.shell.layoutBand === "compact" ? 3.0 : 3.6
+    readonly property real currentTimeTimelineX: root.epgGrid.currentTimeOffsetMinutes * root.pixelsPerMinute
     property real timelineVisibleWidth: root.epgGrid.windowSpanMinutes * root.pixelsPerMinute
     property real timelineOverflowWidth: root.shell.layoutBand === "compact" ? 120 : 144
     property real timelineBodyVisibleWidth: Math.max(0, timelineViewport.width)
@@ -82,7 +83,7 @@ Item {
         return days
     }
     property color currentTimeLineColor: "#b0bac4"
-    property real currentTimeLineOpacity: 0.58
+    property real currentTimeLineOpacity: 0.38
     property int pendingGuideRowIndex: -1
     property int pendingGuidePositionMode: ListView.Contain
     property var pendingGuideProgram: ({})
@@ -292,6 +293,7 @@ Item {
     }
 
     function selectProgram(channelId, program, expandDetails) {
+        root.epgGrid.cancelProgramRequest()
         const selectedStart = root.selectedProgramData().start || ""
         const programStart = program.start || ""
         const sameProgramSelected = root.guideState.selectedChannelId === channelId
@@ -357,18 +359,21 @@ Item {
             root.guideState.detailsExpanded = true
         }
 
-        const selectedProgram = root.epgGrid.programForChannelAtTimestamp(channelId, root.currentUtcIso())
+        root.epgGrid.requestProgram(channelId, root.currentUtcIso())
+    }
+
+    function applyResolvedProgram(channelId, selectedProgram, adjacent) {
+        if (root.guideState.selectedChannelId !== channelId) return
+        if (adjacent) {
+            root.focusProgram(channelId, selectedProgram)
+            return
+        }
         if ((selectedProgram.start || "").length > 0) {
-            if (!root.isProgramCenterVisible(selectedProgram)) {
-                root.applyGuideOpenAnchor()
-            }
+            if (!root.isProgramCenterVisible(selectedProgram)) root.applyGuideOpenAnchor()
             root.guideState.selectProgram(selectedProgram)
             root.epgGrid.selectedProgramStart = selectedProgram.start || ""
             root.scheduleGuideViewportSync(channelId, selectedProgram, ListView.Center, true, false)
-            return
-        }
-
-        root.scheduleGuideViewportSync(channelId, root.selectedProgramData(), ListView.Center, true, false)
+        } else root.scheduleGuideViewportSync(channelId, root.selectedProgramData(), ListView.Center, true, false)
     }
 
     function currentUtcIso() {
@@ -427,11 +432,9 @@ Item {
         }
 
         const currentProgram = root.selectedProgramData()
-        const nextProgram = root.epgGrid.adjacentProgram(
-            root.guideState.selectedChannelId,
-            currentProgram.start || "",
-            delta)
-        return root.focusProgram(root.guideState.selectedChannelId, nextProgram)
+        root.epgGrid.requestProgram(root.guideState.selectedChannelId,
+                                    currentProgram.start || "", delta, true)
+        return true
     }
 
     function moveSelectionVertically(delta) {
@@ -604,7 +607,7 @@ Item {
             || (channel.streamUrl || "").length === 0) {
             return false
         }
-        return root.dvr.toggleProgramSchedule(channel, program)
+        return root.app.toggleEpgRecording(channel, program)
     }
 
     function toggleHoveredProgramDvrSchedule() {
@@ -618,7 +621,7 @@ Item {
             || (channel.streamUrl || "").length === 0) {
             return false
         }
-        return root.dvr.toggleProgramSchedule(channel, program)
+        return root.app.toggleEpgRecording(channel, program)
     }
 
     function togglePreferredProgramDvrSchedule(preferKeyboardSelection) {
@@ -652,6 +655,7 @@ Item {
 
     Connections {
         target: root.epgGrid
+        function onProgramResolved(channelId, program, adjacent) { root.applyResolvedProgram(channelId, program, adjacent) }
 
         function onRebuildPendingChanged() {
             if (!root.epgGrid.rebuildPending) {
@@ -842,7 +846,8 @@ Item {
                     delegate: Rectangle {
                         required property var modelData
                         visible: modelData.startMinutes > 0
-                        x: modelData.startMinutes * root.pixelsPerMinute - timelineFlick.contentX
+                        x: modelData.startMinutes * root.pixelsPerMinute
+                            + root.headerMarkerXOffset - timeHeaderFlick.contentX
                         width: 2
                         height: timelineViewport.height
                         color: root.headerMarkerColor
@@ -1195,6 +1200,7 @@ Item {
                                         }
 
                                         Column {
+                                            id: guideProgramContent
                                             anchors.left: parent.left
                                             anchors.right: parent.right
                                             anchors.top: parent.top
@@ -1232,7 +1238,9 @@ Item {
                                                 color: "#2b3641"
 
                                                 Rectangle {
-                                                    width: parent.width * ((guideProgramTile.modelData.progressPercent || 0) / 100)
+                                                    // Use the Now line's timeline position, including the content inset.
+                                                    width: Math.max(0, root.currentTimeTimelineX
+                                                        - guideProgramTile.x - guideProgramContent.x)
                                                     height: parent.height
                                                     radius: parent.radius
                                                     color: "#9ea8b2"
@@ -1288,21 +1296,6 @@ Item {
                                     }
                                 }
                             }
-                            Repeater {
-                                model: root.timelineDays
-
-                                delegate: Rectangle {
-                                    required property var modelData
-                                    visible: modelData.startMinutes > 0
-                                    x: root.channelColumnWidth + root.rowSpacing
-                                        + modelData.startMinutes * root.pixelsPerMinute
-                                    width: 2
-                                    height: root.collapsedRowHeight
-                                    z: 1.5
-                                    color: root.headerMarkerColor
-                                }
-                            }
-
                             Loader {
                                 active: root.rowExpanded(timelineRow.channelId)
                                 x: timelineFlick.contentX + root.channelColumnWidth + root.rowSpacing
@@ -1430,7 +1423,7 @@ Item {
                                         Text {
                                             id: descriptionText
                                             width: parent.width
-                                            text: root.normalizeDescription(root.guideState.selectedProgram.description)
+                                            text: root.guideState.selectedProgram.detailsPending ? "Loading programme details…" : root.normalizeDescription(root.guideState.selectedProgram.description)
                                             color: Theme.textPrimary
                                             font.pixelSize: 13
                                             wrapMode: Text.Wrap
@@ -1447,9 +1440,9 @@ Item {
                             visible: root.epgGrid.currentTimeOffsetMinutes >= 0
                                 && root.epgGrid.currentTimeOffsetMinutes <= root.epgGrid.windowSpanMinutes
                             x: root.channelColumnWidth + root.rowSpacing
-                                + root.epgGrid.currentTimeOffsetMinutes * root.pixelsPerMinute
+                                + root.currentTimeTimelineX
                             y: 0
-                            width: 2
+                            width: 1
                             height: timelineFlick.height
                             z: 1
                             clip: true

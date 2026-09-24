@@ -4,6 +4,7 @@
 #include <QString>
 #include <QUrl>
 #include <QtGlobal>
+#include <QIODevice>
 
 #include <functional>
 #include <memory>
@@ -32,6 +33,11 @@ class NetworkAccess
 public:
     virtual ~NetworkAccess() = default;
     virtual QByteArray get(const QUrl &url) const = 0;
+    // The default supports small in-memory test transports. Production overrides
+    // this with bounded readyRead draining and independent idle/total deadlines.
+    virtual void download(const QUrl &url, QIODevice *destination,
+        const std::function<bool()> &cancelled = {},
+        const std::function<void(qint64)> &progress = {}) const;
 };
 
 class BlockingNetworkAccess final : public NetworkAccess
@@ -40,6 +46,9 @@ public:
     explicit BlockingNetworkAccess(int timeoutMs = 30000);
 
     QByteArray get(const QUrl &url) const override;
+    void download(const QUrl &url, QIODevice *destination,
+        const std::function<bool()> &cancelled = {},
+        const std::function<void(qint64)> &progress = {}) const override;
 
 private:
     int m_timeoutMs { 30000 };

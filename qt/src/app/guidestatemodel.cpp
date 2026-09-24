@@ -128,12 +128,17 @@ void GuideStateModel::selectProgram(const QVariantMap &program)
     }
     m_selectedProgram = entry;
     m_selectedProgramVariant = toVariantMap(entry);
+    if (program.value(QStringLiteral("detailsPending")).toBool()) {
+        m_selectedProgramVariant.insert(QStringLiteral("detailsPending"), true);
+        updatePrograms();
+    }
     emit selectedProgramChanged();
 }
 
 void GuideStateModel::selectProgramByStart(const QString &startIso)
 {
     m_preferredProgramStart = startIso.trimmed();
+    if (m_epg->snapshot()->store) { updatePrograms(); return; }
     for (const auto &program : m_channelPrograms) {
         if (program.start.toUTC().toString(Qt::ISODateWithMs) == m_preferredProgramStart
             || program.start.toUTC().toString(Qt::ISODate) == m_preferredProgramStart) {
@@ -212,15 +217,16 @@ void GuideStateModel::startProgramsUpdateJob(
 {
     m_updateInFlight = true;
     const auto preferredStart = QDateTime::fromString(m_preferredProgramStart, Qt::ISODateWithMs);
-    m_backgroundTasks.addFuture(QtConcurrent::run([this, generation, selectedChannel, lookAheadHours, preferredStart]() {
+    m_backgroundTasks.addFuture(QtConcurrent::run(EpgService::readPool(), [this, generation, selectedChannel, lookAheadHours, preferredStart, snapshot = m_epg->snapshot()]() {
+        EpgService reader; reader.applySnapshot(snapshot);
         ProgramsUpdate result;
         const auto from = QDateTime::currentDateTimeUtc().addSecs(-1800);
         const auto to = QDateTime::currentDateTimeUtc().addSecs(static_cast<qint64>(lookAheadHours) * 3600);
-        result.channelPrograms = m_epg->programsInRange(selectedChannel.tvgId, from, to);
+        result.channelPrograms = reader.programsForChannels({selectedChannel.tvgId}, from, to, -1, true).value(selectedChannel.tvgId.trimmed().toLower());
         // Guide navigation can select programmes outside the short preview list.
         // Resolve that identity separately without expanding the entire list.
         if (preferredStart.isValid()) {
-            const auto candidates = m_epg->programsInRange(
+            const auto candidates = reader.programsInRange(
                 selectedChannel.tvgId, preferredStart, preferredStart.addMSecs(1));
             for (const auto &program : candidates) {
                 if (program.start == preferredStart) {
@@ -239,6 +245,9 @@ void GuideStateModel::startProgramsUpdateJob(
             result.selectedProgram = result.channelPrograms.first();
         }
         if (result.selectedProgram.has_value()) {
+            const auto selectedStart = result.selectedProgram->start;
+            for (const auto &full : reader.programsInRange(selectedChannel.tvgId, selectedStart, selectedStart.addMSecs(1)))
+                if (full.start == selectedStart) { result.selectedProgram = full; break; }
             result.selectedProgramVariant = toVariantMap(result.selectedProgram.value());
         }
         result.channelProgramsVariant = toVariantList(result.channelPrograms);

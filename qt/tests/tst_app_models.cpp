@@ -646,6 +646,7 @@ private slots:
     void guideStateModelPreferredProgramStartSurvivesAsyncReload();
     void guideStateModelRefreshPreservesBrowsedProgram_data();
     void guideStateModelRefreshPreservesBrowsedProgram();
+    void epgDiskModelsLoadDetailsAsync();
     void epgMissingCacheFetchesFromSource();
     void m3uDiscoversEpgAndRespectsOverride();
     void m3uSourcesSaveArchiveSafetyMargin();
@@ -10243,13 +10244,29 @@ void AppModelTests::channelListModelExposesCurrentProgramRoles()
         { 1,
           QVariantMap {
               { QStringLiteral("title"), QStringLiteral("Morning News") },
-              { QStringLiteral("timeRange"), QStringLiteral("08:00 - 09:00") }
+              { QStringLiteral("timeRange"), QStringLiteral("08:00 - 09:00") },
+              { QStringLiteral("progressPercent"), 25.0 }
           } }
     });
 
     const auto row = model.index(0, 0);
     QCOMPARE(row.data(ChannelListModel::CurrentProgramTitleRole).toString(), QStringLiteral("Morning News"));
     QCOMPARE(row.data(ChannelListModel::CurrentProgramTimeRangeRole).toString(), QStringLiteral("08:00 - 09:00"));
+    QCOMPARE(row.data(ChannelListModel::CurrentProgramProgressRole).toDouble(), 25.0);
+
+    QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
+    model.setCurrentProgramInfo({{1, QVariantMap {
+        {QStringLiteral("title"), QStringLiteral("Morning News")},
+        {QStringLiteral("timeRange"), QStringLiteral("08:00 - 09:00")},
+        {QStringLiteral("progressPercent"), 50.0}
+    }}});
+    QCOMPARE(changed.size(), 1);
+    QVERIFY(changed.first().at(2).value<QList<int>>().contains(ChannelListModel::CurrentProgramProgressRole));
+    QCOMPARE(row.data(ChannelListModel::CurrentProgramProgressRole).toDouble(), 50.0);
+
+    model.setCurrentProgramInfo({});
+    QCOMPARE(row.data(ChannelListModel::CurrentProgramProgressRole).toDouble(), 0.0);
+    QVERIFY(row.data(ChannelListModel::CurrentProgramTimeRangeRole).toString().isEmpty());
 }
 
 void AppModelTests::channelListModelExposesDvrRecordingRole()
@@ -12212,6 +12229,58 @@ void AppModelTests::m3uSourcesSaveArchiveSafetyMargin()
     QCOMPARE(harness.settings->profileById(parseGuid(fileId))->catchupSafetyMinutes, 17);
 }
 
+void AppModelTests::epgDiskModelsLoadDetailsAsync()
+{
+    StartupHarness harness; QVERIFY(harness.initialize(std::nullopt));
+    const auto profileId = harness.activeProfileId();
+    Channel channel; channel.id = 12; channel.profileId = profileId;
+    channel.tvgId = QStringLiteral("channel.one"); channel.name = QStringLiteral("One");
+    channel.catchupSupported = true; channel.catchupWindowHours = 24;
+    const auto now = QDateTime::currentDateTimeUtc();
+    const QList<EpgEntry> entries {
+        {channel.tvgId, QStringLiteral("Past"), QStringLiteral("past description"), {}, now.addSecs(-3600), now.addSecs(-1800)},
+        {channel.tvgId, QStringLiteral("Now"), QStringLiteral("current description"), {}, now.addSecs(-1800), now.addSecs(1800)},
+        {channel.tvgId, QStringLiteral("Next"), QStringLiteral("next description"), {}, now.addSecs(1800), now.addSecs(3600)}
+    };
+    EpgCacheService cache;
+    auto data = cache.build(profileId, QStringLiteral("fixture"), [&](const EpgStore::Sink &sink) { for (const auto &e : entries) sink(e); });
+    harness.epgService->applySnapshot(data.snapshot);
+    auto &grid = *harness.epgGridModel;
+    grid.rebuild({channel}, 6, 24);
+    QTRY_VERIFY(!grid.rebuildPending());
+    QCOMPARE(grid.rowCount(), 1);
+    grid.setVisibleRowRange(0, 0);
+    grid.setRenderViewport(0, 600);
+    QTRY_VERIFY(!grid.data(grid.index(0), EpgGridModel::ProgramsRole).toList().isEmpty());
+    const auto summary = grid.data(grid.index(0), EpgGridModel::ProgramsRole).toList().first().toMap();
+    QVERIFY(summary.value(QStringLiteral("detailsPending")).toBool());
+    QVERIFY(summary.value(QStringLiteral("description")).toString().isEmpty());
+    QSignalSpy resolved(&grid, &EpgGridModel::programResolved);
+    grid.requestProgram(channel.id, now.toString(Qt::ISODateWithMs));
+    QTRY_COMPARE(resolved.count(), 1);
+    QCOMPARE(resolved.first().at(1).toMap().value(QStringLiteral("description")).toString(), QStringLiteral("current description"));
+    auto &state = *harness.guideStateModel;
+    state.setChannels({channel}); state.selectChannel(channel.id);
+    state.selectProgram(summary);
+    QTRY_VERIFY(!state.selectedProgram().value(QStringLiteral("detailsPending")).toBool());
+    QCOMPARE(state.selectedProgram().value(QStringLiteral("description")).toString(), QStringLiteral("past description"));
+    auto &nowNext = *harness.nowNextModel;
+    nowNext.setChannel(channel);
+    QTRY_VERIFY(!nowNext.loading());
+    QCOMPARE(nowNext.currentProgram().value(QStringLiteral("description")).toString(), QStringLiteral("current description"));
+    QVERIFY(nowNext.pastPrograms().first().toMap().value(QStringLiteral("detailsPending")).toBool());
+    QSignalSpy details(harness.appController.get(), &AppController::epgDetailsReady);
+    const auto request = harness.appController->requestEpgDetails(toVariantMap(channel), summary);
+    QTRY_COMPARE(details.count(), 1);
+    QCOMPARE(details.first().at(0).toULongLong(), request);
+    QVERIFY(details.first().at(2).toString().isEmpty());
+    QCOMPARE(details.first().at(1).toMap().value(QStringLiteral("description")).toString(), QStringLiteral("past description"));
+    harness.appController->requestEpgDetails(toVariantMap(channel), summary);
+    harness.epgService->clear();
+    QTRY_COMPARE(details.count(), 2);
+    QVERIFY(!details.last().at(2).toString().isEmpty());
+}
+
 void AppModelTests::epgMissingCacheFetchesFromSource()
 {
     const auto url = QUrl(QStringLiteral("https://example.com/guide.xml"));
@@ -12227,7 +12296,7 @@ void AppModelTests::epgMissingCacheFetchesFromSource()
     QTRY_COMPARE_WITH_TIMEOUT(harness.epgService->totalEntries(), 1, 5000);
     QCOMPARE(harness.epgService->allEntries().first().title, QStringLiteral("Fresh Only"));
     QCOMPARE(network->callCount(url), 1);
-    QVERIFY(QFile::exists(AppDataPaths::epgCacheFile(harness.activeProfileId())));
+    QVERIFY(QFile::exists(EpgCacheService::manifestFile(harness.activeProfileId())));
 }
 
 void AppModelTests::epgFreshCacheSkipsNetworkUntilDue()

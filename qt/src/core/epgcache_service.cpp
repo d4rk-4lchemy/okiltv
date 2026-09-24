@@ -3,6 +3,12 @@
 #include "appdatapaths.h"
 
 #include <QCryptographicHash>
+#include <QDir>
+#include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QMutex>
+#include <QSet>
 #include <QDataStream>
 #include <QFile>
 #include <QSaveFile>
@@ -16,18 +22,6 @@ namespace {
 
 constexpr quint32 kMagic = 0x45504743;  // ASCII "EPGC"
 constexpr quint32 kVersion = 2;
-
-QDataStream &operator<<(QDataStream &stream, const EpgEntry &entry)
-{
-    stream << entry.channelId;
-    stream << entry.title;
-    stream << entry.description;
-    stream << entry.episodeNum;
-    stream << entry.subTitle;
-    stream << entry.start.toMSecsSinceEpoch();
-    stream << entry.stop.toMSecsSinceEpoch();
-    return stream;
-}
 
 QDataStream &operator>>(QDataStream &stream, EpgEntry &entry)
 {
@@ -90,100 +84,160 @@ QString sourceDescriptor(const ServerProfile &profile)
 
 } // namespace
 
-EpgCacheService::LoadResult EpgCacheService::load(const QUuid &profileId) const
+namespace {
+QMutex publicationMutex;
+QHash<QString, std::weak_ptr<std::atomic_bool>> importTokens;
+QString generationPath(const QUuid &id)
 {
-    QFile file(AppDataPaths::epgCacheFile(profileId));
-    if (!file.exists()) {
-        return {};
-    }
-
-    if (!file.open(QIODevice::ReadOnly)) {
-        return { LoadStatus::Invalid, {} };
-    }
-
-    QDataStream stream(&file);
-    stream.setVersion(QDataStream::Qt_6_0);
-
-    quint32 magic = 0;
-    quint32 version = 0;
-    QString profileIdString;
-    QString sourceFingerprint;
-    qint64 fetchedAtMs = -1;
-    quint32 entryCount = 0;
-
-    stream >> magic;
-    stream >> version;
-    stream >> profileIdString;
-    stream >> sourceFingerprint;
-    stream >> fetchedAtMs;
-    stream >> entryCount;
-
-    if (stream.status() != QDataStream::Ok || magic != kMagic || version == 0 || version > kVersion) {
-        return { LoadStatus::Invalid, {} };
-    }
-
-    QList<EpgEntry> entries;
-    entries.reserve(static_cast<qsizetype>(entryCount));
-    for (quint32 index = 0; index < entryCount; ++index) {
-        EpgEntry entry;
-        if (version == 1) {
-            if (!readVersion1Entry(stream, &entry)) {
-                return { LoadStatus::Invalid, {} };
-            }
-        } else {
-            stream >> entry;
-            if (stream.status() != QDataStream::Ok) {
-                return { LoadStatus::Invalid, {} };
-            }
-        }
-        if (stream.status() != QDataStream::Ok) {
-            return { LoadStatus::Invalid, {} };
-        }
-        entries.push_back(entry);
-    }
-
-    CacheData data;
-    data.profileId = parseGuid(profileIdString);
-    data.sourceFingerprint = sourceFingerprint;
-    data.fetchedAt = fetchedAtMs >= 0 ? QDateTime::fromMSecsSinceEpoch(fetchedAtMs, QTimeZone::UTC) : QDateTime {};
-    data.snapshot = EpgService::buildSnapshot(entries);
-
-    if (data.profileId.isNull() || data.profileId != profileId || !data.fetchedAt.isValid()) {
-        return { LoadStatus::Invalid, {} };
-    }
-
-    return { LoadStatus::Loaded, std::move(data) };
+    return QDir(AppDataPaths::epgCacheDirectory()).filePath(
+        id.toString(QUuid::WithoutBraces).toLower() + u'-' + QUuid::createUuid().toString(QUuid::WithoutBraces) + QStringLiteral(".sqlite"));
+}
+QString publishedPath(const QUuid &id)
+{
+    QFile file(EpgCacheService::manifestFile(id));
+    if (!file.open(QIODevice::ReadOnly) || file.size() > 4096) return {};
+    const auto object = QJsonDocument::fromJson(file.readAll()).object();
+    const auto name = object.value(QStringLiteral("file")).toString();
+    // A manifest is never allowed to point outside this profile's cache.
+    if (!name.startsWith(id.toString(QUuid::WithoutBraces).toLower() + u'-')
+        || !name.endsWith(QStringLiteral(".sqlite")) || QFileInfo(name).fileName() != name) return {};
+    return QDir(AppDataPaths::epgCacheDirectory()).filePath(name);
+}
 }
 
-void EpgCacheService::save(const CacheData &data) const
+QString EpgCacheService::manifestFile(const QUuid &profileId)
 {
-    QSaveFile file(AppDataPaths::epgCacheFile(data.profileId));
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        throw std::runtime_error(
-            QStringLiteral("Failed to open EPG cache file %1").arg(file.fileName()).toStdString());
-    }
+    return AppDataPaths::epgCacheFile(profileId) + QStringLiteral(".json");
+}
+EpgCacheService::Cancellation EpgCacheService::beginImport(const QUuid &profileId)
+{
+    QMutexLocker lock(&publicationMutex);
+    const auto key = manifestFile(profileId);
+    if (const auto previous = importTokens.value(key).lock()) previous->store(true);
+    auto token = std::make_shared<std::atomic_bool>(false);
+    importTokens.insert(key, token);
+    return token;
+}
+void EpgCacheService::cancel(const Cancellation &token)
+{
+    QMutexLocker lock(&publicationMutex);
+    if (token) token->store(true);
+}
+void EpgCacheService::invalidateSource(const QUuid &profileId)
+{
+    QMutexLocker lock(&publicationMutex);
+    if (const auto token = importTokens.take(manifestFile(profileId)).lock()) token->store(true);
+}
+EpgCacheService::CacheData EpgCacheService::build(const QUuid &profileId, const QString &fingerprint,
+    const EpgStore::Producer &producer, bool deduplicate, const Cancellation &token) const
+{
+    CacheData data;
+    data.profileId = profileId; data.sourceFingerprint = fingerprint;
+    data.fetchedAt = QDateTime::currentDateTimeUtc();
+    data.snapshot.store = EpgStore::create(generationPath(profileId),
+        {profileId, fingerprint, data.fetchedAt, 0}, producer, deduplicate,
+        [token] { return token && token->load(); });
+    data.snapshot.totalEntries = static_cast<int>(data.snapshot.store->metadata().entries);
+    return data;
+}
 
-    QDataStream stream(&file);
-    stream.setVersion(QDataStream::Qt_6_0);
-    stream << kMagic;
-    stream << kVersion;
-    stream << guidToString(data.profileId);
-    stream << data.sourceFingerprint;
-    stream << data.fetchedAt.toUTC().toMSecsSinceEpoch();
-    stream << static_cast<quint32>(data.snapshot.allEntries.size());
-    for (const auto &entry : data.snapshot.allEntries) {
-        stream << entry;
+EpgCacheService::LoadResult EpgCacheService::load(const QUuid &profileId, const Cancellation &token) const
+{
+    try {
+        // The production importer is serialized. Remove transfer files left by a
+        // crashed process once per data root, before starting a new transfer.
+        static QSet<QString> cleanedRoots;
+        {
+            QMutexLocker lock(&publicationMutex);
+            const auto root = AppDataPaths::epgCacheDirectory();
+            if (!cleanedRoots.contains(root)) {
+                const QDir directory(root);
+                for (const auto &name : directory.entryList({QStringLiteral("download-*.source")}, QDir::Files))
+                    QFile::remove(directory.filePath(name));
+                cleanedRoots.insert(root);
+            }
+        }
+        // Serialize manifest open with publication/retirement, then pin its generation.
+        {
+            QMutexLocker lock(&publicationMutex);
+            const auto path = publishedPath(profileId);
+            if (!path.isEmpty()) {
+                auto store = EpgStore::open(path);
+                const auto &meta = store->metadata();
+                if (meta.profileId != profileId) return {LoadStatus::Invalid, {}};
+                CacheData data {profileId, meta.fingerprint, meta.fetchedAt, {}};
+                data.snapshot.store = std::move(store);
+                data.snapshot.totalEntries = static_cast<int>(meta.entries);
+                // Orphaned generations include interrupted imports; pinned readers
+                // finish before their retired files are actually removed.
+                QDir directory(AppDataPaths::epgCacheDirectory());
+                const auto pattern = profileId.toString(QUuid::WithoutBraces).toLower() + QStringLiteral("-*.sqlite");
+                for (const auto &name : directory.entryList({pattern}, QDir::Files)) {
+                    const auto orphan = directory.filePath(name);
+                    if (orphan != path) EpgStore::retireFile(orphan);
+                }
+                return {LoadStatus::Loaded, std::move(data)};
+            }
+        }
+        QFile file(AppDataPaths::epgCacheFile(profileId));
+        if (!file.exists()) return {};
+        if (!file.open(QIODevice::ReadOnly)) return {LoadStatus::Invalid, {}};
+        QDataStream stream(&file); stream.setVersion(QDataStream::Qt_6_0);
+        quint32 magic = 0, version = 0, count = 0;
+        QString id, fingerprint; qint64 fetched = -1;
+        stream >> magic >> version >> id >> fingerprint >> fetched >> count;
+        if (stream.status() != QDataStream::Ok || magic != kMagic || version == 0 || version > kVersion
+            || parseGuid(id) != profileId || fetched < 0 || count > static_cast<quint64>(file.size() / 16))
+            return {LoadStatus::Invalid, {}};
+        CacheData data {profileId, fingerprint, QDateTime::fromMSecsSinceEpoch(fetched, QTimeZone::UTC), {}};
+        data.snapshot.store = EpgStore::create(generationPath(profileId), {profileId, fingerprint, data.fetchedAt, 0},
+            [&](const EpgStore::Sink &sink) {
+                for (quint32 i = 0; i < count; ++i) {
+                    EpgEntry entry;
+                    if (version == 1) readVersion1Entry(stream, &entry); else stream >> entry;
+                    if (stream.status() != QDataStream::Ok) throw std::runtime_error("Invalid legacy EPG cache.");
+                    sink(entry);
+                }
+            }, false, [token] { return token && token->load(); });
+        data.snapshot.totalEntries = static_cast<int>(data.snapshot.store->metadata().entries);
+        file.close();
+        save(data, token);
+        return {LoadStatus::Loaded, std::move(data)};
+    } catch (const std::exception &) {
+        return {LoadStatus::Invalid, {}};
     }
+}
 
-    if (stream.status() != QDataStream::Ok || !file.commit()) {
-        throw std::runtime_error(
-            QStringLiteral("Failed to write EPG cache file %1").arg(file.fileName()).toStdString());
+void EpgCacheService::save(const CacheData &data, const Cancellation &token) const
+{
+    auto store = data.snapshot.store;
+    if (!store) {
+        store = EpgStore::create(generationPath(data.profileId),
+            {data.profileId, data.sourceFingerprint, data.fetchedAt, 0}, [&](const EpgStore::Sink &sink) {
+                for (const auto &entry : data.snapshot.allEntries) sink(entry);
+            }, false, [token] { return token && token->load(); });
     }
+    QMutexLocker lock(&publicationMutex);
+    if (token && token->load()) throw std::runtime_error("EPG import cancelled.");
+    const auto previous = publishedPath(data.profileId);
+    QSaveFile manifest(manifestFile(data.profileId));
+    const auto json = QJsonDocument(QJsonObject {{QStringLiteral("file"), QFileInfo(store->path()).fileName()}}).toJson(QJsonDocument::Compact);
+    if (!manifest.open(QIODevice::WriteOnly) || manifest.write(json) != json.size() || !manifest.commit())
+        throw std::runtime_error("Cannot publish EPG cache.");
+    store->keep();
+    if (!previous.isEmpty() && previous != store->path()) EpgStore::retireFile(previous);
+    QFile::remove(AppDataPaths::epgCacheFile(data.profileId));
 }
 
 void EpgCacheService::remove(const QUuid &profileId) const
 {
+    QMutexLocker lock(&publicationMutex);
+    if (const auto token = importTokens.take(manifestFile(profileId)).lock()) token->store(true);
+    QFile::remove(manifestFile(profileId));
     QFile::remove(AppDataPaths::epgCacheFile(profileId));
+    QDir directory(AppDataPaths::epgCacheDirectory());
+    const auto pattern = profileId.toString(QUuid::WithoutBraces).toLower() + QStringLiteral("-*.sqlite");
+    for (const auto &name : directory.entryList({pattern}, QDir::Files)) EpgStore::retireFile(directory.filePath(name));
 }
 
 QString EpgCacheService::sourceFingerprint(const ServerProfile &profile)

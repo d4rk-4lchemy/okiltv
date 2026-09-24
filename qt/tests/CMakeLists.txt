@@ -18,6 +18,8 @@ qt_add_executable(OKILTVQtCoreTests
     ../src/core/debuglogger.h
     ../src/core/epgcache_service.cpp
     ../src/core/epgcache_service.h
+    ../src/core/epgstore.cpp
+    ../src/core/epgstore.h
     ../src/core/epgservice.cpp
     ../src/core/epgservice.h
     ../src/core/m3uservice.cpp
@@ -119,6 +121,8 @@ qt_add_executable(OKILTVQtAppTests
     ../src/core/debuglogger.h
     ../src/core/epgcache_service.cpp
     ../src/core/epgcache_service.h
+    ../src/core/epgstore.cpp
+    ../src/core/epgstore.h
     ../src/core/epgservice.cpp
     ../src/core/epgservice.h
     ../src/core/iconcache_service.cpp

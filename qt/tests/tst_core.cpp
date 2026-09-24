@@ -13,6 +13,9 @@
 #include "../src/core/xtreamservice.h"
 
 #include <QDir>
+#include <QBuffer>
+#include <QDataStream>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -182,6 +185,13 @@ private slots:
     void m3uParserUsesDisplayCategoryNameWhenGroupMissing();
     void xtreamServiceParsesCatchupFields();
     void xtreamServiceRejectsNonArrayPayloads();
+    void epgNetworkDownloadStreamsAndCancels();
+    void epgDiskGenerationRetainsOldReaders();
+    void epgDiskRangeMatchesMemory();
+    void epgStreamingRejectsTruncationAndLimits();
+    void epgLegacyCacheMigratesOffline();
+    void epgDiskPublicationIsCancelled();
+    void epgLargeImportBenchmark();
     void epgParserHandlesOffsetsAndOrdering();
     void epgParserRejectsMalformedPayloads();
     void epgParserAcceptsValidEmptyDocument();
@@ -1586,6 +1596,228 @@ void CoreTests::xtreamServiceRejectsNonArrayPayloads()
     }
 }
 
+void CoreTests::epgNetworkDownloadStreamsAndCancels()
+{
+    QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));
+    const QByteArray payload(2 * 1024 * 1024, 'x');
+    connect(&server, &QTcpServer::newConnection, &server, [&] {
+        while (auto *socket = server.nextPendingConnection()) {
+            connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+            connect(socket, &QTcpSocket::readyRead, socket, [socket, &payload] {
+                if (socket->property("sent").toBool()) { socket->readAll(); return; }
+                const auto request = socket->property("request").toByteArray() + socket->readAll();
+                socket->setProperty("request", request);
+                if (!request.contains("\r\n\r\n")) return;
+                socket->setProperty("sent", true);
+                socket->write("HTTP/1.1 200 OK\r\nContent-Length: " + QByteArray::number(payload.size()) + "\r\nConnection: close\r\n\r\n");
+                socket->write(payload); socket->disconnectFromHost();
+            });
+        }
+    });
+    const QUrl url(QStringLiteral("http://127.0.0.1:%1/epg.xml").arg(server.serverPort()));
+    BlockingNetworkAccess network;
+    QTemporaryDir dir; QFile file(dir.filePath(QStringLiteral("download"))); QVERIFY(file.open(QIODevice::ReadWrite));
+    qint64 progress = 0; int updates = 0;
+    network.download(url, &file, {}, [&](qint64 bytes) {
+        QVERIFY(bytes > progress); QVERIFY(bytes - progress <= 65536); progress = bytes; ++updates;
+    });
+    QCOMPARE(progress, payload.size()); QVERIFY(updates > 1);
+    QVERIFY(file.seek(0)); QCOMPARE(file.readAll(), payload);
+    QVERIFY(file.resize(0)); QVERIFY(file.seek(0));
+    bool cancelled = false;
+    QVERIFY_EXCEPTION_THROWN(network.download(url, &file, [&] { return cancelled; }, [&](qint64 bytes) {
+        if (bytes >= 131072) cancelled = true;
+    }), std::runtime_error);
+    QVERIFY(file.size() < payload.size());
+}
+
+void CoreTests::epgDiskGenerationRetainsOldReaders()
+{
+    QTemporaryDir dir; ScopedAppDataEnv env(dir.path());
+    EpgCacheService cache;
+    const auto id = QUuid::createUuid();
+    const auto start = QDateTime::currentDateTimeUtc();
+    const EpgEntry oldEntry {QStringLiteral("channel"), QStringLiteral("old"), {}, {}, start, start.addSecs(600)};
+    auto old = cache.build(id, QStringLiteral("source"), [&](const EpgStore::Sink &sink) { sink(oldEntry); });
+    cache.save(old);
+    auto pinned = cache.load(id);
+    QCOMPARE(pinned.status, EpgCacheService::LoadStatus::Loaded);
+    const auto oldPath = old.snapshot.store->path();
+    auto newer = cache.build(id, QStringLiteral("source"), [&](const EpgStore::Sink &sink) {
+        auto entry = oldEntry; entry.title = QStringLiteral("new"); sink(entry);
+    });
+    cache.save(newer);
+    QVERIFY(QFile::exists(oldPath));
+    QCOMPARE(pinned.data.snapshot.store->range(QStringLiteral("CHANNEL"), start, start.addSecs(1)).first().title, QStringLiteral("old"));
+    QCOMPARE(cache.load(id).data.snapshot.store->range(QStringLiteral("channel"), start, start.addSecs(1)).first().title, QStringLiteral("new"));
+    old = {}; pinned = {};
+    QVERIFY(!QFile::exists(oldPath));
+    // Failure after writing some entries cannot replace the published generation.
+    QVERIFY_EXCEPTION_THROWN(cache.build(id, QStringLiteral("source"), [&](const EpgStore::Sink &sink) {
+        sink(oldEntry); throw std::runtime_error("bad XML");
+    }), std::runtime_error);
+    QCOMPARE(cache.load(id).data.snapshot.store->range(QStringLiteral("channel"), start, start.addSecs(1)).first().title, QStringLiteral("new"));
+}
+
+void CoreTests::epgDiskRangeMatchesMemory()
+{
+    QTemporaryDir dir;
+    const auto start = QDateTime::fromMSecsSinceEpoch(1773700000123LL, QTimeZone::UTC);
+    const QList<EpgEntry> entries {
+        {QStringLiteral(" Test "), QStringLiteral("long"), QStringLiteral("description"), QStringLiteral("S01"), start, start.addSecs(36000), QStringLiteral("subtitle")},
+        {QStringLiteral("test"), QStringLiteral("short"), {}, {}, start.addSecs(100), start.addSecs(200)},
+        {QStringLiteral("TEST"), QStringLiteral("late"), {}, {}, start.addSecs(300), start.addSecs(400)},
+        {QStringLiteral("unlisted"), QStringLiteral("retained"), {}, {}, start.addYears(1), start.addYears(1).addSecs(100)}
+    };
+    auto disk = EpgStore::create(dir.filePath(QStringLiteral("epg.sqlite")), {QUuid::createUuid(), QStringLiteral("x"), start, 0},
+        [&](const EpgStore::Sink &sink) { for (const auto &e : entries) sink(e); });
+    EpgService memory; memory.loadFromEntries(entries);
+    for (const int offset : {-1, 0, 99, 100, 199, 200, 299, 300, 400, 36000}) {
+        const auto from = start.addSecs(offset), to = from.addMSecs(1);
+        const auto expected = memory.programsInRange(QStringLiteral("test"), from, to);
+        const auto actual = disk->range(QStringLiteral("TEST"), from, to);
+        QCOMPARE(actual.size(), expected.size());
+        for (qsizetype i = 0; i < actual.size(); ++i) QCOMPARE(toVariantMap(actual[i]), toVariantMap(expected[i]));
+    }
+    QCOMPARE(disk->metadata().entries, entries.size());
+    QVERIFY(disk->range(QStringLiteral("test"), start, start.addSecs(100), 0).isEmpty());
+    QCOMPARE(disk->range(QStringLiteral("test"), start, start.addSecs(100), 1, true).first().description, QString {});
+    QCOMPARE(disk->range(QStringLiteral("test"), start, start.addSecs(100), 1).first().description, QStringLiteral("description"));
+    QCOMPARE(disk->maxStop(QStringLiteral("test")), start.addSecs(36000));
+    auto dedup = EpgStore::create(dir.filePath(QStringLiteral("dedup.sqlite")), {QUuid::createUuid(), QStringLiteral("x"), start, 0},
+        [&](const EpgStore::Sink &sink) { sink(entries.first()); auto later = entries.first(); later.channelId = QStringLiteral("TEST"); later.title = QStringLiteral("ignored"); sink(later); }, true);
+    QCOMPARE(dedup->metadata().entries, 1);
+    QCOMPARE(dedup->range(QStringLiteral("test"), start, start.addMSecs(1)).first().title, QStringLiteral("long"));
+}
+
+void CoreTests::epgStreamingRejectsTruncationAndLimits()
+{
+    const QByteArray xml = "<tv><programme channel=\"one\" start=\"20260101000000 +0000\" stop=\"20260101010000 +0000\"><title>One</title></programme></tv>";
+    for (const auto &bytes : {xml, gzipCompress(xml), qCompress(xml).mid(4)}) {
+        QBuffer buffer; buffer.setData(bytes); QVERIFY(buffer.open(QIODevice::ReadOnly));
+        int count = 0;
+        EpgService::streamEntries(&buffer, [&](const EpgEntry &) { ++count; });
+        QCOMPARE(count, 1);
+        buffer.seek(0);
+        QVERIFY_EXCEPTION_THROWN(EpgService::streamEntries(&buffer, [](const EpgEntry &) {}, {}, 32), std::runtime_error);
+        buffer.seek(0);
+        QVERIFY_EXCEPTION_THROWN(EpgService::streamEntries(&buffer, [](const EpgEntry &) {}, [] { return true; }), std::runtime_error);
+    }
+    QByteArray large = "<tv>";
+    for (int i = 0; i < 1000; ++i) large += xml.mid(4, xml.size() - 9);
+    large += "</tv>";
+    QCOMPARE(EpgService::parseEntries(large).size(), 1000);
+    QCOMPARE(EpgService::parseEntries(gzipCompress(large)).size(), 1000);
+    auto truncated = gzipCompress(xml); truncated.chop(6);
+    QVERIFY_EXCEPTION_THROWN(EpgService::parseEntries(truncated), std::runtime_error);
+    auto corrupt = gzipCompress(xml); corrupt[corrupt.size() - 4] ^= 1;
+    QVERIFY_EXCEPTION_THROWN(EpgService::parseEntries(corrupt), std::runtime_error);
+    // XML may span gzip member boundaries.
+    QCOMPARE(EpgService::parseEntries(gzipCompress(xml.left(50)) + gzipCompress(xml.mid(50))).size(), 1);
+}
+
+void CoreTests::epgLegacyCacheMigratesOffline()
+{
+    QTemporaryDir dir; ScopedAppDataEnv env(dir.path());
+    for (quint32 version : {1u, 2u}) {
+        const auto id = QUuid::createUuid();
+        QFile file(AppDataPaths::epgCacheFile(id)); QVERIFY(file.open(QIODevice::WriteOnly));
+        QDataStream stream(&file); stream.setVersion(QDataStream::Qt_6_0);
+        stream << quint32(0x45504743) << version << guidToString(id) << QStringLiteral("fingerprint") << qint64(1700000000123LL) << quint32(1);
+        stream << QStringLiteral("one") << QStringLiteral("title") << QStringLiteral("desc") << QStringLiteral("episode");
+        if (version == 2) stream << QStringLiteral("subtitle");
+        stream << qint64(1700000000123LL) << qint64(1700000010456LL);
+        file.close();
+        const auto loaded = EpgCacheService().load(id);
+        QCOMPARE(loaded.status, EpgCacheService::LoadStatus::Loaded);
+        QVERIFY(loaded.data.snapshot.allEntries.isEmpty());
+        const auto entries = loaded.data.snapshot.store->allEntries();
+        QCOMPARE(entries.size(), 1);
+        QCOMPARE(entries.first().episodeNum, QStringLiteral("episode"));
+        QCOMPARE(entries.first().subTitle, version == 2 ? QStringLiteral("subtitle") : QString {});
+        QCOMPARE(entries.first().start.toMSecsSinceEpoch(), 1700000000123LL);
+        QVERIFY(QFile::exists(EpgCacheService::manifestFile(id)));
+        QVERIFY(!QFile::exists(file.fileName()));
+    }
+}
+
+void CoreTests::epgDiskPublicationIsCancelled()
+{
+    QTemporaryDir dir; ScopedAppDataEnv env(dir.path());
+    EpgCacheService cache; const auto id = QUuid::createUuid();
+    const auto token = EpgCacheService::beginImport(id);
+    const auto data = cache.build(id, QStringLiteral("x"), [](const EpgStore::Sink &) {}, false, token);
+    EpgCacheService::cancel(token);
+    QVERIFY_EXCEPTION_THROWN(cache.save(data, token), std::runtime_error);
+    QVERIFY(!QFile::exists(EpgCacheService::manifestFile(id)));
+    const auto next = EpgCacheService::beginImport(id);
+    auto valid = cache.build(id, QStringLiteral("x"), [](const EpgStore::Sink &) {}, false, next);
+    cache.save(valid, next);
+    QCOMPARE(cache.load(id).status, EpgCacheService::LoadStatus::Loaded);
+    cache.remove(id);
+    QVERIFY(next->load());
+    QVERIFY_EXCEPTION_THROWN(cache.save(valid, next), std::runtime_error);
+}
+
+void CoreTests::epgLargeImportBenchmark()
+{
+    const int mib = qEnvironmentVariableIntValue("OKILTV_EPG_BENCHMARK_MIB");
+    if (mib <= 0) QSKIP("Set OKILTV_EPG_BENCHMARK_MIB=256/512/1024 for the streaming disk/RSS benchmark.");
+    // Avoid filling a RAM-backed /tmp in constrained containers. The caller
+    // chooses a disk-backed directory, normally build/epg-validation.
+    const auto directory = qEnvironmentVariable("OKILTV_EPG_BENCHMARK_DIRECTORY");
+    if (directory.isEmpty()) QSKIP("Set OKILTV_EPG_BENCHMARK_DIRECTORY to a disk-backed directory.");
+    QTemporaryDir dir(QDir(directory).filePath(QStringLiteral("epg-benchmark-XXXXXX")));
+    QVERIFY(dir.isValid()); ScopedAppDataEnv env(dir.path());
+    QFile xml(dir.filePath(QStringLiteral("large.xml"))); QVERIFY(xml.open(QIODevice::ReadWrite));
+    xml.write("<tv>");
+    const auto start = QDateTime::fromString(QStringLiteral("2026-01-01T00:00:00Z"), Qt::ISODate);
+    const QByteArray description(4096, 'x');
+    qint64 count = 0;
+    while (xml.pos() < static_cast<qint64>(mib) * 1024 * 1024) {
+        const auto from = start.addSecs((count / 500) * 1800);
+        const auto prefix = QStringLiteral("<programme channel=\"channel.%1\" start=\"%2 +0000\" stop=\"%3 +0000\"><title>Programme %4</title><desc>")
+            .arg(count % 500).arg(from.toString(QStringLiteral("yyyyMMddHHmmss")))
+            .arg(from.addSecs(1800).toString(QStringLiteral("yyyyMMddHHmmss"))).arg(count).toUtf8();
+        QCOMPARE(xml.write(prefix), prefix.size()); QCOMPARE(xml.write(description), description.size());
+        xml.write("</desc></programme>"); ++count;
+    }
+    xml.write("</tv>"); QVERIFY(xml.flush()); QVERIFY(xml.seek(0));
+    QFile compressed(dir.filePath(QStringLiteral("large.gz")));
+    QIODevice *input = &xml;
+    if (qEnvironmentVariableIntValue("OKILTV_EPG_BENCHMARK_GZIP") != 0) {
+        QVERIFY(compressed.open(QIODevice::ReadWrite));
+        z_stream stream {}; QCOMPARE(deflateInit2(&stream, 1, Z_DEFLATED, MAX_WBITS + 16, 8, Z_DEFAULT_STRATEGY), Z_OK);
+        char in[65536], out[65536]; int code = Z_OK;
+        do {
+            const auto n = xml.read(in, sizeof(in)); QVERIFY(n >= 0);
+            stream.next_in = reinterpret_cast<Bytef *>(in); stream.avail_in = static_cast<uInt>(n);
+            do {
+                stream.next_out = reinterpret_cast<Bytef *>(out); stream.avail_out = sizeof(out);
+                code = deflate(&stream, n ? Z_NO_FLUSH : Z_FINISH);
+                QVERIFY(code == Z_OK || code == Z_STREAM_END);
+                const auto produced = static_cast<qint64>(sizeof(out) - stream.avail_out);
+                QCOMPARE(compressed.write(out, produced), produced);
+            } while (!stream.avail_out);
+        } while (code != Z_STREAM_END);
+        deflateEnd(&stream); QVERIFY(compressed.flush()); QVERIFY(compressed.seek(0)); input = &compressed;
+    }
+    QElapsedTimer timer; timer.start();
+    EpgCacheService cache; const auto id = QUuid::createUuid();
+    auto data = cache.build(id, QStringLiteral("large"), [&](const EpgStore::Sink &sink) { EpgService::streamEntries(input, sink); });
+    QCOMPARE(data.snapshot.totalEntries, count); QVERIFY(data.snapshot.allEntries.isEmpty());
+    cache.save(data);
+    const auto elapsed = timer.elapsed();
+    timer.restart();
+    auto reopened = cache.load(id);
+    QCOMPARE(reopened.status, EpgCacheService::LoadStatus::Loaded);
+    QCOMPARE(reopened.data.snapshot.store->range(QStringLiteral("channel.0"), start, start.addSecs(1)).size(), 1);
+    qInfo() << "XML bytes" << xml.size() << "input bytes" << input->size() << "entries" << count
+            << "import ms" << elapsed << "reopen/query ms" << timer.elapsed()
+            << "database bytes" << QFileInfo(data.snapshot.store->path()).size()
+            << "cached bytes" << data.snapshot.store->cachedBytes();
+}
+
 void CoreTests::epgParserHandlesOffsetsAndOrdering()
 {
     EpgService service;
@@ -1678,9 +1910,9 @@ void CoreTests::epgCacheRoundTripsWithMetadata()
     QCOMPARE(loaded.data.profileId, profile.id);
     QCOMPARE(loaded.data.sourceFingerprint, data.sourceFingerprint);
     QCOMPARE(loaded.data.fetchedAt, data.fetchedAt);
-    QCOMPARE(loaded.data.snapshot.allEntries.size(), 1);
-    QCOMPARE(loaded.data.snapshot.allEntries.first().title, QStringLiteral("Morning News"));
-    QCOMPARE(loaded.data.snapshot.allEntries.first().subTitle, QStringLiteral("Top Story"));
+    QCOMPARE(loaded.data.snapshot.store->metadata().entries, 1);
+    QCOMPARE(loaded.data.snapshot.store->allEntries().first().title, QStringLiteral("Morning News"));
+    QCOMPARE(loaded.data.snapshot.store->allEntries().first().subTitle, QStringLiteral("Top Story"));
     QCOMPARE(loaded.data.snapshot.totalEntries, 1);
 }
 

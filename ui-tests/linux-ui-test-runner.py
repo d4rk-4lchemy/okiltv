@@ -1524,6 +1524,14 @@ class Runner:
             if not epg_dir.exists():
                 continue
             epg_files.extend(sorted(epg_dir.glob("*.cache")))
+            # Staging databases must not count as a ready EPG.
+            for manifest in sorted(epg_dir.glob("*.cache.json")):
+                try:
+                    name = json.loads(manifest.read_text()).get("file", "")
+                    if name and pathlib.Path(name).name == name:
+                        epg_files.append(epg_dir / name)
+                except (OSError, ValueError):
+                    pass
         return epg_files
 
     def wait_for_epg_loaded(self, min_entries: int, timeout_sec: float) -> pathlib.Path:
@@ -1550,7 +1558,7 @@ class Runner:
                     return cache_file
             time.sleep(0.5)
         db_info = str(seen_db) if seen_db else "<missing iptv.db>"
-        cache_info = str(seen_cache) if seen_cache else "<missing epg/*.cache>"
+        cache_info = str(seen_cache) if seen_cache else "<missing published EPG cache>"
         raise RuntimeError(
             "Timed out waiting for EPG load "
             f"(need >= {min_entries} entries OR cache >= {int(self.args.epg_min_cache_bytes)} bytes): "

@@ -1,3 +1,4 @@
+#include "epgcache_service.h"
 #include "settingsmanager.h"
 
 #include "appdatapaths.h"
@@ -376,6 +377,7 @@ bool SettingsManager::replaceProfile(const QUuid &id, const ServerProfile &profi
         return false;
     }
 
+    const auto previous = profileById(id);
     auto normalized = profile;
     normalized.id = id;
     normalized.autoRefreshIntervalHours = normalizeAutoRefreshIntervalHours(normalized.autoRefreshIntervalHours);
@@ -384,6 +386,8 @@ bool SettingsManager::replaceProfile(const QUuid &id, const ServerProfile &profi
         return false;
     }
 
+    if (!previous || EpgCacheService::sourceFingerprint(*previous) != EpgCacheService::sourceFingerprint(normalized))
+        EpgCacheService::invalidateSource(id);
     m_profileDetailCache.insert(id, normalized);
     auto updatedSummary = toSummary(normalized);
     updatedSummary.groupCount = m_sourceSummaries.at(index).groupCount;
@@ -422,6 +426,7 @@ bool SettingsManager::removeProfile(const QUuid &id)
         m_lastSaveError = QString::fromUtf8(error.what());
         return false;
     }
+    EpgCacheService().remove(id);
     m_sourceSummaries.removeAt(index);
     m_current.dvrSchedules.removeIf([&id](const DvrScheduleEntry &entry) { return entry.profileId == guidToString(id); });
     m_current.channelTrackPreferences.remove(guidToString(id));

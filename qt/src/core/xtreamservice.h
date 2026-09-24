@@ -24,6 +24,7 @@ public:
     QList<ChannelCategory> getLiveCategories() const;
     QList<Channel> getLiveStreams(const std::optional<QString> &categoryId = std::nullopt) const;
     QByteArray getXmltvBytes() const;
+    QUrl xmltvUrl() const;
 
 private:
     QString buildStreamUrl(int streamId, const QString &ext = QStringLiteral("ts")) const;
