@@ -589,15 +589,17 @@ private slots:
     void appControllerPlayCatchupAllowsRunningProgramAfterSourceMargin();
     void appControllerPlayCatchupRejectsProgrammeChannelMismatch();
     void multiviewExitPromotesFocusedSecondaryToPrimary();
-    void multiviewGridToggleExitWithoutRetainStillPerformsFullCleanup();
-    void multiviewGridToggleWithRetainSoftPromotesAndKeepsSecondaryStreams();
+    void multiviewGridExitPerformsFullCleanup_data();
+    void multiviewGridExitPerformsFullCleanup();
+    void multiviewPromotionRejectsEmptyTile();
+    void multiviewPromotionWithRetainKeepsSecondaryStreams();
     void multiviewGridStopFocusedSecondaryKeepsFocusWithoutRetain();
     void multiviewGridStopFocusedSecondaryKeepsFocusWithRetain();
     void multiviewGridStopLastRemainingTileReturnsToDefaultPlaybackState();
     void multiviewRetainedSelectionReopenRestoresWarmSecondarySlots();
     void multiviewRetainedSelectionStopReopensGridAndStopsPromotedTile();
     void multiviewRetainedSelectionKeepsHiddenTilesAudioWarmAndSchedulesDeferredRefresh();
-    void multiviewRetainedSelectionClearsOnFullPromoteShortcut();
+    void multiviewRetainedSelectionClearsOnGridToggle();
     void multiviewRetainedSelectionClearsOnDegradeToOff();
     void multiviewRetainedSelectionClearsOnProfileChange();
     void multiviewExitAfterSwapKeepsPromotedPrimaryWithoutRetune();
@@ -7698,13 +7700,13 @@ void AppModelTests::multiviewFocusedControlsAndEpgFollowSlotWithoutRetune()
 
     harness.settingsController->setMultiviewRetainSelectionOnPromotion(true);
     harness.settingsController->save();
-    QVERIFY(multi->toggleGrid());
+    QVERIFY(multi->promoteFocusedAndExit());
     QCOMPARE(multi->focusedController(), primary);
     QCOMPARE(primary->player(), backend);
     backend->m_cachedTelemetry.pauseState = false;
     emit backend->pauseStateChanged(false);
     QVERIFY(primary->isPlaying()); // A previously observed backend can be promoted.
-    QVERIFY(multi->toggleGrid());
+    multi->setLayoutMode(QStringLiteral("grid2x2"));
     QCOMPARE(multi->focusedTileIndex(), 1);
     QCOMPARE(multi->focusedController()->player(), backend);
     QVERIFY(multi->stopRetainedPromotedAndRestoreGrid());
@@ -9442,8 +9444,35 @@ void AppModelTests::multiviewExitPromotesFocusedSecondaryToPrimary()
     QCOMPARE(harness.playerController->currentChannel().value(QStringLiteral("id")).toInt(), channels.last().id);
 }
 
-void AppModelTests::multiviewGridToggleExitWithoutRetainStillPerformsFullCleanup()
+void AppModelTests::multiviewGridExitPerformsFullCleanup_data()
 {
+    QTest::addColumn<bool>("retain");
+    QTest::addColumn<bool>("promotion");
+    QTest::newRow("toggle-without-retain") << false << false;
+    QTest::newRow("toggle-with-retain") << true << false;
+    QTest::newRow("promotion-without-retain") << false << true;
+}
+
+void AppModelTests::multiviewPromotionRejectsEmptyTile()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    harness.appController->initialize();
+    QTRY_VERIFY_WITH_TIMEOUT(!harness.appController->isBusy(), 5000);
+    QVERIFY(!harness.multiViewController->promoteFocusedAndExit());
+    const auto channel = harness.channelListModel->allChannels().first();
+    QVERIFY(harness.channelListModel->activateById(channel.id));
+    QVERIFY(harness.multiViewController->toggleGrid());
+    harness.multiViewController->focusTile(1);
+    QVERIFY(!harness.multiViewController->promoteFocusedAndExit());
+    QVERIFY(harness.multiViewController->isActive());
+    QCOMPARE(harness.playerController->currentChannelValue()->id, channel.id);
+}
+
+void AppModelTests::multiviewGridExitPerformsFullCleanup()
+{
+    QFETCH(bool, retain);
+    QFETCH(bool, promotion);
     StartupHarness harness;
     QVERIFY(harness.initialize(std::nullopt));
     harness.appController->initialize();
@@ -9452,7 +9481,7 @@ void AppModelTests::multiviewGridToggleExitWithoutRetainStillPerformsFullCleanup
     const auto channels = harness.channelListModel->allChannels();
     QVERIFY(channels.size() >= 2);
 
-    harness.settingsController->setMultiviewRetainSelectionOnPromotion(false);
+    harness.settingsController->setMultiviewRetainSelectionOnPromotion(retain);
     harness.settingsController->setMultiviewMaxTiles(4);
     harness.settingsController->save();
 
@@ -9462,7 +9491,8 @@ void AppModelTests::multiviewGridToggleExitWithoutRetainStillPerformsFullCleanup
     QVERIFY(harness.channelListModel->activateById(channels.last().id));
 
     harness.multiViewController->focusTile(1);
-    QVERIFY(harness.multiViewController->toggleGrid());
+    QVERIFY(promotion ? harness.multiViewController->promoteFocusedAndExit()
+                      : harness.multiViewController->toggleGrid());
 
     QCOMPARE(harness.multiViewController->layoutMode(), QStringLiteral("off"));
     QCOMPARE(harness.playerController->currentChannel().value(QStringLiteral("id")).toInt(), channels.last().id);
@@ -9470,7 +9500,7 @@ void AppModelTests::multiviewGridToggleExitWithoutRetainStillPerformsFullCleanup
     QCOMPARE(static_cast<int>(harness.multiViewController->m_secondarySlots.size()), 0);
 }
 
-void AppModelTests::multiviewGridToggleWithRetainSoftPromotesAndKeepsSecondaryStreams()
+void AppModelTests::multiviewPromotionWithRetainKeepsSecondaryStreams()
 {
     StartupHarness harness;
     QVERIFY(harness.initialize(std::nullopt));
@@ -9490,7 +9520,7 @@ void AppModelTests::multiviewGridToggleWithRetainSoftPromotesAndKeepsSecondarySt
     QVERIFY(harness.channelListModel->activateById(channels.last().id));
 
     harness.multiViewController->focusTile(1);
-    QVERIFY(harness.multiViewController->toggleGrid());
+    QVERIFY(harness.multiViewController->promoteFocusedAndExit());
 
     QCOMPARE(harness.multiViewController->layoutMode(), QStringLiteral("off"));
     QVERIFY(harness.multiViewController->retainedSelectionActive());
@@ -9629,12 +9659,12 @@ void AppModelTests::multiviewRetainedSelectionReopenRestoresWarmSecondarySlots()
     QVERIFY(slotOnePlayerBeforeClose != nullptr);
 
     harness.multiViewController->focusTile(1);
-    QVERIFY(harness.multiViewController->toggleGrid());
+    QVERIFY(harness.multiViewController->promoteFocusedAndExit());
     QCOMPARE(harness.multiViewController->layoutMode(), QStringLiteral("off"));
     QVERIFY(harness.multiViewController->retainedSelectionActive());
     QCOMPARE(harness.playerController->currentChannel().value(QStringLiteral("id")).toInt(), channels.at(1).id);
 
-    QVERIFY(harness.multiViewController->toggleGrid());
+    harness.multiViewController->setLayoutMode(QStringLiteral("grid2x2"));
     QCOMPARE(harness.multiViewController->layoutMode(), QStringLiteral("grid2x2"));
     QVERIFY(!harness.multiViewController->retainedSelectionActive());
     QCOMPARE(harness.playerController->currentChannel().value(QStringLiteral("id")).toInt(), channels.at(0).id);
@@ -9669,7 +9699,7 @@ void AppModelTests::multiviewRetainedSelectionStopReopensGridAndStopsPromotedTil
     QVERIFY(harness.channelListModel->activateById(channels.at(1).id));
 
     harness.multiViewController->focusTile(1);
-    QVERIFY(harness.multiViewController->toggleGrid());
+    QVERIFY(harness.multiViewController->promoteFocusedAndExit());
     QCOMPARE(harness.multiViewController->layoutMode(), QStringLiteral("off"));
     QVERIFY(harness.multiViewController->retainedSelectionActive());
     QCOMPARE(harness.playerController->currentChannel().value(QStringLiteral("id")).toInt(), channels.at(1).id);
@@ -9708,7 +9738,7 @@ void AppModelTests::multiviewRetainedSelectionKeepsHiddenTilesAudioWarmAndSchedu
     QVERIFY(harness.channelListModel->activateById(channels.at(1).id));
 
     harness.multiViewController->focusTile(1);
-    QVERIFY(harness.multiViewController->toggleGrid());
+    QVERIFY(harness.multiViewController->promoteFocusedAndExit());
     QCOMPARE(harness.multiViewController->layoutMode(), QStringLiteral("off"));
     QVERIFY(harness.multiViewController->retainedSelectionActive());
 
@@ -9729,7 +9759,7 @@ void AppModelTests::multiviewRetainedSelectionKeepsHiddenTilesAudioWarmAndSchedu
         &harness.multiViewController->m_audioOwnershipRefreshTimer,
         &QTimer::timeout);
 
-    QVERIFY(harness.multiViewController->toggleGrid());
+    harness.multiViewController->setLayoutMode(QStringLiteral("grid2x2"));
     QCOMPARE(harness.multiViewController->layoutMode(), QStringLiteral("grid2x2"));
     QVERIFY(!harness.multiViewController->retainedSelectionActive());
     QVERIFY(
@@ -9738,7 +9768,7 @@ void AppModelTests::multiviewRetainedSelectionKeepsHiddenTilesAudioWarmAndSchedu
     QTRY_VERIFY_WITH_TIMEOUT(audioRefreshSpy.count() > 0, 1000);
 }
 
-void AppModelTests::multiviewRetainedSelectionClearsOnFullPromoteShortcut()
+void AppModelTests::multiviewRetainedSelectionClearsOnGridToggle()
 {
     StartupHarness harness;
     QVERIFY(harness.initialize(std::nullopt));
@@ -9758,7 +9788,7 @@ void AppModelTests::multiviewRetainedSelectionClearsOnFullPromoteShortcut()
     QVERIFY(harness.channelListModel->activateById(channels.last().id));
 
     harness.multiViewController->focusTile(1);
-    QVERIFY(harness.multiViewController->fullPromoteAndExit());
+    QVERIFY(harness.multiViewController->toggleGrid());
     QCOMPARE(harness.multiViewController->layoutMode(), QStringLiteral("off"));
     QVERIFY(!harness.multiViewController->retainedSelectionActive());
     QCOMPARE(harness.playerController->currentChannel().value(QStringLiteral("id")).toInt(), channels.last().id);
@@ -9770,21 +9800,26 @@ void AppModelTests::multiviewRetainedSelectionClearsOnFullPromoteShortcut()
     harness.multiViewController->focusTile(1);
     QVERIFY(harness.channelListModel->activateById(channels.first().id));
     harness.multiViewController->focusTile(0);
-    QVERIFY(harness.multiViewController->fullPromoteAndExit());
+    QVERIFY(harness.multiViewController->toggleGrid());
     QCOMPARE(harness.playerController->currentChannel().value(QStringLiteral("id")).toInt(), channels.last().id);
 
     QVERIFY(harness.multiViewController->toggleGrid());
     harness.multiViewController->focusTile(1);
     QVERIFY(harness.channelListModel->activateById(channels.first().id));
     harness.multiViewController->focusTile(1);
-    QVERIFY(harness.multiViewController->toggleGrid());
+    QVERIFY(harness.multiViewController->promoteFocusedAndExit());
     QVERIFY(harness.multiViewController->retainedSelectionActive());
+    const auto promotedBackend = harness.multiViewController->tiles().first().toMap().value(QStringLiteral("playerObject"));
 
-    QVERIFY(harness.multiViewController->fullPromoteAndExit());
+    QVERIFY(harness.multiViewController->toggleGrid());
     QCOMPARE(harness.multiViewController->layoutMode(), QStringLiteral("off"));
     QVERIFY(!harness.multiViewController->retainedSelectionActive());
     QCOMPARE(harness.playerController->currentChannel().value(QStringLiteral("id")).toInt(), channels.first().id);
     QCOMPARE(static_cast<int>(harness.multiViewController->m_secondarySlots.size()), 0);
+    QCOMPARE(harness.multiViewController->tiles().first().toMap().value(QStringLiteral("playerObject")), promotedBackend);
+    QVERIFY(harness.multiViewController->toggleGrid());
+    QCOMPARE(harness.multiViewController->layoutMode(), QStringLiteral("grid2x2"));
+    QCOMPARE(harness.multiViewController->tiles().at(1).toMap().value(QStringLiteral("isEmpty")).toBool(), true);
 }
 
 void AppModelTests::multiviewRetainedSelectionClearsOnDegradeToOff()
@@ -9836,7 +9871,7 @@ void AppModelTests::multiviewRetainedSelectionClearsOnProfileChange()
     harness.multiViewController->focusTile(1);
     QVERIFY(harness.channelListModel->activateById(channels.last().id));
     harness.multiViewController->focusTile(1);
-    QVERIFY(harness.multiViewController->toggleGrid());
+    QVERIFY(harness.multiViewController->promoteFocusedAndExit());
     QVERIFY(harness.multiViewController->retainedSelectionActive());
 
     auto profileSwitchedChannel = channels.first();

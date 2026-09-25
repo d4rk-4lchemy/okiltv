@@ -157,26 +157,33 @@ Test binaries:
 | Key | Action |
 |-----|--------|
 | `Space` | Play/Pause |
-| `J` / `L` | Timeshift/Catch-up seek back/forward 10 seconds |
+| `J` / `L` | Seek back/forward 10 seconds when available (timeshift, catch-up or live back-buffer) |
 | `Home` | Jump to buffered live anchor/live edge |
 | `F` | Fullscreen (or favourite toggle in left-pane keyboard mode) |
 | `F1` / `F2` | Open audio/subtitle track picker |
 | `F3` | Toggle live debug bubble |
+| `F6` | Toggle always-on-top |
 | `M` | Mute/Unmute |
 | `,` / `.` | Volume down/up 5% |
-| `Up` / `Down` | Prev/Next channel |
-| `Backspace` | Return to previously played channel |
+| `Up` / `Down` | Prev/Next channel when overlays are hidden |
+| `Backspace` | Return to previously played channel when overlays are hidden |
 | `0-9` | Direct numeric tune (2s idle commit) |
 | `Ctrl+Up` | Select tile above in grid; otherwise open Guide |
+| `Left` / `Right` | Enter channel/programme pane keyboard navigation |
+| `Tab` / `Ctrl+F` | Focus live channel search |
 | `Ctrl+S` | Open source picker |
 | `Ctrl+G` | Open group picker |
 | `Ctrl+P` | Toggle PiP |
 | `Ctrl+Shift+P` | Swap primary and PiP |
-| `Ctrl+O` | Toggle multiview grid |
+| `Ctrl+O` | Open multiview; close an active grid and its secondary streams, or stop retained background streams |
 | `Ctrl+Arrow` | Select grid tile while holding Ctrl; release Ctrl to confirm |
-| `Ctrl+Alt+O` | Fully exit multiview grid (if "Retain multiview" is enabled in Settings) |
+| `Ctrl+Enter` | Promote selected multiview tile and close grid, respecting retention |
+| `Ctrl+D` | Download explicitly selected ended programme in Guide or the right EPG pane |
 | `Ctrl+R` | DVR schedule toggle (programme) or manual recording fallback |
 | `Esc` | Stepwise close search/guide/overlay/fullscreen states |
+
+Character shortcuts are disabled while editing search. Guide, Settings, pickers and dialogs
+use their own keyboard context. Plain Tab focuses search; Ctrl+Tab is unbound.
 
 ### Mouse Shortcuts
 
@@ -194,6 +201,7 @@ Test binaries:
 | Key | Action |
 |-----|--------|
 | `Up` / `Down` | Move channel highlight (wraparound) |
+| `Left` | Open group picker |
 | `Right` | Jump to right pane |
 | `Return` | Tune highlighted channel |
 
@@ -203,6 +211,7 @@ Test binaries:
 |-----|--------|
 | `Up` / `Down` | Move programme highlight (no wraparound) |
 | `Left` | Jump back to left pane |
+| `Return` | Resume catch-up for a completed programme, or tune the channel for NOW/future |
 
 ### Multiview Selection Mode
 
@@ -210,6 +219,9 @@ Test binaries:
 |-----|--------|
 | `Ctrl+Arrow` | Start grid selection on the first arrow; move orange candidate border with edge wrap |
 | Release `Ctrl` | Commit candidate as active tile and audio owner |
+| `Ctrl+Enter` | Promote the candidate (or active tile) to main view and close the grid; retain other streams only when enabled |
+| `Ctrl+O` | Fully close the grid or stop retained background streams; next press opens a new grid |
+| `Delete` | Close the active tile |
 | `Esc` | Cancel without changing active tile or audio |
 
 This gesture is grid-only; PiP tiles remain selectable with the mouse. Ctrl alone does nothing.
@@ -217,11 +229,14 @@ Empty tiles remain selectable and held arrows repeat. Only Ctrl without Shift/Al
 Guide, Settings, search fields, pickers and dialogs retain their own keyboard handling.
 In ordinary Live panels the gesture takes priority over Ctrl+Up opening Guide and hides shell chrome.
 Selection keeps focus on `interactionFocusTarget`, shows a 3px orange candidate border and the
-“Hold Ctrl + arrows  Release Ctrl to select / Esc to cancel” hint. Audio changes only on commit.
-Enter is ignored while selecting. Window/focus loss, layout changes, opening a protected context,
-or another recognized shortcut cancel the candidate; cancellation never steals focus.
+“Ctrl + arrows  Release Ctrl to select / Ctrl+Enter to promote / Esc to cancel” hint.
+Ctrl+Enter commits and promotes the candidate without first releasing Ctrl. A plain Enter is ignored while selecting.
+Promotion of an empty tile does nothing. Ctrl+O cancels the candidate and keeps the previously committed stream.
+Window/focus loss, layout changes, opening a protected context, or another recognized shortcut
+cancel the candidate; cancellation never steals focus.
 Clicking a tile cancels the candidate before the normal mouse selection.
-The old Ctrl+Shift+O shortcut is removed.
+Ctrl+Shift+O and Ctrl+Alt+O are unbound. Both main and numeric Enter support promotion.
+After promotion with retention, Ctrl+O stops only background streams; another press opens a fresh grid.
 
 Transport controls, Space, channel stepping, and playback EPG follow the committed focused tile. Browsing other channels does not change the transport target. Empty tiles have no playback EPG; Space is a no-op. Focus changes preserve each stream and its pause state.
 
@@ -236,7 +251,10 @@ Focus-border contract:
 |-----|--------|
 | Arrow keys | Navigate programme grid |
 | `Space` | Toggle selected programme details |
-| `Return` | Tune selected channel/Play Catch-up if available |
+| `Return` | Play catch-up for an eligible completed programme; otherwise tune selected channel |
+| `Ctrl+Enter` | Start selected eligible programme in catch-up from the beginning |
+| `Ctrl+D` | Download selected ended programme |
+| `Ctrl+R` | Toggle programme DVR schedule |
 | `Ctrl+Down` | Collapse Guide to video-only |
 | `Esc` | Close Guide + transient overlay state |
 

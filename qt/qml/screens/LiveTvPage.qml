@@ -566,14 +566,11 @@ Item {
         }
     }
 
-    function handleMultiviewShortcut(key, ctrlPressed, shiftPressed, altPressed) {
+    function handleMultiviewShortcut(key, ctrlPressed, shiftPressed) {
         if (!ctrlPressed) {
             return null
         }
         if (key === Qt.Key_O) {
-            if (altPressed) {
-                return root.multiView.fullPromoteAndExit()
-            }
             if (shiftPressed) {
                 return false
             }
@@ -586,6 +583,24 @@ Item {
             return root.handlePictureInPictureShortcut()
         }
         return null
+    }
+
+    function isMultiviewPromotion(event) {
+        return event.modifiers === Qt.ControlModifier
+            && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+            && root.multiviewSelectionAvailable
+    }
+
+    function promoteMultiviewSelection() {
+        const index = root.multiviewSelectionMode
+            ? root.multiviewSelectionIndex : root.multiView.focusedTileIndex
+        const tile = root.multiviewTileData(index)
+        if (!tile || Boolean(tile.isEmpty))
+            return true
+        if (root.multiviewSelectionMode)
+            root.commitMultiviewSelection()
+        root.multiView.promoteFocusedAndExit()
+        return true
     }
 
     function multiviewTileRect(tileIndex) {
@@ -2579,9 +2594,6 @@ Item {
         const shiftPressed = (event.modifiers & Qt.ShiftModifier) !== 0
         const altPressed = (event.modifiers & Qt.AltModifier) !== 0
         const metaPressed = (event.modifiers & Qt.MetaModifier) !== 0
-        if (ctrlPressed && altPressed && !metaPressed && event.key === Qt.Key_O) {
-            return root.multiView.fullPromoteAndExit()
-        }
         const altOrMetaPressed = altPressed || metaPressed
         if (altOrMetaPressed) {
             return false
@@ -2766,8 +2778,7 @@ Item {
         const multiviewShortcutHandled = root.handleMultiviewShortcut(
             event.key,
             ctrlPressed,
-            shiftPressed,
-            altPressed)
+            shiftPressed)
         if (multiviewShortcutHandled !== null) {
             return multiviewShortcutHandled
         }
@@ -2927,6 +2938,8 @@ Item {
     }
 
     function handleWindowKey(event) {
+        if (root.isMultiviewPromotion(event))
+            return root.promoteMultiviewSelection()
         if (root.multiviewSelectionMode && !root.isMultiviewArrow(event)) {
             if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
                 return true
@@ -2974,10 +2987,6 @@ Item {
         if (root.shell.activeOverlay === "guide" || guideOverlayMounted) {
             const ctrlPressed = (event.modifiers & Qt.ControlModifier) !== 0
             const shiftPressed = (event.modifiers & Qt.ShiftModifier) !== 0
-            const altPressed = (event.modifiers & Qt.AltModifier) !== 0
-            if (ctrlPressed && altPressed && event.key === Qt.Key_O) {
-                return root.multiView.fullPromoteAndExit()
-            }
             if (ctrlPressed && event.key === Qt.Key_R) {
                 return root.handleCtrlRShortcut()
             }
@@ -4476,6 +4485,8 @@ Item {
                 root.cancelMultiviewSelection()
                 event.accepted = true
             } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                if (!event.isAutoRepeat && root.isMultiviewPromotion(event))
+                    root.promoteMultiviewSelection()
                 event.accepted = true
             }
         }
@@ -7058,7 +7069,7 @@ Item {
 
         Rectangle {
             anchors.centerIn: parent
-            width: selectionModePillText.implicitWidth + 28
+            width: Math.min(root.width - 24, selectionModePillText.implicitWidth + 28)
             height: selectionModePillText.implicitHeight + 14
             radius: height / 2
             color: Theme.uiBackground("#b3241a0c", root.uiTransparency)
@@ -7068,7 +7079,10 @@ Item {
             Text {
                 id: selectionModePillText
                 anchors.centerIn: parent
-                text: "Hold Ctrl + arrows  Release Ctrl to select / Esc to cancel"
+                width: parent.width - 28
+                wrapMode: Text.WordWrap
+                horizontalAlignment: Text.AlignHCenter
+                text: "Ctrl + arrows  Release Ctrl to select / Ctrl+Enter to promote / Esc to cancel"
                 color: Theme.textPrimary
                 font.pixelSize: 13
                 font.bold: true

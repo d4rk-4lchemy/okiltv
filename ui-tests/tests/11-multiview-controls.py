@@ -4,6 +4,7 @@ import functools
 import http.server
 import importlib.util
 import json
+import os
 import pathlib
 import threading
 import time
@@ -27,6 +28,7 @@ def main():
     runner.http_port = server.server_port
     threading.Thread(target=server.serve_forever, daemon=True).start()
     checks = []
+    retain = os.environ.get("OKILTV_TEST_RETAIN", "0") == "1"
 
     def wait(label, predicate, timeout=12):
         end = time.monotonic() + timeout
@@ -76,6 +78,7 @@ def main():
         for path in runner.settings_path_candidates:
             settings = json.loads(path.read_text())
             settings["overlayAutoHide"] = False
+            settings["multiviewRetainSelectionOnPromotion"] = retain
             path.write_text(json.dumps(settings))
         runner.launch_stack()
         runner.wait_for_bridge(60)
@@ -180,7 +183,42 @@ def main():
         key("space")
         wait("promoted stream resumes after secondary controller disposal", lambda s:
              s["multiview"]["isPlaying"] and tile(s, 0)["paused"] is False)
+        key("ctrl+o")
+        wait("promotion grid ready", lambda s: s["multiview"]["available"])
+        key("ctrl+Right")
+        key("3")
+        wait("promotion secondary playing", lambda s: focused(1, 2)(s)
+             and tile(s, 1)["paused"] is False, 30)
+        key("space")
+        before = wait("promotion secondary paused", lambda s: tile(s, 1)["paused"] is True)
+        position = tile(before, 1)["position"]
+        key("ctrl+Left")
+        runner.xdotool("keydown", "--window", runner.window_id, "Control_L")
+        key("Right")
+        wait("promotion candidate differs from active tile", lambda s:
+             s["multiview"]["focused"] == 0 and s["multiview"]["candidate"] == 1
+             and s["multiview"]["selecting"])
+        key("Return")
+        runner.xdotool("keyup", "--window", runner.window_id, "Control_L")
+        wait("Ctrl+Enter promotes candidate with pause and retention preserved", lambda s:
+             s["multiview"]["mode"] == "off" and focused(0, 2)(s)
+             and tile(s, 0)["paused"] is True and abs(tile(s, 0)["position"] - position) < 1
+             and s["multiview"]["retained"] == retain and not s["multiview"]["selecting"])
+        if retain:
+            key("ctrl+o")
+            wait("Ctrl+O clears only background streams", lambda s:
+                 s["multiview"]["mode"] == "off" and not s["multiview"]["retained"]
+                 and focused(0, 2)(s) and tile(s, 0)["paused"] is True
+                 and abs(tile(s, 0)["position"] - position) < 1)
+        key("ctrl+o")
+        wait("next Ctrl+O opens fresh grid", lambda s: s["multiview"]["available"]
+             and tile(s, 0)["channelId"] == 2 and tile(s, 1)["channelId"] == -1)
+        key("ctrl+KP_Enter")
+        wait("numeric Enter promotes committed primary", lambda s:
+             s["multiview"]["mode"] == "off" and focused(0, 2)(s)
+             and tile(s, 0)["paused"] is True and not s["multiview"]["retained"])
     finally:
+        runner.xdotool("keyup", "Control_L", "Control_R")
         (runner.run_dir / "controls-result.json").write_text(json.dumps({"passed": checks}, indent=2))
         runner.cleanup()
         server.shutdown()

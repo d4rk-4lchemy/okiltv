@@ -893,6 +893,7 @@ QJsonObject UiTestBridge::buildStateSnapshot() const
     const auto focusedChannel = focused != nullptr ? focused->currentChannelValue() : std::nullopt;
     const QJsonObject multiview = livePage != nullptr ? QJsonObject {
         { QStringLiteral("tiles"), tileStates },
+        { QStringLiteral("retained"), multi && multi->retainedSelectionActive() },
         { QStringLiteral("channelId"), focusedChannel ? focusedChannel->id : -1 },
         { QStringLiteral("isPlaying"), focused && focused->isPlaying() },
         { QStringLiteral("mode"), livePage->property("multiviewMode").toString() },

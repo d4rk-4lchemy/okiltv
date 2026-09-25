@@ -78,6 +78,7 @@ public:
     Q_INVOKABLE void setLayoutMode(const QString &mode);
     Q_INVOKABLE bool togglePictureInPicture(int channelId);
     Q_INVOKABLE bool toggleGrid();
+    Q_INVOKABLE bool promoteFocusedAndExit();
     Q_INVOKABLE bool stopRetainedPromotedAndRestoreGrid();
     Q_INVOKABLE bool swapPrimaryWithPictureInPicture();
     Q_INVOKABLE void assignChannelToFocusedTile(int channelId);

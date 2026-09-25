@@ -57,13 +57,12 @@ ApplicationWindow {
             { sequence: "Ctrl+S", key: Qt.Key_S, modifiers: Qt.ControlModifier, scope: "overlay" },
             { sequence: "Ctrl+F", key: Qt.Key_F, modifiers: Qt.ControlModifier, scope: "nonGuideOverlay" },
             { sequence: "Ctrl+O", key: Qt.Key_O, modifiers: Qt.ControlModifier, scope: "live" },
-            { sequence: "Ctrl+Alt+O", key: Qt.Key_O, modifiers: Qt.ControlModifier | Qt.AltModifier, scope: "live" },
             { sequence: "Ctrl+P", key: Qt.Key_P, modifiers: Qt.ControlModifier, scope: "live" },
             { sequence: "Ctrl+Shift+P", key: Qt.Key_P, modifiers: Qt.ControlModifier | Qt.ShiftModifier, scope: "live" },
             { sequence: "Ctrl+D", key: Qt.Key_D, modifiers: Qt.ControlModifier, scope: "download" },
             { sequence: "Ctrl+R", key: Qt.Key_R, modifiers: Qt.ControlModifier, scope: "overlay" },
-            { sequence: "Ctrl+Return", key: Qt.Key_Return, modifiers: Qt.ControlModifier, scope: "guideOnly" },
-            { sequence: "Ctrl+Enter", key: Qt.Key_Enter, modifiers: Qt.ControlModifier, scope: "guideOnly" },
+            { sequence: "Ctrl+Return", key: Qt.Key_Return, modifiers: Qt.ControlModifier, scope: "guideOrGrid" },
+            { sequence: "Ctrl+Enter", key: Qt.Key_Enter, modifiers: Qt.ControlModifier, scope: "guideOrGrid" },
             { sequence: "Ctrl+Up", key: Qt.Key_Up, modifiers: Qt.ControlModifier, scope: "overlay" },
             { sequence: "Ctrl+Down", key: Qt.Key_Down, modifiers: Qt.ControlModifier, scope: "guideOrGrid" },
             { sequence: "Ctrl+Left", key: Qt.Key_Left, modifiers: Qt.ControlModifier, scope: "grid" },
@@ -205,9 +204,6 @@ ApplicationWindow {
         if (scope === "nonGuideOverlay") {
             return window.overlayShortcutsEnabled && window.shell.activeOverlay !== "guide"
         }
-        if (scope === "guideOnly") {
-            return window.shell.activeOverlay === "guide"
-        }
         return false
     }
 
@@ -218,6 +214,8 @@ ApplicationWindow {
             required property var modelData
 
             sequence: modelData.sequence
+            autoRepeat: modelData.sequence !== "Ctrl+O"
+                && modelData.sequence !== "Ctrl+Return" && modelData.sequence !== "Ctrl+Enter"
             enabled: window.shortcutEnabled(modelData.scope)
             onActivated: window.dispatchShortcut(
                 modelData.key,

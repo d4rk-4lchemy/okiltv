@@ -566,11 +566,8 @@ bool MultiViewController::toggleGrid()
         return false;
     }
 
-    if (isGridLayout(m_layoutMode)) {
-        return exitMultiViewWithIntent(
-            shouldRetainSelectionOnGridPromotion()
-                ? ExitIntent::SoftRetain
-                : ExitIntent::ForcedOff);
+    if (isGridLayout(m_layoutMode) || retainedSelectionActive()) {
+        return fullPromoteAndExit();
     }
 
     if (!m_playerController->currentChannelValue().has_value()) {
@@ -580,6 +577,23 @@ bool MultiViewController::toggleGrid()
 
     setLayoutModeInternal(gridLayoutModeForTileCount(configuredMaxTiles()));
     return true;
+}
+
+bool MultiViewController::promoteFocusedAndExit()
+{
+    if (!isGridLayout(m_layoutMode)) {
+        return false;
+    }
+    const auto focusedSlot = normalizedFocusedTileIndex();
+    const bool hasChannel = focusedSlot == 0
+        ? m_playerController->currentChannelValue().has_value()
+        : focusedSlot <= static_cast<int>(m_secondarySlots.size())
+            && m_secondarySlots.at(static_cast<std::size_t>(focusedSlot - 1)).channel.has_value();
+    if (!hasChannel) {
+        return false;
+    }
+    return exitMultiViewWithIntent(shouldRetainSelectionOnGridPromotion()
+            ? ExitIntent::SoftRetain : ExitIntent::FullPromotion);
 }
 
 bool MultiViewController::stopRetainedPromotedAndRestoreGrid()
