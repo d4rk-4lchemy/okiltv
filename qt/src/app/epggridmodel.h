@@ -5,6 +5,8 @@
 #include <QAbstractListModel>
 #include <QFutureSynchronizer>
 #include <QHash>
+#include <QSet>
+#include <atomic>
 
 namespace OKILTV::App {
 
@@ -71,10 +73,13 @@ public:
     Q_INVOKABLE int adjacentChannelId(int channelId, int delta) const;
     Q_INVOKABLE QVariantMap adjacentProgram(int channelId, const QString &currentStartIso, int delta) const;
     Q_INVOKABLE QVariantMap programForChannelAtTimestamp(int channelId, const QString &timestampIso) const;
+    Q_INVOKABLE void requestProgram(int channelId, const QString &timestampIso, int delta = 0, bool adjacent = false);
+    Q_INVOKABLE void cancelProgramRequest();
     Q_INVOKABLE void setRenderViewport(double startMinutes, double durationMinutes);
     Q_INVOKABLE void setVisibleRowRange(int firstRow, int lastRow);
 
 signals:
+    void programResolved(int channelId, const QVariantMap &program, bool adjacent);
     void rebuildPendingChanged();
     void timeSlotsChanged();
     void visibleTimeSlotsChanged();
@@ -89,6 +94,7 @@ private:
         Core::Channel channel;
     };
 
+    void loadRowPrograms(int rowIndex, const QDateTime &from, const QDateTime &to);
     QVariantList computeTimeSlots() const;
     QVariantList computeVisibleTimeSlots() const;
     QVariantList buildPrograms(int rowIndex, const Row &row) const;
@@ -137,6 +143,15 @@ private:
     int m_visibleRowEnd { -1 };
     mutable QHash<int, QVariantList> m_programTilesCacheByRow;
     QHash<int, int> m_rowIndexByChannelId;
+    mutable QHash<int, QList<Core::EpgEntry>> m_loadedProgramsByRow;
+    QSet<int> m_pendingRows;
+    std::shared_ptr<std::atomic_bool> m_tilesCancelled = std::make_shared<std::atomic_bool>(false);
+    quint64 m_navigationGeneration = 0;
+    int m_navigationDelta = 0;
+    bool m_navigationPending = false;
+    int m_navigationChannel = -1;
+    QString m_navigationStart;
+    QVariantMap m_resolvedProgram;
     QFutureSynchronizer<void> m_backgroundTasks;
     quint64 m_rebuildGeneration { 0 };
     bool m_rebuildPending { false };

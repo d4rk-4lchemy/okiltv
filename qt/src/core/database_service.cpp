@@ -1,6 +1,9 @@
 #include "database_service.h"
 
 #include "appdatapaths.h"
+#include "m3uservice.h"
+#include <QMutex>
+#include <memory>
 #include "secretprotection.h"
 #include "debuglogger.h"
 
@@ -23,32 +26,45 @@ namespace OKILTV::Core {
 
 namespace {
 
+struct ChannelPublication {
+    QMutex mutex;
+    quint64 token { 0 };
+};
+
+std::shared_ptr<ChannelPublication> publicationFor(const QUuid &id)
+{
+    static QMutex mutex;
+    static QHash<QUuid, std::shared_ptr<ChannelPublication>> publications;
+    QMutexLocker lock(&mutex);
+    auto &publication = publications[id];
+    if (!publication) publication = std::make_shared<ChannelPublication>();
+    return publication;
+}
+
 class ScopedConnection
 {
 public:
-    explicit ScopedConnection(const QString &databaseFilePath)
+    explicit ScopedConnection(const QString &databaseFilePath, int busyTimeoutMs = 5000)
         : m_name(QStringLiteral("iptvplayer_%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces)))
     {
         m_database = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), m_name);
         m_database.setDatabaseName(databaseFilePath);
+        m_database.setConnectOptions(QStringLiteral("QSQLITE_BUSY_TIMEOUT=%1").arg(busyTimeoutMs));
         if (!m_database.open()) {
-            throw std::runtime_error(
-                QStringLiteral("Failed to open SQLite database %1: %2")
-                    .arg(databaseFilePath, m_database.lastError().text())
-                    .toStdString());
+            const auto error = QStringLiteral("Failed to open SQLite database %1: %2")
+                .arg(databaseFilePath, m_database.lastError().text());
+            close();
+            throw std::runtime_error(error.toStdString());
         }
         if (!QFile::setPermissions(databaseFilePath, QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
-            m_database.close();
+            close();
             throw std::runtime_error("Cannot restrict database file permissions.");
         }
     }
 
     ~ScopedConnection()
     {
-        const auto name = m_name;
-        m_database.close();
-        m_database = {};
-        QSqlDatabase::removeDatabase(name);
+        close();
     }
 
     QSqlDatabase &database()
@@ -57,6 +73,13 @@ public:
     }
 
 private:
+    void close()
+    {
+        m_database.close();
+        m_database = {};
+        QSqlDatabase::removeDatabase(m_name);
+    }
+
     QString m_name;
     QSqlDatabase m_database;
 };
@@ -213,11 +236,19 @@ void ensureSchemaOnConnection(QSqlDatabase &database)
     }
 }
 
-QSqlDatabase &schemaReadyDatabase(ScopedConnection &connection)
+// Secret protection can involve OS services. Complete it before holding a
+// SQLite write transaction so a source refresh does not block other writers.
+QList<Channel> channelsWithProtectedFields(QList<Channel> channels)
 {
-    auto &database = connection.database();
-    ensureSchemaOnConnection(database);
-    return database;
+    for (auto &channel : channels) {
+        channel.streamUrl = protectSecret(channel.streamUrl);
+        if (!channel.iconUrl.isEmpty()) channel.iconUrl = protectSecret(channel.iconUrl);
+        channel.catchupSourceTemplate = channel.catchupSourceTemplate.trimmed();
+        if (!channel.catchupSourceTemplate.isEmpty()) {
+            channel.catchupSourceTemplate = protectSecret(channel.catchupSourceTemplate);
+        }
+    }
+    return channels;
 }
 
 Channel channelFromQuery(const QSqlQuery &query, const QUuid &profileId)
@@ -285,7 +316,8 @@ void DatabaseService::ensureSchema(const RebuildStarted &rebuildStarted) const
     logStage(QStringLiteral("Opening SQLite connection"));
     ScopedConnection connection(m_databaseFilePath);
     logStage(QStringLiteral("Ensuring schema"));
-    auto &database = schemaReadyDatabase(connection);
+    auto &database = connection.database();
+    ensureSchemaOnConnection(database);
     QSqlQuery secure(database);
     if (!secure.exec(QStringLiteral("PRAGMA secure_delete=ON"))) throw std::runtime_error("Cannot enable database cleanup.");
     secure.finish();
@@ -371,10 +403,62 @@ void DatabaseService::ensureSchema(const RebuildStarted &rebuildStarted) const
     logStage(QStringLiteral("Database ready"));
 }
 
+quint64 DatabaseService::beginChannelImport(const QUuid &profileId)
+{
+    const auto state = publicationFor(profileId);
+    QMutexLocker lock(&state->mutex);
+    return ++state->token;
+}
+
+bool DatabaseService::channelImportCurrent(const QUuid &profileId, quint64 token)
+{
+    const auto state = publicationFor(profileId);
+    QMutexLocker lock(&state->mutex);
+    return state->token == token;
+}
+
+bool DatabaseService::publishChannels(const QUuid &profileId, quint64 token,
+    QList<Channel> &channels, bool retainM3uIds) const
+{
+    const auto state = publicationFor(profileId);
+    QMutexLocker lock(&state->mutex);
+    if (state->token != token) return false;
+    std::optional<qint64> nextId;
+    if (retainM3uIds) {
+        nextId = nextM3uChannelId(profileId);
+        M3UService::retainChannelIds(channels, loadChannels(profileId), *nextId);
+    }
+    replaceChannelsForProfile(profileId, channels, nextId);
+    return true;
+}
+
+void DatabaseService::publishChannelIcon(const Channel &channel, quint64 token, const QString &path) const
+{
+    const auto state = publicationFor(channel.profileId);
+    QMutexLocker lock(&state->mutex);
+    if (state->token != token) return;
+    ScopedConnection connection(m_databaseFilePath);
+    QSqlQuery query(connection.database());
+    query.prepare(QStringLiteral("SELECT icon_url FROM channels WHERE profile_id=? AND id=?"));
+    query.addBindValue(guidToString(channel.profileId));
+    query.addBindValue(channel.id);
+    execOrThrow(query, QStringLiteral("Read channel icon identity"));
+    if (!query.next() || unprotectSecret(query.value(0).toString()) != channel.iconUrl) return;
+    query.finish();
+    query.prepare(QStringLiteral("UPDATE channels SET cached_icon=? WHERE profile_id=? AND id=?"));
+    query.addBindValue(path);
+    query.addBindValue(guidToString(channel.profileId));
+    query.addBindValue(channel.id);
+    execOrThrow(query, QStringLiteral("Publish channel icon"));
+}
+
 void DatabaseService::removeProfileData(const QUuid &profileId) const
 {
+    const auto state = publicationFor(profileId);
+    QMutexLocker lock(&state->mutex);
+    ++state->token;
     ScopedConnection connection(m_databaseFilePath);
-    auto &database = schemaReadyDatabase(connection);
+    auto &database = connection.database();
     QSqlQuery secure(database);
     if (!secure.exec(QStringLiteral("PRAGMA secure_delete=ON"))) throw std::runtime_error("Cannot enable database cleanup.");
     secure.finish();
@@ -395,8 +479,9 @@ void DatabaseService::removeProfileData(const QUuid &profileId) const
 
 void DatabaseService::upsertChannels(const QList<Channel> &channels) const
 {
+    const auto protectedChannels = channelsWithProtectedFields(channels);
     ScopedConnection connection(m_databaseFilePath);
-    auto &database = schemaReadyDatabase(connection);
+    auto &database = connection.database();
 
     if (!database.transaction()) {
         throw std::runtime_error(database.lastError().text().toStdString());
@@ -427,18 +512,18 @@ void DatabaseService::upsertChannels(const QList<Channel> &channels) const
                 catchup_source_template = excluded.catchup_source_template
         )sql"));
 
-        for (const auto &channel : channels) {
+        for (const auto &channel : protectedChannels) {
             query.bindValue(QStringLiteral(":id"), channel.id);
             query.bindValue(QStringLiteral(":profile_id"), guidToString(channel.profileId));
             query.bindValue(QStringLiteral(":name"), channel.name);
-            query.bindValue(QStringLiteral(":stream_url"), protectSecret(channel.streamUrl));
+            query.bindValue(QStringLiteral(":stream_url"), channel.streamUrl);
             query.bindValue(QStringLiteral(":category_id"), normalizeChannelCategoryId(channel.categoryId));
             query.bindValue(
                 QStringLiteral(":category_name"),
                 channel.categoryName.isNull() ? QStringLiteral("") : channel.categoryName);
             query.bindValue(QStringLiteral(":tvg_id"), channel.tvgId.isNull() ? QStringLiteral("") : channel.tvgId);
             query.bindValue(QStringLiteral(":tvg_name"), channel.tvgName.isNull() ? QStringLiteral("") : channel.tvgName);
-            query.bindValue(QStringLiteral(":icon_url"), channel.iconUrl.isEmpty() ? QVariant {} : QVariant(protectSecret(channel.iconUrl)));
+            query.bindValue(QStringLiteral(":icon_url"), channel.iconUrl.isEmpty() ? QVariant {} : QVariant(channel.iconUrl));
             query.bindValue(QStringLiteral(":source"), channelSourceToString(channel.source));
             query.bindValue(QStringLiteral(":sort_order"), channel.sortOrder);
             query.bindValue(QStringLiteral(":catchup_supported"), channel.catchupSupported);
@@ -450,7 +535,7 @@ void DatabaseService::upsertChannels(const QList<Channel> &channels) const
                 QStringLiteral(":catchup_source_template"),
                 channel.catchupSourceTemplate.trimmed().isEmpty()
                     ? QStringLiteral("")
-                    : protectSecret(channel.catchupSourceTemplate.trimmed()));
+                    : channel.catchupSourceTemplate);
             execOrThrow(query, QStringLiteral("Upsert channel"));
         }
 
@@ -468,8 +553,9 @@ void DatabaseService::upsertChannels(const QList<Channel> &channels) const
 void DatabaseService::replaceChannelsForProfile(const QUuid &profileId, const QList<Channel> &channels,
                                                 std::optional<qint64> nextM3uChannelId) const
 {
+    const auto protectedChannels = channelsWithProtectedFields(channels);
     ScopedConnection connection(m_databaseFilePath);
-    auto &database = schemaReadyDatabase(connection);
+    auto &database = connection.database();
 
     if (!database.transaction()) {
         throw std::runtime_error(database.lastError().text().toStdString());
@@ -500,7 +586,7 @@ void DatabaseService::replaceChannelsForProfile(const QUuid &profileId, const QL
                 catchup_source_template = excluded.catchup_source_template
         )sql"));
 
-        for (const auto &channel : channels) {
+        for (const auto &channel : protectedChannels) {
             if (channel.profileId != profileId) {
                 throw std::runtime_error(
                     QStringLiteral("Channel profile mismatch while replacing channels for %1.")
@@ -511,14 +597,14 @@ void DatabaseService::replaceChannelsForProfile(const QUuid &profileId, const QL
             query.bindValue(QStringLiteral(":id"), channel.id);
             query.bindValue(QStringLiteral(":profile_id"), guidToString(channel.profileId));
             query.bindValue(QStringLiteral(":name"), channel.name);
-            query.bindValue(QStringLiteral(":stream_url"), protectSecret(channel.streamUrl));
+            query.bindValue(QStringLiteral(":stream_url"), channel.streamUrl);
             query.bindValue(QStringLiteral(":category_id"), normalizeChannelCategoryId(channel.categoryId));
             query.bindValue(
                 QStringLiteral(":category_name"),
                 channel.categoryName.isNull() ? QStringLiteral("") : channel.categoryName);
             query.bindValue(QStringLiteral(":tvg_id"), channel.tvgId.isNull() ? QStringLiteral("") : channel.tvgId);
             query.bindValue(QStringLiteral(":tvg_name"), channel.tvgName.isNull() ? QStringLiteral("") : channel.tvgName);
-            query.bindValue(QStringLiteral(":icon_url"), channel.iconUrl.isEmpty() ? QVariant {} : QVariant(protectSecret(channel.iconUrl)));
+            query.bindValue(QStringLiteral(":icon_url"), channel.iconUrl.isEmpty() ? QVariant {} : QVariant(channel.iconUrl));
             query.bindValue(QStringLiteral(":source"), channelSourceToString(channel.source));
             query.bindValue(QStringLiteral(":sort_order"), channel.sortOrder);
             query.bindValue(QStringLiteral(":catchup_supported"), channel.catchupSupported);
@@ -530,7 +616,7 @@ void DatabaseService::replaceChannelsForProfile(const QUuid &profileId, const QL
                 QStringLiteral(":catchup_source_template"),
                 channel.catchupSourceTemplate.trimmed().isEmpty()
                     ? QStringLiteral("")
-                    : protectSecret(channel.catchupSourceTemplate.trimmed()));
+                    : channel.catchupSourceTemplate);
             execOrThrow(query, QStringLiteral("Upsert channel"));
         }
 
@@ -540,7 +626,7 @@ void DatabaseService::replaceChannelsForProfile(const QUuid &profileId, const QL
         } else {
             QStringList ids;
             ids.reserve(channels.size());
-            for (const auto &channel : channels) {
+            for (const auto &channel : protectedChannels) {
                 ids.push_back(QString::number(channel.id));
             }
             pruneQuery.prepare(
@@ -573,7 +659,7 @@ void DatabaseService::replaceChannelsForProfile(const QUuid &profileId, const QL
 qint64 DatabaseService::nextM3uChannelId(const QUuid &profileId) const
 {
     ScopedConnection connection(m_databaseFilePath);
-    auto &database = schemaReadyDatabase(connection);
+    auto &database = connection.database();
     QSqlQuery query(database);
     query.prepare(QStringLiteral("SELECT next_id FROM m3u_channel_sequences WHERE profile_id=?"));
     query.addBindValue(guidToString(profileId));
@@ -584,7 +670,7 @@ qint64 DatabaseService::nextM3uChannelId(const QUuid &profileId) const
 QStringList DatabaseService::loadChannelGroupIds(const QUuid &profileId) const
 {
     ScopedConnection connection(m_databaseFilePath);
-    auto &database = schemaReadyDatabase(connection);
+    auto &database = connection.database();
     QSqlQuery query(database);
     query.prepare(QStringLiteral("SELECT category_id FROM channels WHERE profile_id = :profile_id ORDER BY sort_order"));
     query.bindValue(QStringLiteral(":profile_id"), guidToString(profileId));
@@ -605,7 +691,7 @@ QStringList DatabaseService::loadChannelGroupIds(const QUuid &profileId) const
 QList<Channel> DatabaseService::loadChannels(const QUuid &profileId) const
 {
     ScopedConnection connection(m_databaseFilePath);
-    auto &database = schemaReadyDatabase(connection);
+    auto &database = connection.database();
 
     QSqlQuery query(database);
     query.prepare(QStringLiteral("SELECT * FROM channels WHERE profile_id = :profile_id ORDER BY sort_order"));
@@ -629,7 +715,7 @@ QList<Channel> DatabaseService::loadChannels(const QUuid &profileId) const
 void DatabaseService::updateCachedIcon(int channelId, const QUuid &profileId, const QString &localPath) const
 {
     ScopedConnection connection(m_databaseFilePath);
-    auto &database = schemaReadyDatabase(connection);
+    auto &database = connection.database();
 
     QSqlQuery query(database);
     query.prepare(QStringLiteral(
@@ -643,7 +729,7 @@ void DatabaseService::updateCachedIcon(int channelId, const QUuid &profileId, co
 QHash<int, qint64> DatabaseService::loadWatchSecondsByProfile(const QUuid &profileId) const
 {
     ScopedConnection connection(m_databaseFilePath);
-    auto &database = schemaReadyDatabase(connection);
+    auto &database = connection.database();
 
     QSqlQuery query(database);
     query.prepare(QStringLiteral(R"sql(
@@ -670,8 +756,10 @@ void DatabaseService::incrementWatchSeconds(const QUuid &profileId, const int ch
         return;
     }
 
-    ScopedConnection connection(m_databaseFilePath);
-    auto &database = schemaReadyDatabase(connection);
+    // Called by the UI timer; defer contention to the next flush instead of
+    // blocking the event loop behind a source refresh.
+    ScopedConnection connection(m_databaseFilePath, 0);
+    auto &database = connection.database();
 
     QSqlQuery query(database);
     query.prepare(QStringLiteral(R"sql(
@@ -689,7 +777,7 @@ void DatabaseService::incrementWatchSeconds(const QUuid &profileId, const int ch
 void DatabaseService::replaceEpg(const QUuid &profileId, const QList<EpgEntry> &entries) const
 {
     ScopedConnection connection(m_databaseFilePath);
-    auto &database = schemaReadyDatabase(connection);
+    auto &database = connection.database();
 
     if (!database.transaction()) {
         throw std::runtime_error(database.lastError().text().toStdString());
@@ -742,7 +830,7 @@ QList<EpgEntry> DatabaseService::queryEpg(
     const QDateTime &to) const
 {
     ScopedConnection connection(m_databaseFilePath);
-    auto &database = schemaReadyDatabase(connection);
+    auto &database = connection.database();
 
     QSqlQuery query(database);
     query.prepare(QStringLiteral(R"sql(
@@ -771,7 +859,7 @@ QList<EpgEntry> DatabaseService::queryEpg(
 QString DatabaseService::cachedIconByHash(const QString &urlHash) const
 {
     ScopedConnection connection(m_databaseFilePath);
-    auto &database = schemaReadyDatabase(connection);
+    auto &database = connection.database();
 
     QSqlQuery query(database);
     query.prepare(QStringLiteral("SELECT local_path FROM icon_cache WHERE url_hash = :url_hash"));
@@ -784,7 +872,7 @@ QString DatabaseService::cachedIconByHash(const QString &urlHash) const
 void DatabaseService::upsertIconCache(const QString &urlHash, const QString &localPath, const qint64 fetchedAtUnix) const
 {
     ScopedConnection connection(m_databaseFilePath);
-    auto &database = schemaReadyDatabase(connection);
+    auto &database = connection.database();
 
     QSqlQuery query(database);
     query.prepare(QStringLiteral(R"sql(
@@ -824,7 +912,7 @@ qint64 CatchupProgress::resumeSeconds(const qint64 programEndMs) const
 QList<CatchupProgress> DatabaseService::loadCatchupProgress() const
 {
     ScopedConnection connection(m_databaseFilePath);
-    QSqlQuery query(schemaReadyDatabase(connection));
+    QSqlQuery query(connection.database());
     query.prepare(QStringLiteral("SELECT resume_key, profile_id, program_start_ms, program_stop_ms, position_ms, expires_at_ms FROM catchup_progress"));
     execOrThrow(query, QStringLiteral("Load catch-up progress"));
     QList<CatchupProgress> result;
@@ -843,7 +931,7 @@ void DatabaseService::saveCatchupProgress(const CatchupProgress &progress) const
         return;
     }
     ScopedConnection connection(m_databaseFilePath);
-    QSqlQuery query(schemaReadyDatabase(connection));
+    QSqlQuery query(connection.database());
     query.prepare(QStringLiteral(R"sql(
         INSERT INTO catchup_progress VALUES (:key, :profile, :start, :stop, :position, :expires)
         ON CONFLICT(resume_key) DO UPDATE SET
@@ -863,7 +951,7 @@ void DatabaseService::saveCatchupProgress(const CatchupProgress &progress) const
 void DatabaseService::removeCatchupProgress(const QString &key) const
 {
     ScopedConnection connection(m_databaseFilePath);
-    QSqlQuery query(schemaReadyDatabase(connection));
+    QSqlQuery query(connection.database());
     query.prepare(QStringLiteral("DELETE FROM catchup_progress WHERE resume_key = :key"));
     query.bindValue(QStringLiteral(":key"), key);
     execOrThrow(query, QStringLiteral("Remove catch-up progress"));

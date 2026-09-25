@@ -1,6 +1,8 @@
 #pragma once
 
 #include "models.h"
+#include "epgstore.h"
+#include <QThreadPool>
 
 #include <QDateTime>
 #include <QHash>
@@ -20,6 +22,8 @@ class EpgService
 public:
     struct Snapshot
     {
+        std::shared_ptr<EpgStore> store;
+        // In-memory fixtures remain supported; production snapshots carry only store.
         QHash<QString, QList<EpgEntry>> index;
         QHash<QString, QDateTime> maxStopByChannelId;
         // Monotonic prefix maxima allow range lookup even with overlapping programmes.
@@ -30,6 +34,13 @@ public:
 
     static QList<EpgEntry> parseEntries(const QByteArray &payload);
     static QList<EpgEntry> parseEntries(QIODevice *device);
+    static void streamEntries(QIODevice *device, const EpgStore::Sink &sink,
+        const EpgStore::Cancelled &cancelled = {}, qint64 maximumBytes = 2LL * 1024 * 1024 * 1024);
+    static QThreadPool *readPool();
+    static QThreadPool *importPool();
+    std::shared_ptr<const Snapshot> snapshot() const;
+    QHash<QString, QList<EpgEntry>> programsForChannels(const QStringList &channels,
+        const QDateTime &from, const QDateTime &to, int limit = -1, bool summaries = false) const;
     static Snapshot buildSnapshot(const QList<EpgEntry> &entries);
 
     void loadFromBytes(const QByteArray &payload);

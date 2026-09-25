@@ -379,6 +379,7 @@ QJsonObject toJson(const AppSettings &settings)
         dvrSchedules.push_back(dvrScheduleEntryToJson(entry));
     }
     object.insert(QStringLiteral("dvrSchedules"), dvrSchedules);
+    object.insert(QStringLiteral("skippedUpdateVersions"), QJsonArray::fromStringList(settings.skippedUpdateVersions));
     object.insert(QStringLiteral("lastCatchupSession"), settings.lastCatchupSession);
     object.insert(QStringLiteral("channelTrackPreferences"), settings.channelTrackPreferences);
     object.insert(QStringLiteral("lastWatchedChannelId"), intMapToJson(settings.lastWatchedChannelId));
@@ -510,6 +511,10 @@ AppSettings appSettingsFromJson(const QJsonObject &object)
             continue;
         }
         settings.dvrSchedules.push_back(entry);
+    }
+    for (const auto &version : object.value(QStringLiteral("skippedUpdateVersions")).toArray()) {
+        if (version.isString() && !settings.skippedUpdateVersions.contains(version.toString()))
+            settings.skippedUpdateVersions.append(version.toString());
     }
     settings.lastCatchupSession = object.value(QStringLiteral("lastCatchupSession")).toObject();
     settings.channelTrackPreferences = object.value(QStringLiteral("channelTrackPreferences")).toObject();

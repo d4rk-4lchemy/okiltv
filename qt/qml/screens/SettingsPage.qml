@@ -447,10 +447,23 @@ Item {
                             }
                             return
                         }
-                        root.settings.save()
+                        if (!root.settings.save()) saveErrorDialog.open()
                     }
                 }
             }
+        }
+    }
+
+    Dialog {
+        id: saveErrorDialog
+        anchors.centerIn: parent
+        title: "Settings could not be saved"
+        modal: true
+        standardButtons: Dialog.Ok
+        width: Math.min(420, root.width - 32)
+        contentItem: Label {
+            text: root.settings.saveError || ""
+            wrapMode: Text.Wrap
         }
     }
 
@@ -2135,7 +2148,7 @@ Item {
 
                             Text {
                                 Layout.fillWidth: true
-                                text: "When exiting grid with Ctrl+O, keep retained tile streams running in the background. Use Ctrl+Alt+O for explicit full cleanup."
+                                text: "When promoting a tile with Ctrl+Enter, keep other streams running in the background. Use Ctrl+O to stop background streams or fully close the grid."
                                 color: Theme.textSecondary
                                 font.pixelSize: 12
                                 wrapMode: Text.Wrap

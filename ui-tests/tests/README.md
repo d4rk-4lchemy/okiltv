@@ -49,7 +49,31 @@ for the actual `pinned` state after the click, so a missed click cannot silently
 pass as hover selection. Picker rows are targeted by rendered labels. Timeout
 errors include selected/playing channel IDs and hovered/pinned rows; the full
 state is also retained in `failure.json`.
+Guide channel targeting excludes hidden Live delegates with identical labels and
+waits for enabled Guide content after chrome animation. PiP assertions inspect
+the actual layout and both tile channel IDs on open/assignment/swap, and require
+layout `off` on close; unchanged primary playback alone cannot satisfy them.
 
 ## Catch-up download regression
 
 `09-catchup-download.py` uses generated local media and XMLTV to check `Ctrl+D` from Guide and the right EPG pane, cancelling the Save File dialog, channel/date/time/title MKV filenames using explicit saved date/time settings, filename collisions, preservation of incomplete archives as `.partial.mkv` and cancellation cleanup. Requires ffmpeg/ffprobe and the existing Xvfb/Openbox/xdotool stack. Run through `scripts/ci/run_ui_test.sh` for an isolated Secret Service session.
+
+### Grid keyboard selection
+
+`10-multiview-keyboard.py` uses local media and separate Ctrl key-down/key-up events
+to verify candidate movement, release-to-commit, edge wrapping, empty tiles,
+cancellation and keyboard priority. Run it through `scripts/ci/run_ui_test.sh`.
+The bridge exposes read-only `multiview` mode, focused index, candidate index,
+selection activity, gesture availability and input context for these assertions.
+The window snapshot also reports activation so tests wait for focus restoration
+after minimizing, rather than sending input into an inactive window.
+PiP selection in the multiview soak script uses a mouse click; grid selection
+holds Ctrl across arrows and commits on release. Ctrl+Shift+O is removed.
+
+### Focused multiview controls
+
+`11-multiview-controls.py` verifies Space and transport buttons against the actual
+pause state of two independent local backends, focused-channel stepping, browse
+selection versus playback, EPG changes, empty tiles and focused Stop.
+The multiview snapshot includes focused playback state and per-tile channel,
+pause, position and video-surface/backend identity; provider URLs are not exposed.

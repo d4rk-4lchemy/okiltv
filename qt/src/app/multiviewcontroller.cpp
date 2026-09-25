@@ -9,6 +9,7 @@
 #include "../player/mpvplayer.h"
 
 #include <QVariantMap>
+#include <QScopedValueRollback>
 
 #include <algorithm>
 #include <cmath>
@@ -147,6 +148,7 @@ MultiViewController::MultiViewController(
     , m_channelListModel(channelListModel)
     , m_playerController(playerController)
     , m_originalController(playerController)
+    , m_focusedController(playerController)
 {
     m_playerController->setTrackPreferenceSettings(settings);
     m_decodePressureTimer.setInterval(kDecodePressurePollIntervalMs);
@@ -212,7 +214,11 @@ void MultiViewController::shutdownPlaybackSessions()
 
 void MultiViewController::connectPlaybackSession(PlayerController *controller)
 {
-    connect(controller, &PlayerController::volumeChanged, this, &MultiViewController::applyFocusedAudioOwnership);
+    connect(controller, &PlayerController::volumeChanged, this, [this, controller]() {
+        if (!m_syncingFocusedController && controller == focusedController() && controller != m_playerController)
+            m_playerController->copyVolumeStateFrom(*controller);
+        applyFocusedAudioOwnership();
+    });
     connect(controller, &PlayerController::mutedChanged, this, &MultiViewController::applyFocusedAudioOwnership);
     connect(controller, &PlayerController::playbackChannelActivated, this, [this]() { ++m_pipRevision; });
     connect(controller, &PlayerController::currentChannelChanged, this, [this, controller]() {
@@ -277,6 +283,10 @@ void MultiViewController::enablePipSessions()
         emit playbackSessionCreated(m_pipController.get());
     }
     auto &slot = m_secondarySlots.front();
+    if (slot.controls) {
+        slot.controls->stopRecording();
+        slot.controls->detachSharedPlayback();
+    }
     auto *controller = m_playerController == m_originalController ? m_pipController.get() : m_originalController;
     const auto channel = slot.channel;
     if (auto *existingPlayer = slot.playbackPlayer()) {
@@ -556,11 +566,8 @@ bool MultiViewController::toggleGrid()
         return false;
     }
 
-    if (isGridLayout(m_layoutMode)) {
-        return exitMultiViewWithIntent(
-            shouldRetainSelectionOnGridPromotion()
-                ? ExitIntent::SoftRetain
-                : ExitIntent::ForcedOff);
+    if (isGridLayout(m_layoutMode) || retainedSelectionActive()) {
+        return fullPromoteAndExit();
     }
 
     if (!m_playerController->currentChannelValue().has_value()) {
@@ -570,6 +577,23 @@ bool MultiViewController::toggleGrid()
 
     setLayoutModeInternal(gridLayoutModeForTileCount(configuredMaxTiles()));
     return true;
+}
+
+bool MultiViewController::promoteFocusedAndExit()
+{
+    if (!isGridLayout(m_layoutMode)) {
+        return false;
+    }
+    const auto focusedSlot = normalizedFocusedTileIndex();
+    const bool hasChannel = focusedSlot == 0
+        ? m_playerController->currentChannelValue().has_value()
+        : focusedSlot <= static_cast<int>(m_secondarySlots.size())
+            && m_secondarySlots.at(static_cast<std::size_t>(focusedSlot - 1)).channel.has_value();
+    if (!hasChannel) {
+        return false;
+    }
+    return exitMultiViewWithIntent(shouldRetainSelectionOnGridPromotion()
+            ? ExitIntent::SoftRetain : ExitIntent::FullPromotion);
 }
 
 bool MultiViewController::stopRetainedPromotedAndRestoreGrid()
@@ -1203,6 +1227,10 @@ bool MultiViewController::assignChannelToSecondarySlot(const int slotIndex, cons
         return false;
     }
 
+    if (slot.controls) {
+        slot.controls->stopRecording();
+        slot.controls->detachSharedPlayback();
+    }
     if (!slot.player) {
         slot.player = std::make_unique<MpvPlayer>();
         connectSecondaryPlayerSignals(slot.player.get(), slotIndex);
@@ -1250,6 +1278,10 @@ bool MultiViewController::promoteSecondarySlotToPrimary(const int slotIndex)
         return false;
     }
 
+    if (slot.controls) {
+        slot.controls->stopRecording();
+        slot.controls->detachSharedPlayback();
+    }
     if (slot.controller) {
         if (!swapPrimaryWithSecondarySlotNoReconnect(slotIndex)) {
             return false;
@@ -1295,6 +1327,10 @@ bool MultiViewController::swapPrimaryWithSecondarySlotNoReconnect(const int slot
         return false;
     }
 
+    if (slot.controls) {
+        slot.controls->stopRecording();
+        slot.controls->detachSharedPlayback();
+    }
     if (slot.controller) {
         ++m_pipRevision;
         auto *previous = m_playerController;
@@ -1526,6 +1562,10 @@ void MultiViewController::clearSecondarySlot(const int slotIndex)
     }
 
     auto &slot = m_secondarySlots[static_cast<std::size_t>(slotIndex - 1)];
+    if (slot.controls) {
+        slot.controls->stopRecording();
+        slot.controls->detachSharedPlayback();
+    }
     if (slot.controller) {
         ++m_pipRevision;
         auto *controller = slot.controller.data();
@@ -1881,8 +1921,73 @@ void MultiViewController::handleDecodePressureTick()
     emit degradePromptVisibleChanged();
 }
 
+PlayerController *MultiViewController::focusedController() const
+{
+    return m_focusedController ? m_focusedController.data() : m_playerController;
+}
+
+void MultiViewController::syncFocusedController()
+{
+    if (m_syncingFocusedController)
+        return;
+    QScopedValueRollback<bool> guard(m_syncingFocusedController, true);
+    auto *target = m_playerController;
+    const auto index = isActive() ? normalizedFocusedTileIndex() : 0;
+    if (index > 0 && index <= static_cast<int>(m_secondarySlots.size())) {
+        auto &slot = m_secondarySlots.at(static_cast<std::size_t>(index - 1));
+        if (slot.controller) {
+            target = slot.controller;
+        } else {
+            if (!slot.controls) {
+                slot.controls = std::make_unique<PlayerController>();
+                slot.controls->setTrackPreferenceSettings(m_settings);
+                const auto &settings = m_settings->current();
+                slot.controls->applySettings(settings.mpvDllPath, settings.mpvOptions,
+                    settings.playerWaitForStreamSeconds, settings.playerDeinterlaceEnabled,
+                    settings.playerBufferSeconds, settings.playerUserAgent, settings.remuxRecordingsToMkv,
+                    settings.playerImageSmoothingEnabled, settings.playerPicturePreset);
+                auto *controls = slot.controls.get();
+                emit playbackSessionCreated(controls);
+                connect(controls, &PlayerController::volumeChanged, this, [this, controls]() {
+                    if (!m_syncingFocusedController && focusedController() == controls) {
+                        m_playerController->copyVolumeStateFrom(*controls);
+                        applyFocusedAudioOwnership();
+                    }
+                });
+            }
+            target = slot.controls.get();
+            const auto channel = target->currentChannelValue();
+            auto *backend = slot.playbackPlayer();
+            if (slot.channel && backend) {
+                if (!target->isSharedPlaybackPlayer(backend) || !channel
+                    || channel->id != slot.channel->id || channel->profileId != slot.channel->profileId) {
+                    target->detachSharedPlayback();
+                    target->copyVolumeStateFrom(*m_playerController);
+                    // Detaching UI control must not mute or stop a retained/promoted stream.
+                    target->attachSharedPlayback(backend, *slot.channel, false);
+                }
+            } else {
+                target->detachSharedPlayback();
+            }
+        }
+    }
+    const auto changed = m_focusedController != target;
+    m_focusedController = target;
+    if (changed && target != m_playerController)
+        target->copyVolumeStateFrom(*m_playerController);
+    const auto channel = target->currentChannel();
+    const auto channelChanged = channel != m_focusedChannel;
+    m_focusedChannel = channel;
+    if (changed)
+        emit focusedControllerChanged();
+    if (changed || channelChanged)
+        emit focusedPlaybackChanged();
+    applyFocusedAudioOwnership();
+}
+
 void MultiViewController::emitTilesChanged()
 {
+    syncFocusedController();
     emit tilesChanged();
 }
 

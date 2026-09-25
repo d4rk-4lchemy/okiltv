@@ -58,14 +58,6 @@ private:
         QVariantList pastProgramsVariant;
     };
 
-    struct CachedResult
-    {
-        QVariantMap currentProgramVariant;
-        QVariantMap nextProgramVariant;
-        QVariantList upcomingProgramsVariant;
-        QVariantList pastProgramsVariant;
-    };
-
     void startRefreshJob(quint64 generation, const Core::Channel &channel, int lookAheadHours);
     void applyRefreshResult(quint64 generation, RefreshResult result);
 
@@ -81,7 +73,6 @@ private:
     QVariantList m_pastProgramsVariant;
     bool m_loading { false };
     bool m_skipNextLoadingState { false };
-    QHash<QString, CachedResult> m_resultCache;
     QFutureSynchronizer<void> m_backgroundTasks;
     quint64 m_refreshGeneration { 0 };
     bool m_refreshInFlight { false };

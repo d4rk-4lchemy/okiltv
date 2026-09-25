@@ -42,35 +42,35 @@ IconCacheService::IconCacheService(DatabaseService &database, std::shared_ptr<Ne
 {
 }
 
-QString IconCacheService::getOrDownload(Channel &channel) const
+QString IconCacheService::getOrDownload(Channel &channel, const std::function<bool()> &cancelled) const
 {
-    if (channel.iconUrl.trimmed().isEmpty()) {
-        return {};
-    }
-
-    if (!channel.cachedIconPath.isEmpty() && QFile::exists(channel.cachedIconPath)) {
-        return channel.cachedIconPath;
-    }
-
-    const auto hash = sha1Hex(channel.iconUrl);
-    auto fromCacheTable = m_database.cachedIconByHash(hash);
-    if (!fromCacheTable.isEmpty() && QFile::exists(fromCacheTable)) {
-        channel.cachedIconPath = fromCacheTable;
-        m_database.updateCachedIcon(channel.id, channel.profileId, fromCacheTable);
-        return fromCacheTable;
-    }
-
-    auto localPath =
-        QDir(AppDataPaths::iconCacheDirectory()).filePath(hash + normalizedExtension(channel.iconUrl));
-    if (QFile::exists(localPath)) {
-        channel.cachedIconPath = localPath;
-        m_database.upsertIconCache(hash, localPath, QDateTime::currentSecsSinceEpoch());
-        m_database.updateCachedIcon(channel.id, channel.profileId, localPath);
-        return localPath;
-    }
-
     try {
-        const auto payload = m_network->get(QUrl(channel.iconUrl));
+        if (cancelled && cancelled()) return {};
+        if (channel.iconUrl.trimmed().isEmpty()) {
+            return {};
+        }
+
+        if (!channel.cachedIconPath.isEmpty() && QFile::exists(channel.cachedIconPath)) {
+            return channel.cachedIconPath;
+        }
+
+        const auto hash = sha1Hex(channel.iconUrl);
+        auto fromCacheTable = m_database.cachedIconByHash(hash);
+        if (!fromCacheTable.isEmpty() && QFile::exists(fromCacheTable)) {
+            channel.cachedIconPath = fromCacheTable;
+            return fromCacheTable;
+        }
+
+        auto localPath =
+            QDir(AppDataPaths::iconCacheDirectory()).filePath(hash + normalizedExtension(channel.iconUrl));
+        if (QFile::exists(localPath)) {
+            m_database.upsertIconCache(hash, localPath, QDateTime::currentSecsSinceEpoch());
+            channel.cachedIconPath = localPath;
+            return localPath;
+        }
+
+        const auto payload = m_network->get(QUrl(channel.iconUrl), cancelled);
+        if (cancelled && cancelled()) return {};
         QSaveFile file(localPath);
         if (!file.open(QIODevice::WriteOnly)) {
             Core::DebugLogger::instance().log(QStringLiteral("icons"),
@@ -78,16 +78,14 @@ QString IconCacheService::getOrDownload(Channel &channel) const
             return {};
         }
 
-        file.write(payload);
-        if (!file.commit()) {
+        if (file.write(payload) != payload.size() || !file.commit()) {
             Core::DebugLogger::instance().log(QStringLiteral("icons"),
                 QStringLiteral("Failed to commit icon cache file: %1").arg(localPath));
             return {};
         }
 
-        channel.cachedIconPath = localPath;
         m_database.upsertIconCache(hash, localPath, QDateTime::currentSecsSinceEpoch());
-        m_database.updateCachedIcon(channel.id, channel.profileId, localPath);
+        channel.cachedIconPath = localPath;
         return localPath;
     } catch (const std::exception &e) {
         Core::DebugLogger::instance().log(QStringLiteral("icons"),

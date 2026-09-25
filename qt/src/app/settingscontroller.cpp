@@ -727,6 +727,8 @@ bool SettingsController::dirty() const
 
 void SettingsController::reload()
 {
+    m_saveError.clear();
+    emit saveErrorChanged();
     const auto wasDirty = dirty();
     const auto previousTransparency = m_uiTransparency;
     const auto &settings = m_settings->current();
@@ -777,10 +779,11 @@ void SettingsController::reload()
     emitDirtyChangedIfNeeded(wasDirty);
 }
 
-void SettingsController::save()
+bool SettingsController::save()
 {
     const auto wasDirty = dirty();
     auto &settings = m_settings->current();
+    const auto previous = settings;
     settings.dateOrder = m_dateOrder;
     settings.timeFormat = m_timeFormat;
     settings.theme = normalizedThemeDraft();
@@ -820,6 +823,13 @@ void SettingsController::save()
     settings.dvrStartOffsetMinutes = m_dvrStartOffsetMinutes;
     settings.dvrEndOffsetMinutes = m_dvrEndOffsetMinutes;
     m_settings->save();
+    m_saveError = m_settings->lastSaveError();
+    if (!m_saveError.isEmpty()) {
+        settings = previous;
+        emit saveErrorChanged();
+        return false;
+    }
+    emit saveErrorChanged();
 
     m_dateOrder = settings.dateOrder;
     m_timeFormat = settings.timeFormat;
@@ -874,6 +884,7 @@ void SettingsController::save()
     emitDirtyChangedIfNeeded(wasDirty);
     m_dateTimeFormatter.apply(settings.dateOrder, settings.timeFormat);
     emit saved();
+    return true;
 }
 
 void SettingsController::cancel()

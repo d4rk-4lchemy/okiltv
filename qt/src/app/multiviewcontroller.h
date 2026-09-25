@@ -28,6 +28,7 @@ class PlayerController;
 class MultiViewController final : public QObject
 {
     Q_OBJECT
+    Q_PROPERTY(QObject *focusedController READ focusedControllerObject NOTIFY focusedControllerChanged)
     Q_PROPERTY(QObject *primaryController READ primaryControllerObject NOTIFY primaryControllerChanged)
     Q_PROPERTY(QObject *pipController READ pipControllerObject NOTIFY tilesChanged)
     Q_PROPERTY(QString layoutMode READ layoutMode NOTIFY layoutModeChanged)
@@ -60,6 +61,8 @@ public:
     bool degradePromptVisible() const;
     QString pendingDegradeLayout() const;
 
+    PlayerController *focusedController() const;
+    QObject *focusedControllerObject() const { return focusedController(); }
     PlayerController *primaryController() const { return m_playerController; }
     QObject *primaryControllerObject() const { return m_playerController; }
     QObject *pipControllerObject() const;
@@ -75,6 +78,7 @@ public:
     Q_INVOKABLE void setLayoutMode(const QString &mode);
     Q_INVOKABLE bool togglePictureInPicture(int channelId);
     Q_INVOKABLE bool toggleGrid();
+    Q_INVOKABLE bool promoteFocusedAndExit();
     Q_INVOKABLE bool stopRetainedPromotedAndRestoreGrid();
     Q_INVOKABLE bool swapPrimaryWithPictureInPicture();
     Q_INVOKABLE void assignChannelToFocusedTile(int channelId);
@@ -91,6 +95,8 @@ public slots:
     void applySettings();
 
 signals:
+    void focusedControllerChanged();
+    void focusedPlaybackChanged();
     void primaryControllerChanged();
     void playbackSessionCreated(PlayerController *controller);
     void primaryPlaybackChanged();
@@ -117,6 +123,8 @@ private:
         QPointer<PlayerController> controller;
         std::unique_ptr<Player::MpvPlayer> player;
         QPointer<Player::MpvPlayer> borrowedPlayer;
+        // UI control of a legacy grid backend; the slot still owns the stream.
+        std::unique_ptr<PlayerController> controls;
         std::optional<Core::Channel> channel;
         QString playerState { QStringLiteral("empty") };
         bool hasError { false };
@@ -179,12 +187,16 @@ private:
     void flushRetiredPlayers();
     void scheduleFocusedAudioOwnershipRefresh();
     void emitTilesChanged();
+    void syncFocusedController();
     void logLayoutChange(const QString &previousMode, const QString &nextMode) const;
 
     Core::SettingsManager *m_settings;
     ChannelListModel *m_channelListModel;
     PlayerController *m_playerController;
     PlayerController *m_originalController;
+    QPointer<PlayerController> m_focusedController;
+    QVariantMap m_focusedChannel;
+    bool m_syncingFocusedController { false };
     quint64 m_pipRevision { 0 };
     std::unique_ptr<PlayerController> m_pipController;
     QString m_layoutMode { QStringLiteral("off") };

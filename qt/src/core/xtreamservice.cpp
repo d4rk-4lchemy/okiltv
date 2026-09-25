@@ -198,6 +198,11 @@ QList<Channel> XtreamService::getLiveStreams(const std::optional<QString> &categ
 
 QByteArray XtreamService::getXmltvBytes() const
 {
+    return m_network->get(xmltvUrl());
+}
+
+QUrl XtreamService::xmltvUrl() const
+{
     const auto &profile = this->profile();
 
     QUrl url(QStringLiteral("%1/xmltv.php").arg(trimmedBaseUrl(profile.xtreamBaseUrl)));
@@ -205,7 +210,7 @@ QByteArray XtreamService::getXmltvBytes() const
     query.addQueryItem(QStringLiteral("username"), profile.xtreamUsername);
     query.addQueryItem(QStringLiteral("password"), profile.xtreamPassword);
     url.setQuery(query);
-    return m_network->get(url);
+    return url;
 }
 
 QString XtreamService::buildStreamUrl(const int streamId, const QString &ext) const

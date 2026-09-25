@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(OKILTVQt VERSION 0.5.3 LANGUAGES CXX)
+project(OKILTVQt VERSION 0.5.4 LANGUAGES CXX)
 
 # Keep runtime identification independent of packaging metadata.  Core code also
 # uses this in tests, where QCoreApplication may not have an application version.
@@ -66,6 +66,8 @@ qt_add_executable(OKILTVQt
     src/app/catchupdownloadtransfer.cpp
     src/app/catchupdownloadtransfer.h
     src/app/catchupdownloadcontroller.h
+    src/app/updatecheckcontroller.cpp
+    src/app/updatecheckcontroller.h
     src/app/appcontroller.cpp
     src/app/appcontroller.h
     src/app/channellistmodel.cpp
@@ -125,6 +127,8 @@ qt_add_executable(OKILTVQt
     src/core/debuglogger.h
     src/core/epgcache_service.cpp
     src/core/epgcache_service.h
+    src/core/epgstore.cpp
+    src/core/epgstore.h
     src/core/epgservice.cpp
     src/core/epgservice.h
     src/core/iconcache_service.cpp
@@ -271,6 +275,7 @@ endif ()
 
 set(OKILTV_QML_FILES
     qml/Main.qml
+    qml/components/UpdateAvailableDialog.qml
     qml/components/CatchupDownloads.qml
     qml/components/AppButton.qml
     qml/components/ChannelBadge.qml

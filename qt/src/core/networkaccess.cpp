@@ -76,8 +76,22 @@ BlockingNetworkAccess::BlockingNetworkAccess(const int timeoutMs)
 {
 }
 
+QByteArray NetworkAccess::get(const QUrl &url, const std::function<bool()> &cancelled) const
+{
+    if (cancelled && cancelled()) throw std::runtime_error("Request cancelled.");
+    auto bytes = get(url);
+    if (cancelled && cancelled()) throw std::runtime_error("Request cancelled.");
+    return bytes;
+}
+
 QByteArray BlockingNetworkAccess::get(const QUrl &url) const
 {
+    return get(url, {});
+}
+
+QByteArray BlockingNetworkAccess::get(const QUrl &url, const std::function<bool()> &cancelled) const
+{
+    if (cancelled && cancelled()) throw std::runtime_error("Request cancelled.");
     // A new QNetworkAccessManager is created per call. This method is invoked
     // from background threads (via QtConcurrent::run) and QNetworkAccessManager
     // is not safe to share across threads. The per-call cost is one TCP/TLS
@@ -106,6 +120,14 @@ QByteArray BlockingNetworkAccess::get(const QUrl &url) const
     });
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
 
+    QTimer cancellationTimer;
+    QObject::connect(&cancellationTimer, &QTimer::timeout, &loop, [&]() {
+        if (cancelled && cancelled()) {
+            reply->abort();
+            loop.quit();
+        }
+    });
+    if (cancelled) cancellationTimer.start(25);
     timer.start(m_timeoutMs);
     loop.exec();
     timer.stop();
@@ -155,6 +177,68 @@ QByteArray BlockingNetworkAccess::get(const QUrl &url) const
     }
 
     return payload;
+}
+
+void NetworkAccess::download(const QUrl &url, QIODevice *destination,
+    const std::function<bool()> &cancelled, const std::function<void(qint64)> &progress) const
+{
+    if (cancelled && cancelled()) throw std::runtime_error("EPG import cancelled.");
+    const auto bytes = get(url);
+    if (!destination || destination->write(bytes) != bytes.size()) throw std::runtime_error("Cannot write XMLTV download.");
+    if (progress) progress(bytes.size());
+}
+
+void BlockingNetworkAccess::download(const QUrl &url, QIODevice *destination,
+    const std::function<bool()> &cancelled, const std::function<void(qint64)> &progress) const
+{
+    if (!destination || !destination->isWritable()) throw std::runtime_error("XMLTV destination is not writable.");
+    if (cancelled && cancelled()) throw std::runtime_error("EPG import cancelled.");
+    QNetworkAccessManager manager;
+    QNetworkRequest request(url);
+    request.setRawHeader("Accept-Encoding", "identity");
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    auto observation = makeObservation(url);
+    observation.phase = QStringLiteral("request"); publishNetworkObservation(observation);
+    auto *reply = manager.get(request);
+    reply->setReadBufferSize(256LL * 1024);
+    QEventLoop loop;
+    QTimer timer;
+    QElapsedTimer total, idle;
+    total.start(); idle.start();
+    QString failure;
+    qint64 bytes = 0;
+    const auto drain = [&] {
+        char buffer[64 * 1024];
+        while (reply->isOpen() && reply->bytesAvailable() > 0 && failure.isEmpty()) {
+            const auto n = reply->read(buffer, sizeof(buffer));
+            if (n <= 0) break;
+            bytes += n;
+            if ((cancelled && cancelled()) || bytes > 2LL * 1024 * 1024 * 1024)
+                failure = QStringLiteral("XMLTV download cancelled or exceeds the 2 GiB limit.");
+            else if (destination->write(buffer, n) != n) failure = QStringLiteral("Cannot write XMLTV download (check free disk space).");
+            if (!failure.isEmpty()) { reply->abort(); break; }
+            idle.restart();
+            if (progress) progress(bytes);
+        }
+    };
+    QObject::connect(reply, &QNetworkReply::readyRead, &loop, drain);
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    QObject::connect(&timer, &QTimer::timeout, &loop, [&] {
+        if (cancelled && cancelled()) failure = QStringLiteral("EPG import cancelled.");
+        else if (idle.elapsed() >= 30000 || total.elapsed() >= 30LL * 60 * 1000) {
+            failure = QStringLiteral("XMLTV download timed out."); observation.timedOut = true;
+        }
+        if (!failure.isEmpty()) { reply->abort(); loop.quit(); }
+    });
+    timer.start(100);
+    loop.exec();
+    drain();
+    if (failure.isEmpty() && reply->error() != QNetworkReply::NoError) failure = redactSensitiveText(reply->errorString());
+    observation.statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if (failure.isEmpty() && observation.statusCode >= 400) failure = QStringLiteral("XMLTV HTTP %1").arg(observation.statusCode);
+    observation.phase = QStringLiteral("reply"); observation.durationMs = total.elapsed();
+    observation.payloadBytes = bytes; observation.errorText = failure; publishNetworkObservation(observation);
+    if (!failure.isEmpty()) throw std::runtime_error(failure.toStdString());
 }
 
 std::shared_ptr<NetworkAccess> makeDefaultNetworkAccess(const int timeoutMs)

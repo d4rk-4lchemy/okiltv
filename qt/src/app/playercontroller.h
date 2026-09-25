@@ -8,6 +8,7 @@
 #include "playback/catchupplaybacksession.h"
 
 #include <QObject>
+#include <QSet>
 #include <QElapsedTimer>
 #include <QList>
 #include <QPair>
@@ -185,7 +186,7 @@ public:
         bool remuxRecordingsToMkv = true,
         bool imageSmoothingEnabled = false,
         const QString &picturePreset = QStringLiteral("standard"));
-    void playChannel(const Core::Channel &channel);
+    void playChannel(const Core::Channel &channel, const QString &playbackUrl = {});
     void playCatchupChannel(const Core::Channel &channel, const QString &catchupUrl, const QString &programLabel);
     void playCatchupChannel(
         const Core::Channel &channel,
@@ -389,6 +390,7 @@ private:
     Playback::PlaybackBuffering m_buffering;
     Playback::PlaybackRecovery m_recovery;
     Playback::CatchupPlaybackSession m_catchupSession;
+    QSet<Player::MpvPlayer *> m_playbackSignalSources;
     Player::MpvPlayer m_player;
     Player::MpvPlayer m_catchupStandbyPlayer;
     QPointer<Player::MpvPlayer> m_sharedPlaybackPlayer;

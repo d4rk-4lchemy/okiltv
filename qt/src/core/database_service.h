@@ -31,6 +31,11 @@ public:
     QString databaseFilePath() const;
 
     void ensureSchema(const RebuildStarted &rebuildStarted = {}) const;
+    // A process-wide per-source publication gate also covers separate DB instances.
+    static quint64 beginChannelImport(const QUuid &profileId);
+    static bool channelImportCurrent(const QUuid &profileId, quint64 token);
+    bool publishChannels(const QUuid &profileId, quint64 token, QList<Channel> &channels, bool retainM3uIds) const;
+    void publishChannelIcon(const Channel &channel, quint64 token, const QString &path) const;
     void removeProfileData(const QUuid &profileId) const;
     void upsertChannels(const QList<Channel> &channels) const;
     void replaceChannelsForProfile(const QUuid &profileId, const QList<Channel> &channels,

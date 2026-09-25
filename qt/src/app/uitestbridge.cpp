@@ -5,6 +5,7 @@
 #include "guidestatemodel.h"
 #include "nownextmodel.h"
 #include "playercontroller.h"
+#include "multiviewcontroller.h"
 #include "settingscontroller.h"
 #include "shellcontroller.h"
 #include "timeshiftcontroller.h"
@@ -868,7 +869,44 @@ QJsonObject UiTestBridge::buildStateSnapshot() const
 {
     const auto regions = buildRegionsArray();
     const auto regionsByName = buildRegionMap();
+    const auto *livePage = findItemByObjectName(QStringLiteral("ui.live.page"));
+    auto *multi = livePage != nullptr
+        ? qobject_cast<MultiViewController *>(livePage->property("multiView").value<QObject *>()) : nullptr;
+    QJsonArray tileStates;
+    if (multi != nullptr) {
+        for (const auto &value : multi->tiles()) {
+            const auto tile = value.toMap();
+            const auto index = tile.value(QStringLiteral("tileIndex")).toInt();
+            auto *backend = qobject_cast<Player::MpvPlayer *>(tile.value(QStringLiteral("playerObject")).value<QObject *>());
+            const auto *surface = findItemByObjectName(QStringLiteral("multiviewTileVideo_%1").arg(index));
+            tileStates.push_back(QJsonObject {
+                { QStringLiteral("index"), index },
+                { QStringLiteral("channelId"), tile.value(QStringLiteral("channelId")).toInt() },
+                { QStringLiteral("paused"), backend && backend->pauseState().has_value()
+                    ? QJsonValue(*backend->pauseState()) : QJsonValue() },
+                { QStringLiteral("position"), backend ? backend->position() : 0.0 },
+                { QStringLiteral("renderMatchesBackend"), surface && surface->property("playerObject").value<QObject *>() == backend }
+            });
+        }
+    }
+    const auto *focused = multi != nullptr ? multi->focusedController() : nullptr;
+    const auto focusedChannel = focused != nullptr ? focused->currentChannelValue() : std::nullopt;
+    const QJsonObject multiview = livePage != nullptr ? QJsonObject {
+        { QStringLiteral("tiles"), tileStates },
+        { QStringLiteral("retained"), multi && multi->retainedSelectionActive() },
+        { QStringLiteral("channelId"), focusedChannel ? focusedChannel->id : -1 },
+        { QStringLiteral("isPlaying"), focused && focused->isPlaying() },
+        { QStringLiteral("mode"), livePage->property("multiviewMode").toString() },
+        { QStringLiteral("selecting"), livePage->property("multiviewSelectionMode").toBool() },
+        { QStringLiteral("candidate"), livePage->property("multiviewSelectionIndex").toInt() },
+        { QStringLiteral("focused"), livePage->property("multiviewFocusedIndex").toInt() },
+        { QStringLiteral("available"), livePage->property("multiviewSelectionAvailable").toBool() },
+        { QStringLiteral("searchFocused"), livePage->property("searchFieldActive").toBool() },
+        { QStringLiteral("pickerOpen"), livePage->property("leftPickerOpen").toBool() },
+        { QStringLiteral("chromeAnimating"), livePage->property("chromeAnimationsRunning").toBool() }
+    } : QJsonObject {};
     return {
+        { QStringLiteral("multiview"), multiview },
         { QStringLiteral("timestamp"), timestampUtc() },
         { QStringLiteral("window"), currentWindowState() },
         { QStringLiteral("regions"), regions },
@@ -1214,7 +1252,19 @@ QQuickItem *UiTestBridge::findItemByObjectName(const QString &objectName) const
     if (m_rootObject == nullptr || objectName.trimmed().isEmpty()) {
         return nullptr;
     }
-    return m_rootObject->findChild<QQuickItem *>(objectName, Qt::FindChildrenRecursively);
+    if (auto *item = m_rootObject->findChild<QQuickItem *>(objectName, Qt::FindChildrenRecursively))
+        return item;
+    // Repeater delegates can be parented only in the visual tree.
+    QList<QQuickItem *> pending;
+    if (m_window)
+        pending.append(m_window->contentItem());
+    while (!pending.isEmpty()) {
+        auto *item = pending.takeLast();
+        if (item->objectName() == objectName)
+            return item;
+        pending.append(item->childItems());
+    }
+    return nullptr;
 }
 
 QHash<QString, UiTestBridge::RegionRecord> UiTestBridge::buildRegionMap() const
@@ -1265,6 +1315,7 @@ QHash<QString, UiTestBridge::RegionRecord> UiTestBridge::buildRegionMap() const
 QJsonObject UiTestBridge::currentWindowState() const
 {
     return {
+        { QStringLiteral("active"), m_window != nullptr && m_window->isActive() },
         { QStringLiteral("width"), m_window != nullptr ? m_window->width() : 0.0 },
         { QStringLiteral("height"), m_window != nullptr ? m_window->height() : 0.0 },
         { QStringLiteral("x11WindowId"), m_window != nullptr ? static_cast<qint64>(m_window->winId()) : 0 },

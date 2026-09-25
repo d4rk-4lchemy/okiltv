@@ -24,6 +24,8 @@
 #include <QtConcurrent>
 #include <QDebug>
 #include <QFile>
+#include <QScopeGuard>
+#include <QTemporaryFile>
 #include <QGuiApplication>
 #include <QEventLoop>
 #include <QNetworkAccessManager>
@@ -35,6 +37,7 @@
 #include <QSet>
 #include <QSysInfo>
 #include <QTimer>
+#include <QTimeZone>
 
 #include <algorithm>
 #include <cmath>
@@ -301,9 +304,18 @@ CatchupValidation validateCatchupRequest(
 
 AppController::~AppController()
 {
+    m_stopping = true;
+    EpgCacheService::cancel(m_epgImportCancellation);
     flushCatchupProgress();
     flushTrackedWatchSeconds();
-    m_backgroundTasks.waitForFinished();
+    for (auto future : m_backgroundTasks.futures()) {
+        try { future.waitForFinished(); }
+        catch (...) {
+            Core::DebugLogger::instance().log(QStringLiteral("app"), QStringLiteral("Background task failed during shutdown."));
+        }
+    }
+    // Every worker is finished; prevent the synchronizer destructor rethrowing.
+    m_backgroundTasks.clearFutures();
 }
 
 AppController::AppController(
@@ -344,6 +356,9 @@ AppController::AppController(
     , m_iconCacheService(*database, m_network)
 {
     m_downloadController = new CatchupDownloadController(settings, this);
+    connect(m_timeshiftController, &TimeshiftController::stateChanged, this, &AppController::refreshTimeshiftProgram);
+    connect(this, &AppController::epgRefreshStateChanged, this, &AppController::refreshTimeshiftProgram);
+    connect(m_multiViewController, &MultiViewController::focusedPlaybackChanged, this, &AppController::refreshTimeshiftProgram);
     const auto updateDateTimeFormat = [this]() {
         const auto options = m_settingsController->dateTimeFormatter()->options();
         m_epgGridModel->setDateTimeFormat(options);
@@ -500,11 +515,11 @@ AppController::AppController(
         m_observedCatchupSession = {};
         m_dvrController->setPlayerController(m_playerController);
         m_timeshiftController->setPlayerController(m_playerController);
-        m_playbackNowNextModel->setChannel(m_playerController->currentChannelValue());
+        m_playbackNowNextModel->setChannel(m_multiViewController->focusedController()->currentChannelValue());
         beginWatchTrackingForCurrentChannel();
     });
-    connect(m_multiViewController, &MultiViewController::primaryPlaybackChanged, this, [this]() {
-        m_playbackNowNextModel->setChannel(m_playerController->currentChannelValue());
+    connect(m_multiViewController, &MultiViewController::focusedPlaybackChanged, this, [this]() {
+        m_playbackNowNextModel->setChannel(m_multiViewController->focusedController()->currentChannelValue());
     });
     m_catchupProgressFlushTimer.start(10000);
     connect(m_playbackNowNextModel, &NowNextModel::dataChanged, this, [this]() {
@@ -546,6 +561,11 @@ void AppController::connectPlaybackSession(PlayerController *controller)
         }
         setStatusText(message);
     });
+    const auto refreshTimeshift = [this, controller]() {
+        if (controller == m_playerController) refreshTimeshiftProgram();
+    };
+    connect(controller, &PlayerController::positionTextChanged, this, refreshTimeshift);
+    connect(controller, &PlayerController::currentChannelChanged, this, refreshTimeshift);
     connect(controller, &PlayerController::catchupPlaybackTimeChanged, this, [this, controller](const QDateTime &time) {
         const auto channel = controller->currentChannelValue();
         if (!channel.has_value()) {
@@ -553,7 +573,9 @@ void AppController::connectPlaybackSession(PlayerController *controller)
         }
         controller->updateCatchupProgramme(catchupProgramAt(channel.value(), time, controller->validatedCatchupProgramme()));
     });
+    connect(controller, &QObject::destroyed, this, [this, controller] { m_pendingCatchupSamples.remove(controller); });
     connect(controller, &PlayerController::playbackChannelActivated, this, [this, controller]() {
+        m_pendingCatchupSamples.remove(controller);
         if (controller != m_playerController) {
             return;
         }
@@ -711,6 +733,11 @@ void AppController::loadProfile(const QString &profileId)
         return;
     }
 
+    if (parsedId != m_epgLoadedProfileId) {
+        EpgCacheService::cancel(m_epgImportCancellation);
+        ++m_epgLoadGeneration;
+    }
+
     const auto currentChannel = m_playerController->currentChannelValue();
     const auto *pipSession = qobject_cast<PlayerController *>(m_multiViewController->pipControllerObject());
     const auto activeSourceId = m_settings->current().activeProfileId;
@@ -733,6 +760,7 @@ void AppController::loadProfile(const QString &profileId)
 
     const auto settingsSnapshot = m_settings->current();
     const auto generation = ++m_profileLoadGeneration;
+    const auto importToken = DatabaseService::beginChannelImport(profile->id);
 
     setBusy(true);
     setStatusText(QStringLiteral("Loading %1...").arg(profile->name));
@@ -740,7 +768,7 @@ void AppController::loadProfile(const QString &profileId)
         QStringLiteral("profile"),
         QStringLiteral("Loading profile %1 (%2).").arg(profile->name, guidToString(profile->id)));
 
-    m_backgroundTasks.addFuture(QtConcurrent::run([this, generation, profile = profile.value(), settingsSnapshot]() {
+    m_backgroundTasks.addFuture(QtConcurrent::run([this, generation, importToken, profile = profile.value(), settingsSnapshot]() {
         LoadProfileResult result;
         result.profile = profile;
 
@@ -777,13 +805,9 @@ void AppController::loadProfile(const QString &profileId)
                 result.categories = buildM3uCategories(result.channels);
             }
 
-            std::optional<qint64> nextM3uId;
-            if (profile.type != ProfileType::Xtream) {
-                auto nextId = m_database->nextM3uChannelId(profile.id);
-                M3UService::retainChannelIds(result.channels, m_database->loadChannels(profile.id), nextId);
-                nextM3uId = nextId;
-            }
-            m_database->replaceChannelsForProfile(profile.id, result.channels, nextM3uId);
+            if (!m_database->publishChannels(profile.id, importToken, result.channels,
+                    profile.type != ProfileType::Xtream))
+                throw std::runtime_error("Source import superseded.");
             result.watchSecondsByChannelId = m_database->loadWatchSecondsByProfile(profile.id);
             result.profile.lastRefreshed = QDateTime::currentDateTimeUtc();
             result.sourceRefreshSucceeded = true;
@@ -791,15 +815,19 @@ void AppController::loadProfile(const QString &profileId)
             result.statusText = QStringLiteral("%1 channels loaded").arg(result.channels.size());
         } catch (const std::exception &error) {
             result.profile = profile;
-            result.channels = m_database->loadChannels(profile.id);
-            if (!result.channels.isEmpty()) {
-                result.categories = buildM3uCategories(result.channels);
-                result.watchSecondsByChannelId = m_database->loadWatchSecondsByProfile(profile.id);
-                result.ok = true;
-                result.statusText =
-                    QStringLiteral("Using cached channels after refresh failure: %1").arg(QString::fromUtf8(error.what()));
-            } else {
-                result.errorText = QString::fromUtf8(error.what());
+            result.errorText = QString::fromUtf8(error.what());
+            try {
+                result.channels = m_database->loadChannels(profile.id);
+                if (!result.channels.isEmpty()) {
+                    result.categories = buildM3uCategories(result.channels);
+                    result.watchSecondsByChannelId = m_database->loadWatchSecondsByProfile(profile.id);
+                    result.ok = true;
+                    result.statusText = QStringLiteral("Using cached channels after refresh failure: %1")
+                        .arg(result.errorText);
+                }
+            } catch (const std::exception &cacheError) {
+                result.errorText += QStringLiteral("; cached channels unavailable: %1")
+                    .arg(QString::fromUtf8(cacheError.what()));
             }
         }
 
@@ -824,8 +852,12 @@ void AppController::loadProfile(const QString &profileId)
 
         QMetaObject::invokeMethod(
             this,
-            [this, generation, result]() {
-                if (generation != m_profileLoadGeneration) {
+            [this, generation, importToken, result]() {
+                if (generation != m_profileLoadGeneration) return;
+                if (!DatabaseService::channelImportCurrent(result.profile.id, importToken)) {
+                    setBusy(false);
+                    setStatusText(QStringLiteral("Source changed or was removed; channel import discarded."));
+                    emit profileLoadFinished(guidToString(result.profile.id), false);
                     return;
                 }
 
@@ -922,7 +954,7 @@ void AppController::loadProfile(const QString &profileId)
                     }
 
                     m_startupCatchupSession = {};
-                    prefetchIconsAsync(result.channels);
+                    prefetchIconsAsync(result.channels, importToken);
                     if (m_epgLoadedProfileId != result.profile.id) {
                         clearEpg(result.profile.id);
                     }
@@ -1054,7 +1086,11 @@ QString AppController::buildDebugSummary() const
     lines << QStringLiteral("Guide past hours: %1").arg(settings.guidePastHours);
     lines << QStringLiteral("EPG lookahead hours: %1").arg(settings.epgLookAheadHours);
     lines << QStringLiteral("EPG cache file: %1")
-                 .arg(profile.has_value() ? Core::AppDataPaths::epgCacheFile(profile->id) : QStringLiteral("<none>"));
+                 .arg(profile.has_value() ? Core::EpgCacheService::manifestFile(profile->id) : QStringLiteral("<none>"));
+    const auto epgSnapshot = m_epgService->snapshot();
+    lines << QStringLiteral("EPG programmes: %1; query cache bytes: %2 (budget 33554432)")
+        .arg(epgSnapshot->totalEntries).arg(epgSnapshot->store ? epgSnapshot->store->cachedBytes() : 0);
+    if (epgSnapshot->store) lines << QStringLiteral("EPG store: %1").arg(epgSnapshot->store->diagnostics());
     lines << QStringLiteral("EPG loaded profile id: %1")
                  .arg(m_epgLoadedProfileId.isNull() ? QStringLiteral("<none>") : guidToString(m_epgLoadedProfileId));
     lines << QStringLiteral("EPG fetched at UTC: %1").arg(formatDateTimeUtc(m_epgFetchedAt));
@@ -1215,6 +1251,8 @@ void AppController::applyEpgSnapshot(
         return;
     }
 
+    m_catchupEpgWindows.clear();
+    m_pendingCatchupSamples.clear();
     m_epgService->applySnapshot(snapshot);
     m_epgLoadedProfileId = profileId;
     m_epgFetchedAt = fetchedAt;
@@ -1224,7 +1262,7 @@ void AppController::applyEpgSnapshot(
     if (setRefreshError) {
         m_epgLastRefreshError = errorText;
     }
-    if (m_manualEpgRefreshPending) {
+    if (m_manualEpgRefreshPending && finishRefreshState) {
         if (errorText.isEmpty()) {
             setStatusText(QStringLiteral("EPG refreshed at %1.").arg(epgLastRefreshText()));
         } else {
@@ -1298,21 +1336,26 @@ void AppController::updateChannelProgrammeMetadata()
     const auto generation = ++m_programInfoGeneration;
     const auto channels = m_loadedChannels;
 
-    m_backgroundTasks.addFuture(QtConcurrent::run([this, generation, channels]() {
+    m_backgroundTasks.addFuture(QtConcurrent::run(EpgService::readPool(), [this, generation, channels, snapshot = m_epgService->snapshot()]() {
+        EpgService reader; reader.applySnapshot(snapshot);
+        QStringList ids;
+        for (const auto &channel : channels) ids.push_back(channel.tvgId);
+        const auto now = QDateTime::currentDateTimeUtc();
+        const auto programmes = reader.programsForChannels(ids, now, now.addMSecs(1), 1, true);
         QHash<int, QVariantMap> infoByChannelId;
         for (const auto &channel : channels) {
             if (channel.tvgId.trimmed().isEmpty()) {
                 continue;
             }
 
-            const auto currentProgram = m_epgService->currentProgram(channel.tvgId);
-            if (!currentProgram.has_value()) {
+            const auto entries = programmes.value(channel.tvgId.trimmed().toLower());
+            if (entries.isEmpty()) {
                 continue;
             }
 
             infoByChannelId.insert(
                 channel.id,
-                toVariantMap(currentProgram.value()));
+                toVariantMap(entries.first()));
         }
 
         QMetaObject::invokeMethod(
@@ -1425,33 +1468,40 @@ void AppController::beginWatchTrackingForCurrentChannel()
 
 void AppController::flushTrackedWatchSeconds()
 {
-    if (!m_watchTrackingActive
-        || m_watchTrackingChannelId < 0
-        || m_watchTrackingProfileId.isNull()
-        || !m_watchTrackingElapsed.isValid()) {
-        return;
-    }
-
-    const auto elapsedSeconds = std::max<qint64>(0, m_watchTrackingElapsed.elapsed() / 1000);
-    if (elapsedSeconds > 0) {
-        m_database->incrementWatchSeconds(
-            m_watchTrackingProfileId,
-            m_watchTrackingChannelId,
-            elapsedSeconds);
-        m_watchSecondsByChannelId[m_watchTrackingChannelId] =
-            m_watchSecondsByChannelId.value(m_watchTrackingChannelId, 0) + elapsedSeconds;
-        m_channelListModel->setWatchSeconds(m_watchSecondsByChannelId);
-        if (m_channelListModel->selectedCategoryId() == QString::fromUtf8(kFavouritesCategoryId)) {
-            rebuildGuideGridAsync();
+    if (m_watchTrackingActive && m_watchTrackingChannelId >= 0
+        && !m_watchTrackingProfileId.isNull() && m_watchTrackingElapsed.isValid()) {
+        const auto elapsedSeconds = std::max<qint64>(0, m_watchTrackingElapsed.elapsed() / 1000);
+        if (elapsedSeconds > 0) {
+            m_pendingWatchSeconds[m_watchTrackingProfileId][m_watchTrackingChannelId] += elapsedSeconds;
+        }
+        if (m_playerController->isPlaying()) {
+            m_watchTrackingElapsed.restart();
+        } else {
+            m_watchTrackingActive = false;
         }
     }
 
-    if (m_playerController->isPlaying()) {
-        m_watchTrackingElapsed.restart();
-        return;
+    for (auto profile = m_pendingWatchSeconds.begin(); profile != m_pendingWatchSeconds.end();) {
+        for (auto channel = profile->begin(); channel != profile->end();) {
+            try {
+                m_database->incrementWatchSeconds(profile.key(), channel.key(), channel.value());
+            } catch (const std::exception &error) {
+                Core::DebugLogger::instance().log(QStringLiteral("watch-stats"),
+                    QStringLiteral("Watch time save deferred: %1").arg(QString::fromUtf8(error.what())));
+                // Retain the original source/channel even across playback changes.
+                return;
+            }
+            if (guidToString(profile.key()) == m_channelListModel->activeProfileId()) {
+                m_watchSecondsByChannelId[channel.key()] += channel.value();
+                m_channelListModel->setWatchSeconds(m_watchSecondsByChannelId);
+                if (m_channelListModel->selectedCategoryId() == QString::fromUtf8(kFavouritesCategoryId)) {
+                    rebuildGuideGridAsync();
+                }
+            }
+            channel = profile->erase(channel);
+        }
+        profile = m_pendingWatchSeconds.erase(profile);
     }
-
-    m_watchTrackingActive = false;
 }
 
 void AppController::rebuildGuideGrid()
@@ -1535,16 +1585,104 @@ bool AppController::restoreStartupCatchup(const Core::Channel &channel)
     return true;
 }
 
+void AppController::setTimeshiftProgram(const QVariantMap &program)
+{
+    const auto start = program.value(QStringLiteral("start")).toDateTime();
+    const auto canRestart = start.isValid()
+        && m_timeshiftController->containsPlaybackTime(start.toMSecsSinceEpoch());
+    const auto title = program.value(QStringLiteral("title")).toString();
+    const auto titleChanged = m_timeshiftProgramTitle != title;
+    const auto programChanged = m_timeshiftProgram != program || m_timeshiftProgramCanRestartLocally != canRestart;
+    m_timeshiftProgram = program;
+    m_timeshiftProgramCanRestartLocally = canRestart;
+    m_timeshiftProgramTitle = title;
+    if (titleChanged) emit timeshiftProgramTitleChanged();
+    if (programChanged) emit timeshiftProgramChanged();
+}
+
+bool AppController::restartTimeshiftProgramme()
+{
+    refreshTimeshiftProgram();
+    const auto program = m_timeshiftProgram;
+    const auto channel = m_playerController->currentChannelValue();
+    if (program.isEmpty() || !channel) return false;
+    const auto start = program.value(QStringLiteral("start")).toDateTime();
+    if (start.isValid() && m_timeshiftController->seekToPlaybackTime(start.toMSecsSinceEpoch())) return true;
+    // Revalidate provider eligibility at activation, including expired archives.
+    playCatchup(toVariantMap(*channel), program);
+    return false;
+}
+
+void AppController::refreshTimeshiftProgram()
+{
+    const auto channel = m_playerController->currentChannelValue();
+    const auto epochMs = m_timeshiftController->currentPlaybackEpochMs();
+    if (!m_timeshiftController->isActive() || epochMs <= 0 || !channel
+        || channel->tvgId.trimmed().isEmpty() || channel->profileId != m_epgLoadedProfileId
+        || m_multiViewController->focusedController() != m_playerController) {
+        m_timeshiftEpgKey.clear();
+        m_timeshiftEpgWindow = {};
+        setTimeshiftProgram({});
+        return;
+    }
+
+    const auto key = guidToString(channel->profileId) + u':' + QString::number(channel->id)
+        + u':' + channel->tvgId.trimmed().toLower();
+    const auto time = QDateTime::fromMSecsSinceEpoch(epochMs, QTimeZone::UTC);
+    const auto snapshot = m_epgService->snapshot();
+    if (key == m_timeshiftEpgKey && snapshot == m_timeshiftEpgWindow.snapshot
+        && m_timeshiftEpgWindow.from <= time && time < m_timeshiftEpgWindow.to) {
+        for (const auto &entry : m_timeshiftEpgWindow.entries) {
+            if (entry.start <= time && time < entry.stop) {
+                setTimeshiftProgram(toVariantMap(entry));
+                return;
+            }
+        }
+        setTimeshiftProgram({});
+        return;
+    }
+
+    // Never retain a title from a different channel, snapshot or watched range.
+    setTimeshiftProgram({});
+    if (m_timeshiftEpgReadInFlight) return;
+    m_timeshiftEpgReadInFlight = true;
+    m_backgroundTasks.addFuture(QtConcurrent::run(EpgService::readPool(),
+        [this, key, tvgId = channel->tvgId, time, snapshot] {
+            CatchupEpgWindow window {snapshot, time.addSecs(-1800), time.addSecs(7200), {}};
+            try {
+                EpgService reader;
+                reader.applySnapshot(snapshot);
+                window.entries = reader.programsForChannels({tvgId}, window.from, window.to, -1, true)
+                    .value(tvgId.trimmed().toLower());
+            } catch (const std::exception &error) {
+                DebugLogger::instance().log(QStringLiteral("epg.read"), QString::fromUtf8(error.what()));
+            }
+            QMetaObject::invokeMethod(this, [this, key, window = std::move(window)] {
+                m_timeshiftEpgReadInFlight = false;
+                m_timeshiftEpgKey = key;
+                m_timeshiftEpgWindow = window;
+                // Re-sample identity, EPG generation and position: a seek or stop
+                // may have happened while this immutable window was being read.
+                refreshTimeshiftProgram();
+            }, Qt::QueuedConnection);
+        }));
+}
+
 std::optional<Core::EpgEntry> AppController::catchupProgramAt(const Core::Channel &channel, const QDateTime &time,
     const std::optional<Core::EpgEntry> &validatedProgram) const
 {
     if (m_epgLoadedProfileId == channel.profileId) {
-        const auto candidates = m_epgService->programsInRange(channel.tvgId, time, time.addMSecs(1));
-        for (const auto &program : candidates) {
-            if (program.start <= time && time < program.stop) {
-                return program;
-            }
-        }
+        QList<EpgEntry> candidates;
+        const auto snapshot = m_epgService->snapshot();
+        if (snapshot->store) {
+            const auto key = guidToString(channel.profileId) + u':' + channel.tvgId.trimmed().toLower();
+            const auto cached = m_catchupEpgWindows.constFind(key);
+            if (cached != m_catchupEpgWindows.cend() && cached->snapshot == snapshot
+                && cached->from <= time && time < cached->to) candidates = cached->entries;
+            else const_cast<AppController *>(this)->requestCatchupPrograms(channel, time);
+        } else candidates = m_epgService->programsInRange(channel.tvgId, time, time.addMSecs(1));
+        for (const auto &program : candidates)
+            if (program.start <= time && time < program.stop) return program;
     }
     if (validatedProgram && validatedProgram->start <= time && time < validatedProgram->stop) {
         return validatedProgram;
@@ -1557,6 +1695,38 @@ std::optional<Core::EpgEntry> AppController::catchupProgramAt(const Core::Channe
         return restored;
     }
     return std::nullopt;
+}
+
+void AppController::requestCatchupPrograms(const Core::Channel &channel, const QDateTime &time)
+{
+    const auto key = guidToString(channel.profileId) + u':' + channel.tvgId.trimmed().toLower();
+    if (m_catchupEpgPending.contains(key)) return;
+    m_catchupEpgPending.insert(key);
+    const auto snapshot = m_epgService->snapshot();
+    m_backgroundTasks.addFuture(QtConcurrent::run(EpgService::readPool(), [this, key, channel, time, snapshot] {
+        CatchupEpgWindow window {snapshot, time.addSecs(-1800), time.addSecs(7200), {}};
+        try { window.entries = snapshot->store->range(channel.tvgId, window.from, window.to); }
+        catch (const std::exception &error) { DebugLogger::instance().log(QStringLiteral("epg.read"), QString::fromUtf8(error.what())); }
+        QMetaObject::invokeMethod(this, [this, key, window = std::move(window)] {
+            m_catchupEpgPending.remove(key);
+            if (window.snapshot != m_epgService->snapshot()) return;
+            if (m_catchupEpgWindows.size() >= 8) m_catchupEpgWindows.clear();
+            m_catchupEpgWindows.insert(key, window);
+            const auto samples = std::exchange(m_pendingCatchupSamples, {});
+            for (const auto &pending : samples) {
+                const auto player = pending.first;
+                const auto &sample = pending.second;
+                if (!player || !player->inCatchupMode()) continue;
+                const auto current = player->currentChannelValue();
+                if (!current || current->profileId != sample.channel.profileId || current->id != sample.channel.id) continue;
+                const auto watched = QDateTime::fromMSecsSinceEpoch(player->catchupTimelineStartEpochMs(), QTimeZone::UTC)
+                    .addMSecs(qRound64(player->catchupTimelinePositionSeconds() * 1000));
+                if (qAbs(watched.msecsTo(sample.watchedTime)) > 2000) continue;
+                player->updateCatchupProgramme(catchupProgramAt(*current, watched, player->validatedCatchupProgramme()));
+                recordCatchupProgress(sample, player);
+            }
+        }, Qt::QueuedConnection);
+    }));
 }
 
 void AppController::recordCatchupProgress(const CatchupProgressSample &sample, PlayerController *source)
@@ -1577,6 +1747,8 @@ void AppController::recordCatchupProgress(const CatchupProgressSample &sample, P
         if (sample.endless) {
             const auto program = catchupProgramAt(sample.channel, sample.watchedTime, source->validatedCatchupProgramme());
             if (!program.has_value()) {
+                if (m_epgService->snapshot()->store && m_epgLoadedProfileId == sample.channel.profileId)
+                    m_pendingCatchupSamples.insert(source, {QPointer<PlayerController>(source), sample});
                 if (source == m_playerController) {
                     m_observedCatchupSession = {};
                 }
@@ -1743,8 +1915,71 @@ QVariantMap AppController::catchupDownloadActionState(const QVariantMap &channel
             {QStringLiteral("reason"), reason}};
 }
 
+void AppController::resolveEpgDetails(const QVariantMap &channel, const QVariantMap &program,
+    const std::function<void(QVariantMap, QString)> &completed)
+{
+    const auto snapshot = m_epgService->snapshot();
+    if (!program.value(QStringLiteral("detailsPending")).toBool() || !snapshot->store) {
+        QMetaObject::invokeMethod(this, [completed, program] { completed(program, {}); }, Qt::QueuedConnection);
+        return;
+    }
+    const auto profileId = parseGuid(channel.value(QStringLiteral("profileId")).toString());
+    const auto tvgId = channel.value(QStringLiteral("tvgId")).toString().trimmed().toLower();
+    const auto start = QDateTime::fromString(program.value(QStringLiteral("start")).toString(), Qt::ISODateWithMs);
+    m_backgroundTasks.addFuture(QtConcurrent::run(EpgService::readPool(), [this, snapshot, profileId, tvgId, start, program, completed] {
+        auto resolved = program;
+        QString error;
+        try {
+            bool found = false;
+            if (snapshot->store->metadata().profileId == profileId) {
+                for (const auto &entry : snapshot->store->range(tvgId, start, start.addMSecs(1))) {
+                    if (entry.start != start) continue;
+                    const auto stop = QDateTime::fromString(program.value(QStringLiteral("stop")).toString(), Qt::ISODateWithMs);
+                    if (entry.stop != stop) continue;
+                    resolved.insert(QStringLiteral("description"), entry.description);
+                    resolved.insert(QStringLiteral("subTitle"), entry.subTitle);
+                    resolved.insert(QStringLiteral("episodeNum"), entry.episodeNum);
+                    resolved.insert(QStringLiteral("detailsPending"), false);
+                    found = true; break;
+                }
+            }
+            if (!found) error = QStringLiteral("The selected programme is no longer available.");
+        } catch (const std::exception &) { error = QStringLiteral("Cannot read programme details."); }
+        QMetaObject::invokeMethod(this, [this, snapshot, completed, resolved, error]() mutable {
+            if (snapshot != m_epgService->snapshot()) error = QStringLiteral("The programme guide has changed. Select the programme again.");
+            completed(resolved, error);
+        }, Qt::QueuedConnection);
+    }));
+}
+
+quint64 AppController::requestEpgDetails(const QVariantMap &channel, const QVariantMap &program)
+{
+    const auto id = ++m_epgDetailsRequest;
+    resolveEpgDetails(channel, program, [this, id](const QVariantMap &resolved, const QString &error) {
+        emit epgDetailsReady(id, resolved, error);
+    });
+    return id;
+}
+
+bool AppController::toggleEpgRecording(const QVariantMap &channel, const QVariantMap &program)
+{
+    if (!program.value(QStringLiteral("detailsPending")).toBool()) return m_dvrController->toggleProgramSchedule(channel, program);
+    resolveEpgDetails(channel, program, [this, channel](const QVariantMap &resolved, const QString &error) {
+        if (!error.isEmpty()) setStatusText(error);
+        else m_dvrController->toggleProgramSchedule(channel, resolved);
+    });
+    return true;
+}
+
 QString AppController::enqueueCatchupDownload(const QVariantMap &channel, const QVariantMap &program, const QUrl &destination)
 {
+    if (program.value(QStringLiteral("detailsPending")).toBool()) {
+        resolveEpgDetails(channel, program, [this, channel, destination](const QVariantMap &resolved, const QString &error) {
+            const auto failure = error.isEmpty() ? enqueueCatchupDownload(channel, resolved, destination) : error;
+            if (!failure.isEmpty()) { setStatusText(failure); emit m_downloadController->notification(failure); }
+        });
+        return {};
+    }
     const auto state = catchupDownloadActionState(channel, program);
     if (!state.value(QStringLiteral("enabled")).toBool())
         return state.value(QStringLiteral("reason")).toString();
@@ -1773,7 +2008,14 @@ void AppController::playCatchupAtOffset(
     const QVariantMap &programVariant,
     const double targetSeconds)
 {
-    playCatchupAtOffsetInternal(channelVariant, programVariant, targetSeconds);
+    if (programVariant.value(QStringLiteral("detailsPending")).toBool()) {
+        const auto generation = ++m_catchupPlayGeneration;
+        resolveEpgDetails(channelVariant, programVariant, [this, channelVariant, targetSeconds, generation](const QVariantMap &resolved, const QString &error) {
+            if (generation != m_catchupPlayGeneration) return;
+            if (!error.isEmpty()) setStatusText(error);
+            else playCatchupAtOffsetInternal(channelVariant, resolved, targetSeconds);
+        });
+    } else playCatchupAtOffsetInternal(channelVariant, programVariant, targetSeconds);
 }
 
 void AppController::playCatchupAtOffsetInternal(
@@ -2002,22 +2244,38 @@ void AppController::activatePrimaryChannel(const Channel &channel)
     m_settings->save();
 }
 
-void AppController::prefetchIconsAsync(const QList<Channel> &channels)
+void AppController::prefetchIconsAsync(const QList<Channel> &channels, quint64 importToken)
 {
-    m_backgroundTasks.addFuture(QtConcurrent::run([this, channels]() mutable {
+    m_backgroundTasks.addFuture(QtConcurrent::run([this, channels, importToken, generation = m_profileLoadGeneration]() mutable {
         for (auto channel : channels) {
-            const auto path = m_iconCacheService.getOrDownload(channel);
+            const auto cancelled = [this, profileId = channel.profileId, importToken]() {
+                return m_stopping.load() || !DatabaseService::channelImportCurrent(profileId, importToken);
+            };
+            if (cancelled()) break;
+            const auto path = m_iconCacheService.getOrDownload(channel, cancelled);
             if (path.isEmpty()) {
                 continue;
             }
 
+            if (cancelled()) break;
+            try { m_database->publishChannelIcon(channel, importToken, path); }
+            catch (...) {
+                Core::DebugLogger::instance().log(QStringLiteral("icons"), QStringLiteral("Cannot publish cached icon."));
+                continue;
+            }
             QMetaObject::invokeMethod(
                 this,
-                [this, channelId = channel.id, path]() {
-                    m_channelListModel->setCachedIconPath(channelId, path);
+                [this, channel, path, importToken, generation]() {
+                    if (m_stopping || generation != m_profileLoadGeneration
+                        || !DatabaseService::channelImportCurrent(channel.profileId, importToken)) return;
+                    const auto modelChannel = m_channelListModel->channelById(channel.id);
+                    if (!modelChannel || modelChannel->profileId != channel.profileId
+                        || modelChannel->iconUrl != channel.iconUrl) return;
+                    m_channelListModel->setCachedIconPath(channel.id, path);
                     std::optional<Channel> refreshedChannel;
                     for (auto &loaded : m_loadedChannels) {
-                        if (loaded.id == channelId) {
+                        if (loaded.id == channel.id && loaded.profileId == channel.profileId
+                            && loaded.iconUrl == channel.iconUrl) {
                             loaded.cachedIconPath = path;
                             refreshedChannel = loaded;
                             break;
@@ -2039,19 +2297,39 @@ void AppController::prefetchIconsAsync(const QList<Channel> &channels)
 
 void AppController::loadEpgAsync(const ServerProfile &profile, const bool forceRefresh)
 {
+    EpgCacheService::cancel(m_epgImportCancellation);
+    const auto token = m_epgImportCancellation = EpgCacheService::beginImport(profile.id);
+    const auto existing = m_epgService->snapshot();
     const auto generation = ++m_epgLoadGeneration;
     const auto refreshIntervalMinutes = m_settings->current().refreshIntervalMinutes;
     const auto autoRefreshEnabled = m_settings->current().autoRefreshEpg;
-    setEpgCacheBootstrapPending(!forceRefresh && QFile::exists(AppDataPaths::epgCacheFile(profile.id)));
+    setEpgCacheBootstrapPending(!forceRefresh && (QFile::exists(EpgCacheService::manifestFile(profile.id))
+        || QFile::exists(AppDataPaths::epgCacheFile(profile.id))));
     if (!m_epgRefreshInProgress) {
         m_epgRefreshInProgress = true;
         emit epgRefreshStateChanged();
     }
 
-    m_backgroundTasks.addFuture(QtConcurrent::run([this, generation, profile, refreshIntervalMinutes, autoRefreshEnabled, forceRefresh]() {
+    m_backgroundTasks.addFuture(QtConcurrent::run(EpgService::importPool(), [this, generation, profile, refreshIntervalMinutes, autoRefreshEnabled, forceRefresh, token, existing]() {
+        const auto cancellationCompletion = qScopeGuard([this, generation, profile, token] {
+            if (!token->load()) return;
+            QMetaObject::invokeMethod(this, [this, generation, profile] {
+                if (generation != m_epgLoadGeneration) return;
+                const auto current = m_settings->activeProfile();
+                if (current && current->id == profile.id) loadEpgAsync(*current);
+                else { m_epgRefreshInProgress = false; setEpgCacheBootstrapPending(false); emit epgRefreshStateChanged(); }
+            }, Qt::QueuedConnection);
+        });
+        if (token->load()) return;
         const auto sourceFingerprint = EpgCacheService::sourceFingerprint(profile);
         const auto now = QDateTime::currentDateTimeUtc();
-        const auto cache = m_epgCacheService.load(profile.id);
+        EpgCacheService::LoadResult cache;
+        if (existing->store && existing->store->metadata().profileId == profile.id
+            && existing->store->metadata().fingerprint == sourceFingerprint) {
+            cache.status = EpgCacheService::LoadStatus::Loaded;
+            cache.data = {profile.id, sourceFingerprint, existing->store->metadata().fetchedAt, *existing};
+        } else cache = m_epgCacheService.load(profile.id, token);
+        if (token->load()) return;
 
         auto applySnapshot = [this, generation, profileId = profile.id](
                                  EpgService::Snapshot snapshot,
@@ -2118,48 +2396,36 @@ void AppController::loadEpgAsync(const ServerProfile &profile, const bool forceR
                 Qt::QueuedConnection);
         };
 
-        auto fetchFresh = [this, &profile, &sourceFingerprint]() -> EpgCacheService::CacheData {
-            QList<EpgEntry> entries;
+        auto fetchFresh = [this, &profile, &sourceFingerprint, token]() -> EpgCacheService::CacheData {
+            QStringList urls;
             if (profile.type == ProfileType::Xtream && profile.xmltvUrl.trimmed().isEmpty()) {
                 XtreamService xtream(m_network);
                 xtream.setProfile(profile);
-                entries = EpgService::parseEntries(xtream.getXmltvBytes());
-            } else {
-                const auto urls = profile.xmltvUrl.trimmed().isEmpty()
-                    ? profile.discoveredXmltvUrls : QStringList {profile.xmltvUrl.trimmed()};
-                QHash<QString, QSet<qint64>> seenStarts;
+                urls = {xtream.xmltvUrl().toString()};
+            } else urls = profile.xmltvUrl.trimmed().isEmpty()
+                ? profile.discoveredXmltvUrls : QStringList {profile.xmltvUrl.trimmed()};
+            const auto cancelled = [token] { return token->load(); };
+            QElapsedTimer elapsed; elapsed.start();
+            auto data = m_epgCacheService.build(profile.id, sourceFingerprint, [&](const EpgStore::Sink &sink) {
                 for (const auto &source : urls) {
+                    if (cancelled()) throw std::runtime_error("EPG import cancelled.");
                     const QUrl url(source);
-                    QByteArray payload;
                     if (url.isLocalFile()) {
                         QFile file(url.toLocalFile());
-                        if (!file.open(QIODevice::ReadOnly))
-                            throw std::runtime_error("Cannot read the local XMLTV file.");
-                        payload = file.readAll();
+                        if (!file.open(QIODevice::ReadOnly)) throw std::runtime_error("Cannot read the local XMLTV file.");
+                        EpgService::streamEntries(&file, sink, cancelled);
                     } else {
-                        payload = m_network->get(url);
-                    }
-                    const auto parsed = EpgService::parseEntries(payload);
-                    if (urls.size() == 1) {
-                        entries = parsed;
-                    } else {
-                        for (const auto &entry : parsed) {
-                            auto &starts = seenStarts[entry.channelId.trimmed().toLower()];
-                            const auto start = entry.start.toMSecsSinceEpoch();
-                            if (!starts.contains(start)) {
-                                starts.insert(start);
-                                entries.push_back(entry);
-                            }
-                        }
+                        QTemporaryFile file(QDir(AppDataPaths::epgCacheDirectory()).filePath(QStringLiteral("download-XXXXXX.source")));
+                        if (!file.open()) throw std::runtime_error("Cannot create XMLTV download file.");
+                        m_network->download(url, &file, cancelled);
+                        if (!file.flush() || !file.seek(0)) throw std::runtime_error("Cannot read XMLTV download.");
+                        EpgService::streamEntries(&file, sink, cancelled);
                     }
                 }
-            }
-
-            EpgCacheService::CacheData data;
-            data.profileId = profile.id;
-            data.sourceFingerprint = sourceFingerprint;
-            data.fetchedAt = QDateTime::currentDateTimeUtc();
-            data.snapshot = EpgService::buildSnapshot(entries);
+            }, urls.size() > 1, token);
+            Core::DebugLogger::instance().log(QStringLiteral("epg"),
+                QStringLiteral("Imported %1 programmes in %2 ms; database %3 bytes.")
+                    .arg(data.snapshot.totalEntries).arg(elapsed.elapsed()).arg(QFileInfo(data.snapshot.store->path()).size()));
             return data;
         };
 
@@ -2168,16 +2434,16 @@ void AppController::loadEpgAsync(const ServerProfile &profile, const bool forceR
         const auto cacheStale = cacheUsable
             && EpgCacheService::isStale(cache.data.fetchedAt, refreshIntervalMinutes, now);
 
-        if (!forceRefresh && cacheUsable) {
+        if (cacheUsable && (!forceRefresh || existing->store != cache.data.snapshot.store)) {
             applySnapshot(
                 cache.data.snapshot,
                 cache.data.fetchedAt,
                 QString {},
-                !cacheStale,
-                !cacheStale,
-                !cacheStale,
-                true);
-            if (!cacheStale) {
+                !cacheStale && !forceRefresh,
+                !cacheStale && !forceRefresh,
+                !cacheStale && !forceRefresh,
+                !forceRefresh);
+            if (!cacheStale && !forceRefresh) {
                 return;
             }
         }
@@ -2193,9 +2459,10 @@ void AppController::loadEpgAsync(const ServerProfile &profile, const bool forceR
 
         try {
             auto fresh = fetchFresh();
-            m_epgCacheService.save(fresh);
+            m_epgCacheService.save(fresh, token);
             applySnapshot(std::move(fresh.snapshot), fresh.fetchedAt, QString {}, true, true, true, false);
         } catch (const std::exception &error) {
+            if (token->load()) return;
             const auto errorText = QString::fromUtf8(error.what());
             if (!cacheUsable) {
                 clearLoadedEpg(errorText);

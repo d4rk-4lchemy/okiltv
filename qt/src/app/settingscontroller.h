@@ -55,6 +55,7 @@ class SettingsController final : public QObject
     Q_PROPERTY(bool dvrRemuxToMkv READ dvrRemuxToMkv WRITE setDvrRemuxToMkv NOTIFY settingsChanged)
     Q_PROPERTY(int dvrStartOffsetMinutes READ dvrStartOffsetMinutes WRITE setDvrStartOffsetMinutes NOTIFY settingsChanged)
     Q_PROPERTY(int dvrEndOffsetMinutes READ dvrEndOffsetMinutes WRITE setDvrEndOffsetMinutes NOTIFY settingsChanged)
+    Q_PROPERTY(QString saveError READ saveError NOTIFY saveErrorChanged)
     Q_PROPERTY(bool dirty READ dirty NOTIFY dirtyChanged)
 
 public:
@@ -182,7 +183,8 @@ public:
     bool dirty() const;
 
     Q_INVOKABLE void reload();
-    Q_INVOKABLE void save();
+    QString saveError() const { return m_saveError; }
+    Q_INVOKABLE bool save();
     Q_INVOKABLE void cancel();
     Q_INVOKABLE void useBundledMpv();
     Q_INVOKABLE void validateMpvPath();
@@ -193,8 +195,10 @@ signals:
     void validationChanged();
     void dirtyChanged();
     void saved();
+    void saveErrorChanged();
 
 private:
+    QString m_saveError;
     static QString normalizeOverridePath(const QString &rawPath);
     QString normalizedThemeDraft() const;
     int normalizedOverlayAutoHideSecondsDraft() const;

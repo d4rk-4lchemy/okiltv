@@ -6,11 +6,10 @@
 
 <p align="center">
   A desktop <strong>IPTV player</strong> built with Qt and libmpv.<br/>
-  <small><em>No VOD support is planned for this app.</em></small><br/><br/>
-  Current version: <strong>0.5.3</strong>
+  <small><em>No VOD support is planned (yet) for this app.</em></small><br/><br/>
+  Current version: <strong>0.5.4</strong>
 </p>
 
-Builds and GitHub Release setup: [release workflow guide](scripts/ci/README.md).
 
 ## Features
 
@@ -26,19 +25,19 @@ Builds and GitHub Release setup: [release workflow guide](scripts/ci/README.md).
 - **PiP + Multiview** - Keep multiple live sessions and switch/swap quickly.
 - **Keyboard-First Controls** - Full shortcut workflow for playback and navigation.
 
-## Screenshots
+## Screenshots (as of version 0.5.4)
 
-![Live TV main screen](docs/screenshots/01-live-tv-main.png)
+![Live TV main screen](docs/screenshots/01-live-tv-main.jpg)
 
-![Guide overlay](docs/screenshots/02-guide-overlay.png)
+![Guide overlay](docs/screenshots/02-guide-overlay.jpg)
 
-![Settings overlay](docs/screenshots/03-settings-overlay.png)
+![Settings overlay](docs/screenshots/03-settings-overlay.jpg)
 
-![Timeshift in action](docs/screenshots/04-timeshift-active.png)
+![Catch-up in action](docs/screenshots/04-catch-up-active.jpg)
 
-![Picture-in-Picture mode](docs/screenshots/05-pip-mode.png)
+![Picture-in-Picture mode](docs/screenshots/05-pip-mode.jpg)
 
-![Multiview grid](docs/screenshots/06-multiview-grid.png)
+![Multiview grid](docs/screenshots/06-multiview-grid.jpg)
 
 ## Installation
 
@@ -51,7 +50,7 @@ Expected Windows artifacts:
 
 _Windows SmartScreen may block the app on first run. Click **More info** → **Run anyway** to proceed._
 
-Default version comes from `qt/CMakeLists.txt` (currently `0.5.3`). Override by exporting `APP_VERSION` before packaging.
+Default version comes from `qt/CMakeLists.txt` (currently `0.5.4`). Override by exporting `APP_VERSION` before packaging.
 
 | Platform | Notes |
 |----------|-------|
@@ -158,26 +157,33 @@ Test binaries:
 | Key | Action |
 |-----|--------|
 | `Space` | Play/Pause |
-| `J` / `L` | Timeshift/Catch-up seek back/forward 10 seconds |
+| `J` / `L` | Seek back/forward 10 seconds when available (timeshift, catch-up or live back-buffer) |
 | `Home` | Jump to buffered live anchor/live edge |
 | `F` | Fullscreen (or favourite toggle in left-pane keyboard mode) |
 | `F1` / `F2` | Open audio/subtitle track picker |
 | `F3` | Toggle live debug bubble |
+| `F6` | Toggle always-on-top |
 | `M` | Mute/Unmute |
 | `,` / `.` | Volume down/up 5% |
-| `Up` / `Down` | Prev/Next channel |
-| `Backspace` | Return to previously played channel |
+| `Up` / `Down` | Prev/Next channel when overlays are hidden |
+| `Backspace` | Return to previously played channel when overlays are hidden |
 | `0-9` | Direct numeric tune (2s idle commit) |
-| `Ctrl+Up` | Open Guide |
+| `Ctrl+Up` | Select tile above in grid; otherwise open Guide |
+| `Left` / `Right` | Enter channel/programme pane keyboard navigation |
+| `Tab` / `Ctrl+F` | Focus live channel search |
 | `Ctrl+S` | Open source picker |
 | `Ctrl+G` | Open group picker |
 | `Ctrl+P` | Toggle PiP |
 | `Ctrl+Shift+P` | Swap primary and PiP |
-| `Ctrl+O` | Toggle multiview grid |
-| `Ctrl+Shift+O` | Toggle multiview tile-selection mode |
-| `Ctrl+Alt+O` | Fully exit multiview grid (if "Retain multiview" is enabled in Settings) |
+| `Ctrl+O` | Open multiview; close an active grid and its secondary streams, or stop retained background streams |
+| `Ctrl+Arrow` | Select grid tile while holding Ctrl; release Ctrl to confirm |
+| `Ctrl+Enter` | Promote selected multiview tile and close grid, respecting retention |
+| `Ctrl+D` | Download explicitly selected ended programme in Guide or the right EPG pane |
 | `Ctrl+R` | DVR schedule toggle (programme) or manual recording fallback |
 | `Esc` | Stepwise close search/guide/overlay/fullscreen states |
+
+Character shortcuts are disabled while editing search. Guide, Settings, pickers and dialogs
+use their own keyboard context. Plain Tab focuses search; Ctrl+Tab is unbound.
 
 ### Mouse Shortcuts
 
@@ -195,6 +201,7 @@ Test binaries:
 | Key | Action |
 |-----|--------|
 | `Up` / `Down` | Move channel highlight (wraparound) |
+| `Left` | Open group picker |
 | `Right` | Jump to right pane |
 | `Return` | Tune highlighted channel |
 
@@ -204,15 +211,39 @@ Test binaries:
 |-----|--------|
 | `Up` / `Down` | Move programme highlight (no wraparound) |
 | `Left` | Jump back to left pane |
+| `Return` | Resume catch-up for a completed programme, or tune the channel for NOW/future |
 
 ### Multiview Selection Mode
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+Shift+O` | Enter/exit selection mode |
-| Arrow keys | Move candidate border |
-| `Enter` | Commit selected tile as active focus |
-| `Esc` | Exit selection mode without changing active focus |
+| `Ctrl+Arrow` | Start grid selection on the first arrow; move orange candidate border with edge wrap |
+| Release `Ctrl` | Commit candidate as active tile and audio owner |
+| `Ctrl+Enter` | Promote the candidate (or active tile) to main view and close the grid; retain other streams only when enabled |
+| `Ctrl+O` | Fully close the grid or stop retained background streams; next press opens a new grid |
+| `Delete` | Close the active tile |
+| `Esc` | Cancel without changing active tile or audio |
+
+This gesture is grid-only; PiP tiles remain selectable with the mouse. Ctrl alone does nothing.
+Empty tiles remain selectable and held arrows repeat. Only Ctrl without Shift/Alt/Meta activates the gesture.
+Guide, Settings, search fields, pickers and dialogs retain their own keyboard handling.
+In ordinary Live panels the gesture takes priority over Ctrl+Up opening Guide and hides shell chrome.
+Selection keeps focus on `interactionFocusTarget`, shows a 3px orange candidate border and the
+“Ctrl + arrows  Release Ctrl to select / Ctrl+Enter to promote / Esc to cancel” hint.
+Ctrl+Enter commits and promotes the candidate without first releasing Ctrl. A plain Enter is ignored while selecting.
+Promotion of an empty tile does nothing. Ctrl+O cancels the candidate and keeps the previously committed stream.
+Window/focus loss, layout changes, opening a protected context, or another recognized shortcut
+cancel the candidate; cancellation never steals focus.
+Clicking a tile cancels the candidate before the normal mouse selection.
+Ctrl+Shift+O and Ctrl+Alt+O are unbound. Both main and numeric Enter support promotion.
+After promotion with retention, Ctrl+O stops only background streams; another press opens a fresh grid.
+
+Transport controls, Space, channel stepping, and playback EPG follow the committed focused tile. Browsing other channels does not change the transport target. Empty tiles have no playback EPG; Space is a no-op. Focus changes preserve each stream and its pause state.
+
+Focus-border contract:
+- PiP shows no blue/orange focus border on either tile.
+- Grid focused tile uses a 2px blue border when not selecting.
+- Grid selection uses a 3px orange border on the candidate tile.
 
 ### Guide Overlay Keyboard
 
@@ -220,7 +251,10 @@ Test binaries:
 |-----|--------|
 | Arrow keys | Navigate programme grid |
 | `Space` | Toggle selected programme details |
-| `Return` | Tune selected channel/Play Catch-up if available |
+| `Return` | Play catch-up for an eligible completed programme; otherwise tune selected channel |
+| `Ctrl+Enter` | Start selected eligible programme in catch-up from the beginning |
+| `Ctrl+D` | Download selected ended programme |
+| `Ctrl+R` | Toggle programme DVR schedule |
 | `Ctrl+Down` | Collapse Guide to video-only |
 | `Esc` | Close Guide + transient overlay state |
 

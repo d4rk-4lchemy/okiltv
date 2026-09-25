@@ -1,3 +1,4 @@
+#include "epgcache_service.h"
 #include "settingsmanager.h"
 
 #include "appdatapaths.h"
@@ -376,6 +377,7 @@ bool SettingsManager::replaceProfile(const QUuid &id, const ServerProfile &profi
         return false;
     }
 
+    const auto previous = profileById(id);
     auto normalized = profile;
     normalized.id = id;
     normalized.autoRefreshIntervalHours = normalizeAutoRefreshIntervalHours(normalized.autoRefreshIntervalHours);
@@ -384,6 +386,18 @@ bool SettingsManager::replaceProfile(const QUuid &id, const ServerProfile &profi
         return false;
     }
 
+    if (!previous || EpgCacheService::sourceFingerprint(*previous) != EpgCacheService::sourceFingerprint(normalized))
+        EpgCacheService::invalidateSource(id);
+    if (!previous || previous->type != normalized.type || previous->name != normalized.name
+        || previous->xmltvUrl != normalized.xmltvUrl
+        || previous->xtreamServerTimezone != normalized.xtreamServerTimezone
+        || previous->catchupSafetyMinutes != normalized.catchupSafetyMinutes
+        || previous->autoRefreshIntervalHours != normalized.autoRefreshIntervalHours
+        || previous->m3uUrl != normalized.m3uUrl || previous->m3uFilePath != normalized.m3uFilePath
+        || previous->xtreamBaseUrl != normalized.xtreamBaseUrl
+        || previous->xtreamUsername != normalized.xtreamUsername
+        || previous->xtreamPassword != normalized.xtreamPassword)
+        DatabaseService::beginChannelImport(id);
     m_profileDetailCache.insert(id, normalized);
     auto updatedSummary = toSummary(normalized);
     updatedSummary.groupCount = m_sourceSummaries.at(index).groupCount;
@@ -415,6 +429,7 @@ bool SettingsManager::removeProfile(const QUuid &id)
         return false;
     }
 
+    DatabaseService::beginChannelImport(id);
     const auto databasePath = QFileInfo(m_settingsFilePath).dir().filePath(QStringLiteral("iptv.db"));
     try {
         if (QFileInfo::exists(databasePath)) DatabaseService(databasePath).removeProfileData(id);
@@ -422,6 +437,7 @@ bool SettingsManager::removeProfile(const QUuid &id)
         m_lastSaveError = QString::fromUtf8(error.what());
         return false;
     }
+    EpgCacheService().remove(id);
     m_sourceSummaries.removeAt(index);
     m_current.dvrSchedules.removeIf([&id](const DvrScheduleEntry &entry) { return entry.profileId == guidToString(id); });
     m_current.channelTrackPreferences.remove(guidToString(id));

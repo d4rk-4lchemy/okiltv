@@ -1,4 +1,5 @@
 #include "epggridmodel.h"
+#include "../core/debuglogger.h"
 
 #include <QtConcurrent>
 #include <QTimer>
@@ -158,6 +159,7 @@ void EpgGridModel::setDateTimeFormat(const Core::DateTimeFormatOptions options)
 
 EpgGridModel::~EpgGridModel()
 {
+    m_tilesCancelled->store(true);
     ++m_rebuildGeneration;
     m_backgroundTasks.waitForFinished();
 }
@@ -305,6 +307,8 @@ int EpgGridModel::lookAheadHours() const
 
 void EpgGridModel::invalidateRebuild()
 {
+    cancelProgramRequest();
+    m_resolvedProgram.clear();
     ++m_rebuildGeneration;
     if (!m_rebuildPending) {
         m_rebuildPending = true;
@@ -317,6 +321,7 @@ void EpgGridModel::rebuild(
     const int guidePastHours,
     const int lookAheadHours)
 {
+    if (m_epg->snapshot()->store) { rebuildAsync(channels, guidePastHours, lookAheadHours); return; }
     invalidateRebuild();
     const auto normalizedGuidePastHours = normalizeGuideHours(guidePastHours);
     const auto normalizedLookAheadHours = normalizeGuideHours(lookAheadHours);
@@ -343,14 +348,18 @@ void EpgGridModel::rebuildAsync(
     const auto normalizedLookAheadHours = normalizeGuideHours(lookAheadHours);
     const auto windowStart = defaultWindowStart(normalizedGuidePastHours);
 
-    m_backgroundTasks.addFuture(QtConcurrent::run([this, generation, channelsCopy, normalizedGuidePastHours, normalizedLookAheadHours, windowStart]() {
+    m_backgroundTasks.addFuture(QtConcurrent::run(EpgService::readPool(), [this, generation, channelsCopy, normalizedGuidePastHours, normalizedLookAheadHours, windowStart, snapshot = m_epg->snapshot()]() {
         auto resolvedWindowEnd = std::make_shared<QDateTime>();
-        auto rows = std::make_shared<QList<Row>>(buildRows(
-            *channelsCopy,
-            normalizedGuidePastHours,
-            normalizedLookAheadHours,
-            windowStart,
-            resolvedWindowEnd.get()));
+        EpgService reader; reader.applySnapshot(snapshot);
+        const auto to = windowStart.addSecs(minutesToSeconds((normalizedGuidePastHours + normalizedLookAheadHours) * 60));
+        QStringList ids;
+        for (const auto &channel : *channelsCopy) ids.push_back(channel.tvgId);
+        const auto available = reader.programsForChannels(ids, windowStart, to, 1, true);
+        auto rows = std::make_shared<QList<Row>>();
+        for (const auto &channel : *channelsCopy)
+            if (!channel.tvgId.trimmed().isEmpty() && !available.value(channel.tvgId.trimmed().toLower()).isEmpty())
+                rows->push_back(Row {channel});
+        *resolvedWindowEnd = to;
         QMetaObject::invokeMethod(
             this,
             [this, generation, channelsCopy, rows, resolvedWindowEnd, normalizedGuidePastHours, normalizedLookAheadHours, windowStart]() {
@@ -597,10 +606,18 @@ void EpgGridModel::setVisibleRowRange(int firstRow, int lastRow)
     const auto keepTo = std::max(keepFrom, m_visibleRowEnd + kViewportRowPrefetch);
     for (auto it = m_programTilesCacheByRow.begin(); it != m_programTilesCacheByRow.end();) {
         if (it.key() < keepFrom || it.key() > keepTo) {
+            m_loadedProgramsByRow.remove(it.key());
             it = m_programTilesCacheByRow.erase(it);
         } else {
             ++it;
         }
+    }
+
+    for (auto it = m_loadedProgramsByRow.begin(); it != m_loadedProgramsByRow.end();) {
+        if (it.key() < keepFrom || it.key() > keepTo)
+            it = m_loadedProgramsByRow.erase(it);
+        else
+            ++it;
     }
 
     if (previousFirst < 0 || previousLast < previousFirst) {
@@ -659,6 +676,10 @@ void EpgGridModel::emitProgramsChangedForVisibleRows()
 void EpgGridModel::invalidateProgramTilesCache()
 {
     ++m_rowWarmupGeneration;
+    m_tilesCancelled->store(true);
+    m_tilesCancelled = std::make_shared<std::atomic_bool>(false);
+    m_pendingRows.clear();
+    m_loadedProgramsByRow.clear();
     m_programTilesCacheByRow.clear();
 }
 
@@ -900,7 +921,15 @@ QVariantList EpgGridModel::buildPrograms(const int rowIndex, const Row &row) con
 
     const auto from = m_windowStart.addSecs(minutesToSeconds(renderStart));
     const auto to = m_windowStart.addSecs(minutesToSeconds(renderEnd));
-    const auto programs = m_epg->programsInRange(row.channel.tvgId, from, to);
+    QList<EpgEntry> programs;
+    if (m_epg->snapshot()->store) {
+        const auto loaded = m_loadedProgramsByRow.constFind(rowIndex);
+        if (loaded == m_loadedProgramsByRow.cend()) {
+            const_cast<EpgGridModel *>(this)->loadRowPrograms(rowIndex, from, to);
+            return {};
+        }
+        programs = loaded.value();
+    } else programs = m_epg->programsInRange(row.channel.tvgId, from, to);
 
     QVariantList tiles;
     tiles.reserve(programs.size());
@@ -913,18 +942,109 @@ QVariantList EpgGridModel::buildPrograms(const int rowIndex, const Row &row) con
             ? std::optional<EpgEntry>(programs.at(index + 1))
             : std::nullopt;
         const auto isSelected = row.channel.id == m_selectedChannelId && matchesProgramStart(program, selectedStartIso);
-        tiles.push_back(buildProgramMap(
+        auto tile = buildProgramMap(
             row.channel,
             program,
             m_windowStart,
             fullWindowEnd,
             nextProgram,
             nowUtc,
-            isSelected, m_dateTimeFormat));
+            isSelected, m_dateTimeFormat);
+        tile.insert(QStringLiteral("detailsPending"), static_cast<bool>(m_epg->snapshot()->store));
+        tiles.push_back(tile);
     }
 
     m_programTilesCacheByRow.insert(rowIndex, tiles);
     return tiles;
+}
+
+void EpgGridModel::loadRowPrograms(int rowIndex, const QDateTime &from, const QDateTime &to)
+{
+    if (m_pendingRows.contains(rowIndex)) return;
+    m_pendingRows.insert(rowIndex);
+    const auto channel = m_rows.at(rowIndex).channel;
+    const auto token = m_tilesCancelled;
+    m_backgroundTasks.addFuture(QtConcurrent::run(EpgService::readPool(),
+        [this, rowIndex, channel, from, to, token, snapshot = m_epg->snapshot()] {
+            if (token->load()) return;
+            QList<EpgEntry> entries;
+            try { entries = snapshot->store->range(channel.tvgId, from, to, -1, true); }
+            catch (const std::exception &error) { DebugLogger::instance().log(QStringLiteral("epg.read"), QString::fromUtf8(error.what())); }
+            QMetaObject::invokeMethod(this, [this, rowIndex, token, entries = std::move(entries)] {
+                if (token->load()) return;
+                m_pendingRows.remove(rowIndex);
+                if (rowIndex < m_visibleRowStart - kViewportRowPrefetch || rowIndex > m_visibleRowEnd + kViewportRowPrefetch) return;
+                m_loadedProgramsByRow.insert(rowIndex, entries);
+                m_programTilesCacheByRow.remove(rowIndex);
+                emitProgramsChangedForRow(rowIndex);
+                emit selectedProgramChanged();
+            }, Qt::QueuedConnection);
+        }));
+}
+
+void EpgGridModel::cancelProgramRequest()
+{
+    ++m_navigationGeneration;
+    m_navigationPending = false;
+    m_navigationDelta = 0;
+}
+
+void EpgGridModel::requestProgram(int channelId, const QString &timestampIso, int delta, bool adjacent)
+{
+    const auto row = rowIndexForChannelId(channelId);
+    if (row < 0) return;
+    if (!m_epg->snapshot()->store) {
+        emit programResolved(channelId, adjacent ? adjacentProgram(channelId, timestampIso, delta)
+            : programForChannelAtTimestamp(channelId, timestampIso), adjacent);
+        return;
+    }
+    if (adjacent && m_navigationPending && m_navigationChannel == channelId && m_navigationStart == timestampIso)
+        m_navigationDelta += delta;
+    else m_navigationDelta = delta;
+    m_navigationPending = true; m_navigationChannel = channelId; m_navigationStart = timestampIso;
+    const auto generation = ++m_navigationGeneration;
+    const auto channel = m_rows.at(row).channel;
+    const auto from = m_windowStart, to = windowEnd();
+    const auto format = m_dateTimeFormat;
+    delta = m_navigationDelta;
+    m_backgroundTasks.addFuture(QtConcurrent::run(EpgService::readPool(),
+        [this, generation, channel, from, to, format, timestampIso, delta, adjacent, snapshot = m_epg->snapshot()] {
+            QVariantMap result;
+            try {
+                const auto programs = snapshot->store->range(channel.tvgId, from, to, -1, true);
+                if (!programs.isEmpty()) {
+                    qsizetype target = 0;
+                    if (adjacent) {
+                        bool found = false;
+                        for (qsizetype i = 0; i < programs.size(); ++i) if (matchesProgramStart(programs.at(i), timestampIso)) {
+                            target = std::clamp<qsizetype>(i + delta, 0, programs.size() - 1); found = true; break;
+                        }
+                        if (!found && delta < 0) target = programs.size() - 1;
+                    } else {
+                        const auto timestamp = fromIso(timestampIso);
+                        auto nearest = std::numeric_limits<qint64>::max();
+                        for (qsizetype i = 0; timestamp.isValid() && i < programs.size(); ++i) {
+                            const auto &p = programs.at(i);
+                            if (p.start <= timestamp && timestamp < p.stop) { target = i; break; }
+                            const auto distance = qAbs(p.start.msecsTo(timestamp));
+                            if (distance < nearest) { nearest = distance; target = i; }
+                        }
+                    }
+                    const auto next = target + 1 < programs.size() ? std::optional<EpgEntry>(programs.at(target + 1)) : std::nullopt;
+                    auto selected = programs.at(target);
+                    for (const auto &full : snapshot->store->range(channel.tvgId, selected.start, selected.start.addMSecs(1)))
+                        if (full.start == selected.start) { selected = full; break; }
+                    result = buildProgramMap(channel, selected, from, to, next, QDateTime::currentDateTimeUtc(), true, format);
+                }
+            } catch (const std::exception &error) { DebugLogger::instance().log(QStringLiteral("epg.read"), QString::fromUtf8(error.what())); }
+            QMetaObject::invokeMethod(this, [this, generation, channel, result, adjacent, snapshot] {
+                if (generation != m_navigationGeneration || snapshot != m_epg->snapshot()) return;
+                m_navigationPending = false; m_navigationDelta = 0;
+                m_resolvedProgram = result;
+                emit programResolved(channel.id, result, adjacent);
+                emit selectedProgramChanged();
+            }, Qt::QueuedConnection);
+        }));
 }
 
 QList<EpgEntry> EpgGridModel::channelProgramsInRange(const int channelId, const QDateTime &from, const QDateTime &to) const
@@ -939,6 +1059,7 @@ QList<EpgEntry> EpgGridModel::channelProgramsInRange(const int channelId, const 
         return {};
     }
 
+    if (m_epg->snapshot()->store) return {};
     return m_epg->programsInRange(channel.tvgId, from, to);
 }
 
@@ -949,6 +1070,13 @@ QList<EpgEntry> EpgGridModel::channelProgramsInWindow(const int channelId) const
 
 QVariantMap EpgGridModel::findSelectedProgram() const
 {
+    if (m_epg->snapshot()->store) {
+        if (m_resolvedProgram.value(QStringLiteral("channelIdInt")).toInt() == m_selectedChannelId
+            && m_resolvedProgram.value(QStringLiteral("start")).toString() == m_selectedProgramStart) return m_resolvedProgram;
+        for (const auto &tile : m_programTilesCacheByRow.value(rowIndexForChannelId(m_selectedChannelId)))
+            if (tile.toMap().value(QStringLiteral("start")).toString() == m_selectedProgramStart) return tile.toMap();
+        return {};
+    }
     const auto selectedStart = m_selectedProgramStart.trimmed();
     if (selectedStart.isEmpty()) {
         return {};

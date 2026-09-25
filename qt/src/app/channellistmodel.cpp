@@ -70,6 +70,8 @@ QVariant ChannelListModel::data(const QModelIndex &index, const int role) const
         return Core::formatProgramTimes(m_currentProgramInfoByChannelId.value(channel.id),
             Core::resolveDateTimeFormat(m_settings->current().dateOrder, m_settings->current().timeFormat))
             .value(QStringLiteral("timeRange")).toString();
+    case CurrentProgramProgressRole:
+        return m_currentProgramInfoByChannelId.value(channel.id).value(QStringLiteral("progressPercent")).toDouble();
     case CatchupSupportedRole:
         return channel.catchupSupported;
     default:
@@ -94,6 +96,7 @@ QHash<int, QByteArray> ChannelListModel::roleNames() const
         { IsDvrRecordingRole, "isDvrRecording" },
         { CurrentProgramTitleRole, "currentProgramTitle" },
         { CurrentProgramTimeRangeRole, "currentProgramTimeRange" },
+        { CurrentProgramProgressRole, "currentProgramProgress" },
         { CatchupSupportedRole, "catchupSupported" }
     };
 }
@@ -404,7 +407,7 @@ void ChannelListModel::setCurrentProgramInfo(const QHash<int, QVariantMap> &info
         emit dataChanged(
             index(row, 0),
             index(row, 0),
-            { CurrentProgramTitleRole, CurrentProgramTimeRangeRole });
+            { CurrentProgramTitleRole, CurrentProgramTimeRangeRole, CurrentProgramProgressRole });
     }
 }
 
