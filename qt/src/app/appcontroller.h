@@ -16,6 +16,7 @@
 #include <QTimer>
 
 #include <optional>
+#include <atomic>
 
 namespace OKILTV::App {
 
@@ -37,6 +38,9 @@ class AppController final : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(QStringList groupAutoEnableNoticeProfileIds READ groupAutoEnableNoticeProfileIds NOTIFY groupAutoEnableNoticesChanged)
+    Q_PROPERTY(QVariantMap timeshiftProgram READ timeshiftProgram NOTIFY timeshiftProgramChanged)
+    Q_PROPERTY(bool timeshiftProgramCanRestartLocally READ timeshiftProgramCanRestartLocally NOTIFY timeshiftProgramChanged)
+    Q_PROPERTY(QString timeshiftProgramTitle READ timeshiftProgramTitle NOTIFY timeshiftProgramTitleChanged)
     Q_PROPERTY(QString statusText READ statusText NOTIFY statusTextChanged)
     Q_PROPERTY(bool isBusy READ isBusy NOTIFY isBusyChanged)
     Q_PROPERTY(QString activeProfileId READ activeProfileId NOTIFY activeProfileIdChanged)
@@ -69,6 +73,10 @@ public:
     CatchupDownloadController *downloadController() const { return m_downloadController; }
     QStringList groupAutoEnableNoticeProfileIds() const;
     Q_INVOKABLE void dismissGroupAutoEnableNotice(const QString &profileId);
+    QVariantMap timeshiftProgram() const { return m_timeshiftProgram; }
+    bool timeshiftProgramCanRestartLocally() const { return m_timeshiftProgramCanRestartLocally; }
+    Q_INVOKABLE bool restartTimeshiftProgramme();
+    QString timeshiftProgramTitle() const { return m_timeshiftProgramTitle; }
     QString statusText() const;
     bool isBusy() const;
     QString activeProfileId() const;
@@ -96,6 +104,8 @@ public slots:
 
 signals:
     void groupAutoEnableNoticesChanged();
+    void timeshiftProgramChanged();
+    void timeshiftProgramTitleChanged();
     void statusTextChanged();
     void isBusyChanged();
     void activeProfileIdChanged();
@@ -109,6 +119,8 @@ private:
         const std::function<void(QVariantMap, QString)> &completed);
     quint64 m_epgDetailsRequest = 0;
     QString buildDebugSummary() const;
+    void refreshTimeshiftProgram();
+    void setTimeshiftProgram(const QVariantMap &program);
     void setStatusText(const QString &value);
     void setBusy(bool value);
     void setEpgCacheBootstrapPending(bool value);
@@ -146,7 +158,7 @@ private:
     void rebuildGuideGridAsync();
     void activatePrimaryChannel(const Core::Channel &channel);
     void activateChannel(int channelId);
-    void prefetchIconsAsync(const QList<Core::Channel> &channels);
+    void prefetchIconsAsync(const QList<Core::Channel> &channels, quint64 importToken);
     void loadEpgAsync(const Core::ServerProfile &profile, bool forceRefresh = false);
 
     static QList<Core::ChannelCategory> buildM3uCategories(const QList<Core::Channel> &channels);
@@ -190,6 +202,7 @@ private:
     QTimer m_selectedNowNextRefreshTimer;
     QTimer m_selectedGuideRefreshTimer;
     bool m_guideRebuildAsyncRequested { false };
+    std::atomic_bool m_stopping { false };
     QFutureSynchronizer<void> m_backgroundTasks;
     quint64 m_profileLoadGeneration { 0 };
     quint64 m_epgLoadGeneration { 0 };
@@ -199,6 +212,12 @@ private:
         QDateTime from, to;
         QList<Core::EpgEntry> entries;
     };
+    QVariantMap m_timeshiftProgram;
+    bool m_timeshiftProgramCanRestartLocally { false };
+    QString m_timeshiftProgramTitle;
+    QString m_timeshiftEpgKey;
+    CatchupEpgWindow m_timeshiftEpgWindow;
+    bool m_timeshiftEpgReadInFlight { false };
     QHash<QString, CatchupEpgWindow> m_catchupEpgWindows;
     QSet<QString> m_catchupEpgPending;
     QHash<PlayerController *, QPair<QPointer<PlayerController>, CatchupProgressSample>> m_pendingCatchupSamples;

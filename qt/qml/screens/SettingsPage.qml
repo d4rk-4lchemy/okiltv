@@ -447,10 +447,23 @@ Item {
                             }
                             return
                         }
-                        root.settings.save()
+                        if (!root.settings.save()) saveErrorDialog.open()
                     }
                 }
             }
+        }
+    }
+
+    Dialog {
+        id: saveErrorDialog
+        anchors.centerIn: parent
+        title: "Settings could not be saved"
+        modal: true
+        standardButtons: Dialog.Ok
+        width: Math.min(420, root.width - 32)
+        contentItem: Label {
+            text: root.settings.saveError || ""
+            wrapMode: Text.Wrap
         }
     }
 

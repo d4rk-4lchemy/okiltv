@@ -1,6 +1,9 @@
 #include "database_service.h"
 
 #include "appdatapaths.h"
+#include "m3uservice.h"
+#include <QMutex>
+#include <memory>
 #include "secretprotection.h"
 #include "debuglogger.h"
 
@@ -22,6 +25,21 @@
 namespace OKILTV::Core {
 
 namespace {
+
+struct ChannelPublication {
+    QMutex mutex;
+    quint64 token { 0 };
+};
+
+std::shared_ptr<ChannelPublication> publicationFor(const QUuid &id)
+{
+    static QMutex mutex;
+    static QHash<QUuid, std::shared_ptr<ChannelPublication>> publications;
+    QMutexLocker lock(&mutex);
+    auto &publication = publications[id];
+    if (!publication) publication = std::make_shared<ChannelPublication>();
+    return publication;
+}
 
 class ScopedConnection
 {
@@ -385,8 +403,60 @@ void DatabaseService::ensureSchema(const RebuildStarted &rebuildStarted) const
     logStage(QStringLiteral("Database ready"));
 }
 
+quint64 DatabaseService::beginChannelImport(const QUuid &profileId)
+{
+    const auto state = publicationFor(profileId);
+    QMutexLocker lock(&state->mutex);
+    return ++state->token;
+}
+
+bool DatabaseService::channelImportCurrent(const QUuid &profileId, quint64 token)
+{
+    const auto state = publicationFor(profileId);
+    QMutexLocker lock(&state->mutex);
+    return state->token == token;
+}
+
+bool DatabaseService::publishChannels(const QUuid &profileId, quint64 token,
+    QList<Channel> &channels, bool retainM3uIds) const
+{
+    const auto state = publicationFor(profileId);
+    QMutexLocker lock(&state->mutex);
+    if (state->token != token) return false;
+    std::optional<qint64> nextId;
+    if (retainM3uIds) {
+        nextId = nextM3uChannelId(profileId);
+        M3UService::retainChannelIds(channels, loadChannels(profileId), *nextId);
+    }
+    replaceChannelsForProfile(profileId, channels, nextId);
+    return true;
+}
+
+void DatabaseService::publishChannelIcon(const Channel &channel, quint64 token, const QString &path) const
+{
+    const auto state = publicationFor(channel.profileId);
+    QMutexLocker lock(&state->mutex);
+    if (state->token != token) return;
+    ScopedConnection connection(m_databaseFilePath);
+    QSqlQuery query(connection.database());
+    query.prepare(QStringLiteral("SELECT icon_url FROM channels WHERE profile_id=? AND id=?"));
+    query.addBindValue(guidToString(channel.profileId));
+    query.addBindValue(channel.id);
+    execOrThrow(query, QStringLiteral("Read channel icon identity"));
+    if (!query.next() || unprotectSecret(query.value(0).toString()) != channel.iconUrl) return;
+    query.finish();
+    query.prepare(QStringLiteral("UPDATE channels SET cached_icon=? WHERE profile_id=? AND id=?"));
+    query.addBindValue(path);
+    query.addBindValue(guidToString(channel.profileId));
+    query.addBindValue(channel.id);
+    execOrThrow(query, QStringLiteral("Publish channel icon"));
+}
+
 void DatabaseService::removeProfileData(const QUuid &profileId) const
 {
+    const auto state = publicationFor(profileId);
+    QMutexLocker lock(&state->mutex);
+    ++state->token;
     ScopedConnection connection(m_databaseFilePath);
     auto &database = connection.database();
     QSqlQuery secure(database);

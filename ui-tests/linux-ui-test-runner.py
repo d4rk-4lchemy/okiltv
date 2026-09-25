@@ -22,6 +22,7 @@ import string
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 import urllib.parse
 from typing import Any
@@ -196,7 +197,9 @@ class SsePump(threading.Thread):
 class Runner:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        self.run_dir = pathlib.Path(args.run_dir) if args.run_dir else pathlib.Path(f"/tmp/okiltv-ui-{args.test_name}-{utc_stamp()}")
+        parent_dir = pathlib.Path(args.run_dir) if args.run_dir else pathlib.Path(tempfile.gettempdir())
+        parent_dir.mkdir(parents=True, exist_ok=True)
+        self.run_dir = pathlib.Path(tempfile.mkdtemp(prefix=f"okiltv-ui-{args.test_name}-{utc_stamp()}-", dir=parent_dir))
         self.appdata_dir = self.run_dir / "appdata"
         self.settings_dirs = [
             self.appdata_dir / "OKILTV",
@@ -241,6 +244,7 @@ class Runner:
             settings_dir.mkdir(parents=True, exist_ok=True)
         self.screenshots_dir.mkdir(parents=True, exist_ok=True)
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.log(f"Run directory: {self.run_dir}")
 
     def seed_settings(self) -> None:
         raise NotImplementedError("Use a local fixture scenario from ui-tests/tests/*.py")
@@ -1780,7 +1784,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--guide-probe", action="store_true", help="Open guide, wait, and capture evidence for Guide rendering.")
     parser.add_argument("--guide-capture-delay-sec", type=float, default=2.0, help="Delay after opening guide before requesting guide capture.")
     parser.add_argument("--guide-settings-sequence", action="store_true", help="Inject guide/settings navigation keys and save overlay snapshots.")
-    parser.add_argument("--run-dir", default="", help="Optional explicit run dir. Defaults to /tmp/okiltv-ui-<name>-<utc>.")
+    parser.add_argument("--run-dir", default="", help="Parent directory for unique per-run data and artifacts. Defaults to the system temporary directory.")
     parser.add_argument("--app-bin", type=pathlib.Path, default=DEFAULT_APP, help="Path to OKILTV binary.")
     parser.add_argument("--qt-debug-logs", action="store_true", help="Enable verbose Qt debug logging (very large artifacts).")
     return parser.parse_args()

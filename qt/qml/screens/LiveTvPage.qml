@@ -47,7 +47,7 @@ Item {
         && !root.player.channelSwitchInProgress && !root.player.channelLoadFailed
     property bool showPlaybackSpinner: (root.player.isLoading
             || root.player.isBuffering
-            || root.player.timeshiftPreparing)
+            || (root.player.timeshiftPreparing && !root.player.isPlaying))
         && root.hasPlaybackChannel
     property bool showChannelSwitchBlackout: root.primaryPlayer.channelSwitchInProgress
         && root.primaryPlayer.currentChannel.id !== undefined
@@ -445,9 +445,13 @@ Item {
         const channel = root.player.currentChannel || ({})
         return Boolean(channel.catchupSupported) && Number(channel.catchupWindowHours || 0) > 0
     }
+    readonly property bool timeshiftProgrammeRestartAvailable: root.transportTimelineUsingTimeshift
+        && root.app.timeshiftProgramCanRestartLocally
     readonly property bool liveCatchupButtonVisible: root.catchupPlayback
+        || root.timeshiftProgrammeRestartAvailable
         || (root.liveCatchupChannelCapable && root.liveCatchupState.visible)
-    readonly property bool liveCatchupButtonEnabled: root.catchupPlayback || root.liveCatchupEligible
+    readonly property bool liveCatchupButtonEnabled: root.catchupPlayback
+        || root.timeshiftProgrammeRestartAvailable || root.liveCatchupEligible
     property real leftPanelWidth: root.shell.layoutBand === "compact" ? 308 : 340
     property real rightPanelWidth: root.leftPanelWidth
     property real bottomPanelWidth: Math.max(
@@ -482,7 +486,8 @@ Item {
     function refreshLiveCatchupState() {
         root.liveCatchupState = root.app.catchupActionState(
             root.player.currentChannel || ({}),
-            root.playbackNowNext.currentProgram || ({}))
+            (root.transportTimelineUsingTimeshift ? root.app.timeshiftProgram
+                                                 : root.playbackNowNext.currentProgram) || ({}))
     }
 
     function multiviewTileData(tileIndex) {
@@ -3329,6 +3334,10 @@ Item {
     Connections {
         target: root.app
 
+        function onTimeshiftProgramChanged() {
+            root.refreshLiveCatchupState()
+        }
+
         function onActiveProfileIdChanged() {
             root.liveGroups.profileId = root.app.activeProfileId
             if (root.sourcePickerOpen) {
@@ -3401,6 +3410,7 @@ Item {
         }
 
         function onTimeshiftStateChanged() {
+            root.refreshLiveCatchupState()
             if (!root.transportTimelineUsingLiveProgram
                     && (!root.transportTimelineActive || root.timeshiftUiAtLiveEdge)) {
                 root.markTimeshiftBadgeLive()
@@ -6022,35 +6032,6 @@ Item {
                         Layout.fillWidth: true
                         spacing: 8
 
-                        Rectangle {
-                            Layout.alignment: Qt.AlignVCenter
-                            visible: root.transportTimelineUsingTimeshift
-                            Layout.preferredWidth: visible ? implicitWidth : 0
-                            radius: 11
-                            color: root.timeshiftBadgeShowBehindLive ? "#4f5a64" : "#c62828"
-                            implicitWidth: 72
-                            implicitHeight: 22
-
-                            Text {
-                                id: statusText
-                                anchors.centerIn: parent
-                                anchors.horizontalCenterOffset: -1
-                                anchors.verticalCenterOffset: -1
-                                text: "LIVE"
-                                color: "#ffffff"
-                                font.pixelSize: 12
-                                font.bold: true
-                                renderType: Text.NativeRendering
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                enabled: root.timeshiftBadgeShowBehindLive
-                                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                onClicked: root.jumpToLiveEdgeWithBadge()
-                            }
-                        }
-
                         Text {
                             Layout.alignment: Qt.AlignVCenter
                             text: root.formatTimeshiftClock(root.transportTimelineUsingCatchup
@@ -6066,11 +6047,12 @@ Item {
                         Text {
                             Layout.alignment: Qt.AlignVCenter
                             Layout.fillWidth: true
-                            visible: root.transportTimelineUsingCatchup || root.transportTimelineUsingLiveProgram
-                                || root.transportTimelineUsingLiveProgress
+                            visible: root.transportTimelineActive
                             text: root.transportTimelineUsingCatchup
                                 ? (root.player.catchupProgramLabel || "")
-                                : String((root.playbackNowNext.currentProgram || {}).title || "")
+                                : (root.transportTimelineUsingTimeshift
+                                    ? root.app.timeshiftProgramTitle
+                                    : String((root.playbackNowNext.currentProgram || {}).title || ""))
                             color: Theme.textPrimary
                             font.pixelSize: 11
                             elide: Text.ElideRight
@@ -6078,14 +6060,10 @@ Item {
                             renderType: Text.NativeRendering
                         }
 
-                        Item {
-                            Layout.fillWidth: root.transportTimelineUsingTimeshift
-                            Layout.preferredWidth: root.transportTimelineUsingTimeshift ? -1 : 0
-                        }
-
                         Rectangle {
                             Layout.alignment: Qt.AlignVCenter
                             visible: root.transportTimelineUsingCatchup || root.transportTimelineUsingLiveProgram
+                                || root.transportTimelineUsingTimeshift
                             radius: 11
                             implicitWidth: 86
                             implicitHeight: 22
@@ -6453,10 +6431,15 @@ Item {
                     visible: root.liveCatchupButtonVisible
                     enabled: root.liveCatchupButtonEnabled
                     onClicked: {
-                        root.app.playCatchup(
-                            root.player.currentChannel || ({}),
-                            (root.catchupPlayback ? root.player.catchupCurrentProgram
-                                                  : root.playbackNowNext.currentProgram) || ({}))
+                        if (root.transportTimelineUsingTimeshift) {
+                            if (root.app.restartTimeshiftProgramme())
+                                root.markTimeshiftBadgeBehindLive()
+                        } else {
+                            root.app.playCatchup(
+                                root.player.currentChannel || ({}),
+                                (root.catchupPlayback ? root.player.catchupCurrentProgram
+                                                      : root.playbackNowNext.currentProgram) || ({}))
+                        }
                         root.revealUi("pointer")
                     }
                 }

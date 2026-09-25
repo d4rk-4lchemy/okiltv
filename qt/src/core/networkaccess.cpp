@@ -76,8 +76,22 @@ BlockingNetworkAccess::BlockingNetworkAccess(const int timeoutMs)
 {
 }
 
+QByteArray NetworkAccess::get(const QUrl &url, const std::function<bool()> &cancelled) const
+{
+    if (cancelled && cancelled()) throw std::runtime_error("Request cancelled.");
+    auto bytes = get(url);
+    if (cancelled && cancelled()) throw std::runtime_error("Request cancelled.");
+    return bytes;
+}
+
 QByteArray BlockingNetworkAccess::get(const QUrl &url) const
 {
+    return get(url, {});
+}
+
+QByteArray BlockingNetworkAccess::get(const QUrl &url, const std::function<bool()> &cancelled) const
+{
+    if (cancelled && cancelled()) throw std::runtime_error("Request cancelled.");
     // A new QNetworkAccessManager is created per call. This method is invoked
     // from background threads (via QtConcurrent::run) and QNetworkAccessManager
     // is not safe to share across threads. The per-call cost is one TCP/TLS
@@ -106,6 +120,14 @@ QByteArray BlockingNetworkAccess::get(const QUrl &url) const
     });
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
 
+    QTimer cancellationTimer;
+    QObject::connect(&cancellationTimer, &QTimer::timeout, &loop, [&]() {
+        if (cancelled && cancelled()) {
+            reply->abort();
+            loop.quit();
+        }
+    });
+    if (cancelled) cancellationTimer.start(25);
     timer.start(m_timeoutMs);
     loop.exec();
     timer.stop();

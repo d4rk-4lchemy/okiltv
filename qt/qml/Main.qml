@@ -40,8 +40,10 @@ ApplicationWindow {
     readonly property var dvr: dvrController
     readonly property var app: appController
     readonly property var downloads: catchupDownloadController
+    readonly property var updates: updateCheckController
+    readonly property var multiView: multiViewController
     // qmllint enable unqualified
-    readonly property bool overlayShortcutsEnabled: window.shell.activeOverlay !== "settings" && !downloadUi.interactionActive && !dvrExitDialog.visible && !window.downloads.shuttingDown
+    readonly property bool overlayShortcutsEnabled: window.shell.activeOverlay !== "settings" && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
     readonly property bool liveShortcutsEnabled: window.overlayShortcutsEnabled && !livePage.searchFieldActive
     readonly property var forwardedShortcuts: {
         const shortcuts = [
@@ -135,6 +137,7 @@ ApplicationWindow {
     function beginExit() {
         if (window.downloads.shuttingDown)
             return
+        window.updates.shutdown()
         window.downloads.shutdown()
     }
 
@@ -174,7 +177,7 @@ ApplicationWindow {
     }
 
     function dispatchShortcut(key, modifiers) {
-        if (downloadUi.interactionActive || dvrExitDialog.visible || window.downloads.shuttingDown)
+        if (downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
             return false
         return livePage.handleWindowKey({
             key: key,
@@ -183,7 +186,7 @@ ApplicationWindow {
     }
 
     function shortcutEnabled(scope) {
-        if (downloadUi.interactionActive || dvrExitDialog.visible || window.downloads.shuttingDown)
+        if (downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
             return false
         if (scope === "grid" || scope === "guideOrGrid") {
             return livePage.multiviewSelectionAvailable
@@ -231,7 +234,7 @@ ApplicationWindow {
 
     Shortcut {
         sequence: "Escape"
-        enabled: !downloadUi.choosingFile && !dvrExitDialog.visible && !window.downloads.shuttingDown
+        enabled: !downloadUi.choosingFile && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
         onActivated: {
             if (downloadUi.handleEscape())
                 return
@@ -302,6 +305,16 @@ ApplicationWindow {
         running: window.app.isBusy
         visible: running
         z: 20
+    }
+
+    UpdateAvailableDialog {
+        id: updateDialog
+        controller: window.updates
+        uiTransparency: window.settings.uiTransparency
+        allowedToOpen: window.visible && window.visibility !== Window.Minimized
+            && !downloadUi.interactionActive && !dvrExitDialog.visible
+            && window.pendingCloseSource === "" && !window.downloads.shuttingDown
+            && window.shell.activeOverlay !== "settings" && !window.multiView.degradePromptVisible
     }
 
     Dialog {

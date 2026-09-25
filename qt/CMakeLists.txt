@@ -66,6 +66,8 @@ qt_add_executable(OKILTVQt
     src/app/catchupdownloadtransfer.cpp
     src/app/catchupdownloadtransfer.h
     src/app/catchupdownloadcontroller.h
+    src/app/updatecheckcontroller.cpp
+    src/app/updatecheckcontroller.h
     src/app/appcontroller.cpp
     src/app/appcontroller.h
     src/app/channellistmodel.cpp
@@ -273,6 +275,7 @@ endif ()
 
 set(OKILTV_QML_FILES
     qml/Main.qml
+    qml/components/UpdateAvailableDialog.qml
     qml/components/CatchupDownloads.qml
     qml/components/AppButton.qml
     qml/components/ChannelBadge.qml

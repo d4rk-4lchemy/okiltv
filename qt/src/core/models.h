@@ -128,6 +128,7 @@ struct AppSettings
     QString dateOrder { QStringLiteral("system") };
     QString timeFormat { QStringLiteral("system") };
     QString theme { QStringLiteral("Dark") };
+    QStringList skippedUpdateVersions;
     QString lastSection { QStringLiteral("live") };
     bool showOnTopModeIndicator { true };
     bool preventDisplaySleep { true };

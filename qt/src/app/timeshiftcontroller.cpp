@@ -1363,6 +1363,22 @@ bool TimeshiftController::seekRelative(const double seconds)
         true);
 }
 
+bool TimeshiftController::containsPlaybackTime(const qint64 epochMs) const
+{
+    if (!isActive() || epochMs < windowStartEpochMs() || epochMs > liveEdgeEpochMs()) return false;
+    QString sessionId;
+    qint64 resolvedEpochMs = 0;
+    bool snappedGap = false;
+    return resolveSeekTarget(epochMs, &sessionId, &resolvedEpochMs, &snappedGap)
+        && !snappedGap && resolvedEpochMs == epochMs;
+}
+
+bool TimeshiftController::seekToPlaybackTime(const qint64 epochMs)
+{
+    return containsPlaybackTime(epochMs)
+        && seekToEpochMs(epochMs, QStringLiteral("Programme restart"), true);
+}
+
 bool TimeshiftController::seekToFraction(const double fraction)
 {
     if (!isActive()) {

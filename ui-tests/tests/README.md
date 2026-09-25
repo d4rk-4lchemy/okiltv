@@ -49,6 +49,10 @@ for the actual `pinned` state after the click, so a missed click cannot silently
 pass as hover selection. Picker rows are targeted by rendered labels. Timeout
 errors include selected/playing channel IDs and hovered/pinned rows; the full
 state is also retained in `failure.json`.
+Guide channel targeting excludes hidden Live delegates with identical labels and
+waits for enabled Guide content after chrome animation. PiP assertions inspect
+the actual layout and both tile channel IDs on open/assignment/swap, and require
+layout `off` on close; unchanged primary playback alone cannot satisfy them.
 
 ## Catch-up download regression
 

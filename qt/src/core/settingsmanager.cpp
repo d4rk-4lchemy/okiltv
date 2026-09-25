@@ -388,6 +388,16 @@ bool SettingsManager::replaceProfile(const QUuid &id, const ServerProfile &profi
 
     if (!previous || EpgCacheService::sourceFingerprint(*previous) != EpgCacheService::sourceFingerprint(normalized))
         EpgCacheService::invalidateSource(id);
+    if (!previous || previous->type != normalized.type || previous->name != normalized.name
+        || previous->xmltvUrl != normalized.xmltvUrl
+        || previous->xtreamServerTimezone != normalized.xtreamServerTimezone
+        || previous->catchupSafetyMinutes != normalized.catchupSafetyMinutes
+        || previous->autoRefreshIntervalHours != normalized.autoRefreshIntervalHours
+        || previous->m3uUrl != normalized.m3uUrl || previous->m3uFilePath != normalized.m3uFilePath
+        || previous->xtreamBaseUrl != normalized.xtreamBaseUrl
+        || previous->xtreamUsername != normalized.xtreamUsername
+        || previous->xtreamPassword != normalized.xtreamPassword)
+        DatabaseService::beginChannelImport(id);
     m_profileDetailCache.insert(id, normalized);
     auto updatedSummary = toSummary(normalized);
     updatedSummary.groupCount = m_sourceSummaries.at(index).groupCount;
@@ -419,6 +429,7 @@ bool SettingsManager::removeProfile(const QUuid &id)
         return false;
     }
 
+    DatabaseService::beginChannelImport(id);
     const auto databasePath = QFileInfo(m_settingsFilePath).dir().filePath(QStringLiteral("iptv.db"));
     try {
         if (QFileInfo::exists(databasePath)) DatabaseService(databasePath).removeProfileData(id);

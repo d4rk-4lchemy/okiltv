@@ -13,7 +13,7 @@ class IconCacheService
 public:
     IconCacheService(DatabaseService &database, std::shared_ptr<NetworkAccess> network = makeDefaultNetworkAccess());
 
-    QString getOrDownload(Channel &channel) const;
+    QString getOrDownload(Channel &channel, const std::function<bool()> &cancelled = {}) const;
 
 private:
     DatabaseService &m_database;

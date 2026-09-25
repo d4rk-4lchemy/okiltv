@@ -85,6 +85,14 @@ def main():
     def playing(state):
         return state["playback"]["currentChannel"].get("id")
 
+    def pip_channels(state, primary, secondary):
+        multi = state["multiview"]
+        return (multi["mode"] == "pip" and playing(state) == primary
+                and [tile["channelId"] for tile in multi["tiles"]] == [primary, secondary])
+
+    def pip_closed(state, primary):
+        return state["multiview"]["mode"] == "off" and playing(state) == primary
+
     def wait(label, predicate, timeout=8):
         end = time.monotonic() + timeout
         while time.monotonic() < end:
@@ -100,7 +108,7 @@ def main():
         hovered = [i["text"] for i in rows if i.get("hovered", False)]
         pinned = [i["text"] for i in rows if i.get("pinned", False)]
         raise AssertionError(f"{label}; selected={selected(state)}, playing={playing(state)}, "
-                             f"hovered={hovered}, pinned={pinned}")
+                             f"hovered={hovered}, pinned={pinned}, multiview={state['multiview']}")
 
     def key(value):
         runner.xdotool("key", "--window", runner.window_id, value)
@@ -224,17 +232,29 @@ def main():
         row(1)
         key("ctrl+Up")
         wait("Guide receives pinned B", lambda s: element(s, "guide.selection")["value"]["selectedChannel"].get("id") == 1)
-        state = runner.read_state()
-        guide_channel_bounds = next(
-            item["bounds"] for item in state["inventory"]
-            if item["text"] == "Fixture 02" and item.get("bounds", {}).get("x", 9999) < 400)
+        # Live's hidden rail contains the same label, including negative X.
+        # Wait for Guide input readiness and explicitly exclude Live delegates.
+        def guide_channel(state):
+            if state["window"]["visibleOverlay"] != "guide" or state["multiview"]["chromeAnimating"]:
+                return None
+            grid = next(r for r in state["regions"] if r["name"] == "guide_grid")
+            return next((item for item in state["inventory"]
+                         if item["text"] == "Fixture 02" and item.get("enabled", False)
+                         and not item["objectName"].startswith("ui.live.")
+                         and item["bounds"]["x"] < 400
+                         and grid["y"] <= item["bounds"]["y"]
+                         < grid["y"] + grid["height"]), None)
+
+        state = wait("Guide channel accepts pointer input", guide_channel)
+        guide_channel_bounds = guide_channel(state)["bounds"]
         # The Guide channel column is visually sticky while its text remains a
         # child of horizontally scrolled content, so inventory X can be negative.
         move(100, guide_channel_bounds["y"] + guide_channel_bounds["height"] / 2)
         runner.xdotool("click", "3")
         wait("Guide right click opens PiP and closes overlay", lambda s:
-             s["window"]["visibleOverlay"] == "none" and playing(s) == 2)
+             s["window"]["visibleOverlay"] == "none" and pip_channels(s, 2, 1))
         key("ctrl+p")
+        wait("Guide PiP closes", lambda s: pip_closed(s, 2))
         outside()
         wait("Guide PiP exit restores playback C", lambda s: selected(s) == 2)
         time.sleep(3)
@@ -269,16 +289,17 @@ def main():
         outside()
         row(3)
         runner.xdotool("click", "3")
-        wait("right click opens PiP and closes chrome", lambda s: playing(s) == 1 and not visible(s))
+        wait("right click opens PiP and closes chrome", lambda s: pip_channels(s, 1, 2) and not visible(s))
         key("Left")
         key("Down")
+        wait("keyboard selects C for PiP", lambda s: selected(s) == 2)
         key("ctrl+p")
-        time.sleep(1)
+        wait("PiP keyboard assignment preserves primary", lambda s: pip_channels(s, 1, 2))
         key("ctrl+shift+p")
-        wait("PiP selection and swap", lambda s: playing(s) == 2)
+        wait("PiP selection and swap", lambda s: pip_channels(s, 2, 1))
         key("Escape")
         key("ctrl+p")
-        wait("PiP close preserves primary", lambda s: playing(s) == 2)
+        wait("PiP close preserves primary", lambda s: pip_closed(s, 2))
         key("Escape")
         outside()
         pin(2)

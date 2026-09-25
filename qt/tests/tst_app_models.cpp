@@ -23,6 +23,8 @@
 #undef private
 #include "../src/app/profilesmodel.h"
 #include "../src/app/settingscontroller.h"
+#include "../src/app/updatecheckcontroller.h"
+#include <QDesktopServices>
 #include "../src/app/shellcontroller.h"
 #include "../src/app/sourcegroupsmodel.h"
 #define private public
@@ -49,6 +51,7 @@
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QThreadPool>
@@ -390,6 +393,11 @@ class AppModelTests final : public QObject
 
 private slots:
     void initTestCase() { OKILTV::Core::useIsolatedSecretKeyForTests(); }
+    void updateCheckResponses_data();
+    void updateCheckResponses();
+    void updateCheckChoicesPersist();
+    void updateCheckSaveFailure();
+    void updateCheckTimeoutAndShutdown();
     void catchupDownloadValidation();
     void trackPreferencesRejectStaleSnapshots();
     void removingProfileClearsTrackPreferences();
@@ -514,6 +522,9 @@ private slots:
     void playerControllerReconnectReserveHonorsStopAndFailure();
     void playerControllerReconnectReserveTimesOutWithoutProgress();
     void playerControllerLiveWatchdogRespectsTuneGrace();
+    void timeshiftProgrammeRestartPrefersLocalBuffer();
+    void timeshiftProgrammeFollowsWatchedTime_data();
+    void timeshiftProgrammeFollowsWatchedTime();
     void timeshiftSettingsDoNotInterruptCatchup();
     void timeshiftRollingWindowPreservesPlaybackOrigin();
     void timeshiftFailedProcessDeletionIsDeferred();
@@ -541,6 +552,12 @@ private slots:
     void appControllerWatchStatsSurviveDatabaseLock();
     void profileLoadReportsCacheFailure();
     void dateTimeFormatsApplyOnlyOnSaveAndRefreshCachedPrograms();
+    void profileRefreshPublishesOnlyNewestResult_data();
+    void profileRefreshPublishesOnlyNewestResult();
+    void settingsSaveFailureRetainsDraft();
+    void iconShutdownCancelsActiveRequestAndQueue();
+    void iconCacheFailuresAreContained();
+    void lateIconCannotCrossSourceOrUrl();
     void settingsControllerTracksDirtyStateForRegularSettings();
     void settingsControllerPreviewsUiTransparency();
     void settingsControllerDisablesFfmpegDependentOptionsWhenToolsUnavailable();
@@ -5799,6 +5816,200 @@ void AppModelTests::playerControllerLiveWatchdogRespectsTuneGrace()
     QVERIFY(controller.m_recovery.waitingStop());
 }
 
+void AppModelTests::timeshiftProgrammeRestartPrefersLocalBuffer()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    auto &app = *harness.appController;
+    auto &player = *harness.playerController;
+    auto &timeshift = *harness.timeshiftController;
+    Channel channel;
+    channel.id = 1;
+    channel.profileId = harness.activeProfileId();
+    channel.tvgId = QStringLiteral("channel.one");
+    channel.source = ChannelSource::M3U;
+    channel.streamUrl = QStringLiteral("http://127.0.0.1/live");
+    harness.channelListModel->setChannels({channel}, {});
+    player.m_currentChannel = channel;
+    player.m_currentPlaybackUrl = QStringLiteral("http://127.0.0.1/local-timeshift");
+    app.m_epgLoadedProfileId = channel.profileId;
+    EpgEntry program;
+    program.channelId = channel.tvgId;
+    program.title = QStringLiteral("Watched programme");
+    program.start = QDateTime::currentDateTimeUtc().addSecs(-7200);
+    program.stop = program.start.addSecs(3600);
+    harness.epgService->loadFromEntries({program});
+    timeshift.m_session.emplace();
+    auto &session = *timeshift.m_session;
+    session.id = QStringLiteral("restart-test");
+    session.channel = channel;
+    session.playbackAttached = true;
+    session.attachedWindowStartEpochMs = program.start.toMSecsSinceEpoch();
+    session.playlistInfo.windowStartUtc = program.start;
+    session.playlistInfo.liveEdgeUtc = program.start.addSecs(7200);
+    player.player()->m_cachedTelemetry.positionSeconds = 1800;
+    player.player()->m_cachedTelemetry.seekable = true;
+    emit timeshift.stateChanged();
+    QTRY_COMPARE(app.timeshiftProgramTitle(), program.title);
+    QVERIFY(app.timeshiftProgramCanRestartLocally());
+    // Includes the exact oldest retained timestamp; no provider archive needed.
+    QVERIFY(app.restartTimeshiftProgramme());
+    QCOMPARE(timeshift.lastSeekModeText(), QStringLiteral("Direct"));
+    QCOMPARE(player.playbackMode(), QStringLiteral("live"));
+    QCOMPARE(player.currentPlaybackUrl(), QStringLiteral("http://127.0.0.1/local-timeshift"));
+
+    // Rolling retention has removed the beginning: no clamping to a later time.
+    session.playlistInfo.windowStartUtc = program.start.addSecs(1);
+    emit timeshift.stateChanged();
+    QVERIFY(!app.timeshiftProgramCanRestartLocally());
+    QVERIFY(!app.restartTimeshiftProgramme());
+    QCOMPARE(player.playbackMode(), QStringLiteral("live"));
+    QCOMPARE(player.currentPlaybackUrl(), QStringLiteral("http://127.0.0.1/local-timeshift"));
+
+    // A gap between retained generations also cannot substitute for the start.
+    TimeshiftController::Session retained;
+    retained.id = QStringLiteral("older");
+    retained.playlistInfo.windowStartUtc = program.start.addSecs(-3600);
+    retained.playlistInfo.liveEdgeUtc = program.start.addSecs(-1);
+    timeshift.m_retainedSessions.push_back(std::move(retained));
+    QVERIFY(!timeshift.containsPlaybackTime(program.start.toMSecsSinceEpoch()));
+    QVERIFY(!timeshift.seekToPlaybackTime(program.start.toMSecsSinceEpoch()));
+
+    channel.catchupSupported = true;
+    channel.catchupWindowHours = 72;
+    channel.catchupMode = QStringLiteral("append");
+    channel.catchupSourceTemplate = QStringLiteral("utc={utc}&lutc={lutc}");
+    harness.channelListModel->setChannels({channel}, {});
+    player.m_currentChannel = channel;
+    QVERIFY(!app.restartTimeshiftProgramme()); // false means provider fallback, not local seek.
+    QCOMPARE(player.playbackMode(), QStringLiteral("catchup"));
+    QCOMPARE(player.catchupCurrentProgram().value(QStringLiteral("title")).toString(), program.title);
+    const QUrlQuery query(QUrl(player.currentPlaybackUrl()));
+    QCOMPARE(query.queryItemValue(QStringLiteral("utc")).toLongLong(), program.start.toSecsSinceEpoch());
+}
+
+void AppModelTests::timeshiftProgrammeFollowsWatchedTime_data()
+{
+    QTest::addColumn<bool>("diskBacked");
+    QTest::newRow("memory") << false;
+    QTest::newRow("sqlite") << true;
+}
+
+void AppModelTests::timeshiftProgrammeFollowsWatchedTime()
+{
+    QFETCH(bool, diskBacked);
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    auto &app = *harness.appController;
+    auto &player = *harness.playerController;
+    auto &timeshift = *harness.timeshiftController;
+    Channel channel;
+    channel.id = 1;
+    channel.profileId = harness.activeProfileId();
+    channel.tvgId = QStringLiteral("channel.one");
+    // Local timeshift must work without provider archive support.
+    QVERIFY(!channel.catchupSupported);
+    player.m_currentChannel = channel;
+    app.m_epgLoadedProfileId = channel.profileId;
+    const auto origin = QDateTime::currentDateTimeUtc().addSecs(-10800);
+    timeshift.m_session.emplace();
+    auto &session = *timeshift.m_session;
+    session.channel = channel;
+    session.playbackAttached = true;
+    session.attachedWindowStartEpochMs = origin.toMSecsSinceEpoch();
+    session.playlistInfo.windowStartUtc = origin;
+    session.playlistInfo.liveEdgeUtc = origin.addSecs(10800);
+    QList<EpgEntry> entries;
+    for (int index = 0; index < 3; ++index) {
+        EpgEntry entry;
+        entry.channelId = channel.tvgId;
+        entry.start = origin.addSecs(index * 3600);
+        entry.stop = entry.start.addSecs(3600);
+        entry.title = QStringLiteral("Programme %1").arg(index);
+        entries.push_back(entry);
+    }
+    int snapshotNumber = 0;
+    const auto publish = [&] {
+        if (diskBacked) {
+            EpgService::Snapshot snapshot;
+            snapshot.store = EpgStore::create(harness.tempDir.filePath(
+                QStringLiteral("timeshift-epg-%1.sqlite").arg(++snapshotNumber)),
+                {channel.profileId, QStringLiteral("test"), QDateTime::currentDateTimeUtc(), 0},
+                [&](const EpgStore::Sink &sink) { for (const auto &entry : entries) sink(entry); });
+            harness.epgService->applySnapshot(std::move(snapshot));
+        } else {
+            harness.epgService->loadFromEntries(entries);
+        }
+        emit app.epgRefreshStateChanged();
+    };
+    const auto seek = [&](double seconds) {
+        player.player()->m_cachedTelemetry.positionSeconds = seconds;
+        emit player.positionTextChanged();
+    };
+    seek(10795);
+    publish();
+    QTRY_COMPARE(app.timeshiftProgramTitle(), QStringLiteral("Programme 2"));
+    seek(3599);
+    QTRY_COMPARE(app.timeshiftProgramTitle(), QStringLiteral("Programme 0"));
+    seek(3600);
+    QCOMPARE(app.timeshiftProgramTitle(), QStringLiteral("Programme 1"));
+    player.setIsPlaying(false);
+    emit timeshift.stateChanged();
+    QCOMPARE(app.timeshiftProgramTitle(), QStringLiteral("Programme 1"));
+    seek(10795);
+    QTRY_COMPARE(app.timeshiftProgramTitle(), QStringLiteral("Programme 2"));
+
+    // Missing EPG must clear the old label; a paused viewer sees refreshed metadata.
+    entries[2].title = QStringLiteral("Corrected title");
+    publish();
+    QTRY_COMPARE(app.timeshiftProgramTitle(), QStringLiteral("Corrected title"));
+    entries.removeLast();
+    publish();
+    QTRY_VERIFY(!app.m_timeshiftEpgReadInFlight);
+    QVERIFY(app.timeshiftProgramTitle().isEmpty());
+
+    // Change the target repeatedly before queued worker completion is delivered.
+    publish();
+    QVERIFY(app.m_timeshiftEpgReadInFlight);
+    seek(100);
+    seek(3700);
+    QTRY_COMPARE(app.timeshiftProgramTitle(), QStringLiteral("Programme 1"));
+    QTRY_VERIFY(!app.m_timeshiftEpgReadInFlight);
+
+    // A newer generation wins over an already running read.
+    publish();
+    entries[1].title = QStringLiteral("New generation");
+    publish();
+    QTRY_COMPARE(app.timeshiftProgramTitle(), QStringLiteral("New generation"));
+
+    // A channel change cannot publish the old channel's in-flight result.
+    publish();
+    channel.id = 2;
+    channel.tvgId = QStringLiteral("channel.two");
+    player.m_currentChannel = channel;
+    emit player.currentChannelChanged();
+    QTRY_VERIFY(!app.m_timeshiftEpgReadInFlight);
+    QVERIFY(app.timeshiftProgramTitle().isEmpty());
+
+    channel.id = 1;
+    channel.tvgId = QStringLiteral("channel.one");
+    player.m_currentChannel = channel;
+    timeshift.m_session.emplace();
+    timeshift.m_session->channel = channel;
+    timeshift.m_session->playbackAttached = true;
+    timeshift.m_session->attachedWindowStartEpochMs = origin.toMSecsSinceEpoch();
+    timeshift.m_session->playlistInfo.windowStartUtc = origin;
+    timeshift.m_session->playlistInfo.liveEdgeUtc = origin.addSecs(10800);
+    emit player.currentChannelChanged();
+    QTRY_COMPARE(app.timeshiftProgramTitle(), QStringLiteral("New generation"));
+    publish();
+    timeshift.m_session.reset();
+    emit timeshift.stateChanged();
+    QVERIFY(app.timeshiftProgramTitle().isEmpty());
+    QTRY_VERIFY(!app.m_timeshiftEpgReadInFlight);
+    QVERIFY(app.timeshiftProgramTitle().isEmpty());
+}
+
 void AppModelTests::timeshiftSettingsDoNotInterruptCatchup()
 {
     QTemporaryDir dir;
@@ -6624,6 +6835,201 @@ void AppModelTests::settingsControllerPreviewsUiTransparency()
     controller.reload();
     QCOMPARE(controller.uiTransparency(), 35);
     QVERIFY(!controller.dirty());
+}
+
+void AppModelTests::profileRefreshPublishesOnlyNewestResult_data()
+{
+    QTest::addColumn<QString>("action");
+    QTest::newRow("newer-refresh") << QStringLiteral("refresh");
+    QTest::newRow("source-edited") << QStringLiteral("edit");
+    QTest::newRow("source-removed") << QStringLiteral("remove");
+}
+
+void AppModelTests::profileRefreshPublishesOnlyNewestResult()
+{
+    QFETCH(QString, action);
+    class ReorderedNetwork final : public NetworkAccess {
+    public:
+        mutable std::atomic_int calls {0};
+        mutable std::atomic_bool release {false};
+        QByteArray get(const QUrl &) const override
+        {
+            const auto index = calls.fetch_add(1);
+            if (index == 0) while (!release.load()) QThread::msleep(2);
+            return index == 0
+                ? QByteArray("#EXTM3U\n#EXTINF:-1,Older\nhttp://localhost/old\n")
+                : QByteArray("#EXTM3U\n#EXTINF:-1,Newer\nhttp://localhost/new\n");
+        }
+    };
+    auto network = std::make_shared<ReorderedNetwork>();
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt, network));
+    const auto release = qScopeGuard([&] { network->release = true; });
+    auto profile = harness.settings->activeProfile().value();
+    profile.type = ProfileType::M3UUrl;
+    profile.m3uUrl = QStringLiteral("http://localhost/playlist");
+    QVERIFY(harness.settings->replaceProfile(profile.id, profile));
+    harness.appController->loadProfile(guidToString(profile.id));
+    QTRY_COMPARE_WITH_TIMEOUT(network->calls.load(), 1, 3000);
+    if (action != QStringLiteral("refresh")) {
+        QSignalSpy finished(harness.appController.get(), &AppController::profileLoadFinished);
+        if (action == QStringLiteral("edit")) {
+            profile.m3uUrl = QStringLiteral("http://localhost/changed");
+            QVERIFY(harness.settings->replaceProfile(profile.id, profile));
+        } else {
+            QVERIFY(harness.settings->removeProfile(profile.id));
+        }
+        network->release = true;
+        QTRY_VERIFY_WITH_TIMEOUT(!harness.appController->isBusy(), 5000);
+        QCOMPARE(finished.count(), 1);
+        QVERIFY(!finished.first().at(1).toBool());
+        QVERIFY(harness.database->loadChannels(profile.id).isEmpty());
+        QVERIFY(harness.channelListModel->allChannels().isEmpty());
+        return;
+    }
+    harness.appController->loadProfile(guidToString(profile.id));
+    QTRY_VERIFY_WITH_TIMEOUT(!harness.appController->isBusy(), 5000);
+    QCOMPARE(harness.channelListModel->allChannels().first().name, QStringLiteral("Newer"));
+    network->release = true;
+    harness.appController->m_backgroundTasks.waitForFinished();
+    QCoreApplication::sendPostedEvents();
+    QCOMPARE(harness.channelListModel->allChannels().first().name, QStringLiteral("Newer"));
+    QCOMPARE(harness.database->loadChannels(profile.id).first().name, QStringLiteral("Newer"));
+}
+
+void AppModelTests::settingsSaveFailureRetainsDraft()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    auto &controller = *harness.settingsController;
+    const auto original = harness.settings->current().preventDisplaySleep;
+    controller.setPreventDisplaySleep(!original);
+    QSignalSpy saved(&controller, &SettingsController::saved);
+    const auto backup = harness.settingsPath + QStringLiteral(".backup");
+    QVERIFY(QFile::rename(harness.settingsPath, backup));
+    QVERIFY(QDir().mkdir(harness.settingsPath));
+    QVERIFY(!controller.save());
+    QVERIFY(!controller.saveError().isEmpty());
+    QVERIFY(controller.dirty());
+    QCOMPARE(controller.preventDisplaySleep(), !original);
+    QCOMPARE(harness.settings->current().preventDisplaySleep, original);
+    QCOMPARE(saved.count(), 0);
+    QVERIFY(QDir().rmdir(harness.settingsPath));
+    QVERIFY(QFile::rename(backup, harness.settingsPath));
+    QVERIFY(controller.save());
+    QVERIFY(controller.saveError().isEmpty());
+    QVERIFY(!controller.dirty());
+    QCOMPARE(saved.count(), 1);
+    harness.settings->load();
+    QCOMPARE(harness.settings->current().preventDisplaySleep, !original);
+}
+
+void AppModelTests::iconShutdownCancelsActiveRequestAndQueue()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    QTcpServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost));
+    auto channel = Channel {};
+    channel.profileId = harness.settings->activeProfile()->id;
+    channel.iconUrl = QStringLiteral("http://127.0.0.1:%1/logo-%2.png")
+        .arg(server.serverPort()).arg(QUuid::createUuid().toString());
+    const auto token = DatabaseService::beginChannelImport(channel.profileId);
+    harness.appController->prefetchIconsAsync({channel, channel, channel, channel, channel}, token);
+    QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections(), 3000);
+    auto *socket = server.nextPendingConnection();
+    QTRY_VERIFY_WITH_TIMEOUT(socket->bytesAvailable() > 0, 3000);
+    QElapsedTimer timer;
+    timer.start();
+    harness.appController.reset();
+    QVERIFY2(timer.elapsed() < 1000, qPrintable(QString::number(timer.elapsed())));
+    QCoreApplication::processEvents();
+    QVERIFY(!server.hasPendingConnections());
+}
+
+void AppModelTests::iconCacheFailuresAreContained()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    const auto dbPath = harness.database->databaseFilePath();
+    const auto execute = [&](const QString &sql) {
+        const auto name = QUuid::createUuid().toString();
+        bool ok = false;
+        {
+            auto db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), name);
+            db.setDatabaseName(dbPath);
+            if (db.open()) { QSqlQuery query(db); ok = query.exec(sql); }
+        }
+        QSqlDatabase::removeDatabase(name);
+        return ok;
+    };
+    Channel channel;
+    channel.profileId = harness.settings->activeProfile()->id;
+    channel.iconUrl = QStringLiteral("http://localhost/logo.png");
+    QVERIFY(execute(QStringLiteral("DROP TABLE icon_cache")));
+    IconCacheService icons(*harness.database);
+    QVERIFY(icons.getOrDownload(channel).isEmpty());
+    QVERIFY(execute(QStringLiteral("CREATE TABLE icon_cache (url_hash TEXT PRIMARY KEY, local_path TEXT, fetched_at INTEGER)")));
+    QVERIFY(execute(QStringLiteral("CREATE TRIGGER fail_icon BEFORE INSERT ON icon_cache BEGIN SELECT RAISE(FAIL, 'forced cache write failure'); END")));
+    const auto hash = QString::fromLatin1(QCryptographicHash::hash(channel.iconUrl.toUtf8(), QCryptographicHash::Sha1).toHex());
+    QFile iconFile(QDir(AppDataPaths::iconCacheDirectory()).filePath(hash + QStringLiteral(".png")));
+    QVERIFY(iconFile.open(QIODevice::WriteOnly));
+    iconFile.write("cached image");
+    iconFile.close();
+    QVERIFY(icons.getOrDownload(channel).isEmpty());
+    channel.cachedIconPath.clear();
+    auto token = DatabaseService::beginChannelImport(channel.profileId);
+    harness.appController->prefetchIconsAsync({channel, channel}, token);
+    harness.appController.reset();
+    // All exceptional futures must be consumed, including failures after the first.
+    StartupHarness second;
+    QVERIFY(second.initialize(std::nullopt));
+    auto *app = second.appController.get();
+    app->m_backgroundTasks.addFuture(QtConcurrent::run([] { throw std::runtime_error("first"); }));
+    app->m_backgroundTasks.addFuture(QtConcurrent::run([] { throw std::runtime_error("second"); }));
+    std::atomic_bool completed {false};
+    app->m_backgroundTasks.addFuture(QtConcurrent::run([&] { QThread::msleep(100); completed = true; }));
+    second.appController.reset();
+    QVERIFY(completed.load());
+}
+
+void AppModelTests::lateIconCannotCrossSourceOrUrl()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    Channel old;
+    old.id = 1;
+    old.name = QStringLiteral("Icon channel");
+    old.streamUrl = QStringLiteral("http://localhost/live");
+    old.profileId = harness.settings->activeProfile()->id;
+    old.iconUrl = QStringLiteral("https://example.invalid/old.png");
+    old.cachedIconPath = harness.tempDir.filePath(QStringLiteral("old.png"));
+    QFile file(old.cachedIconPath);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write("image");
+    file.close();
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        const auto token = DatabaseService::beginChannelImport(old.profileId);
+        Channel current = old;
+        current.cachedIconPath.clear();
+        if (scenario == 0) current.profileId = QUuid::createUuid();
+        if (scenario == 1) current.iconUrl = QStringLiteral("https://example.invalid/new.png");
+        harness.channelListModel->setChannels({current}, {});
+        harness.appController->m_loadedChannels = {current};
+        harness.database->replaceChannelsForProfile(current.profileId, {current});
+        harness.appController->prefetchIconsAsync({old}, token);
+        harness.appController->m_backgroundTasks.waitForFinished();
+        if (scenario == 2) {
+            DatabaseService::beginChannelImport(old.profileId);
+            // The already published disk cache is valid; queued UI delivery is obsolete.
+        }
+        QCoreApplication::sendPostedEvents();
+        const auto expected = scenario == 3 ? old.cachedIconPath : QString {};
+        QCOMPARE(harness.channelListModel->channelById(1)->cachedIconPath, expected);
+        QCOMPARE(harness.appController->m_loadedChannels.first().cachedIconPath, expected);
+        QCOMPARE(harness.database->loadChannels(current.profileId).first().cachedIconPath,
+            scenario >= 2 ? old.cachedIconPath : QString {});
+    }
 }
 
 void AppModelTests::settingsControllerTracksDirtyStateForRegularSettings()
@@ -13090,6 +13496,210 @@ void AppModelTests::catchupDownloadValidation()
     QVERIFY(!harness.appController->enqueueCatchupDownload(toVariantMap(channel), toVariantMap(program),
         QUrl::fromLocalFile(harness.tempDir.filePath(QStringLiteral("download.mkv")))).isEmpty());
     QCOMPARE(harness.appController->downloadController()->rowCount(), 0);
+}
+
+
+namespace {
+class UpdateHttpFixture final : public QTcpServer
+{
+public:
+    QByteArray body { R"({"tag_name":"v0.5.5","draft":false,"prerelease":false})" };
+    int status { 200 };
+    int requests { 0 };
+    bool stall { false };
+    QByteArray lastRequest;
+
+    UpdateHttpFixture()
+    {
+        listen(QHostAddress::LocalHost);
+        connect(this, &QTcpServer::newConnection, this, [this]() {
+            while (auto *socket = nextPendingConnection()) {
+                auto request = std::make_shared<QByteArray>();
+                connect(socket, &QTcpSocket::readyRead, this, [this, socket, request]() {
+                    *request += socket->readAll();
+                    if (!request->endsWith("\r\n\r\n"))
+                        return;
+                    lastRequest = *request;
+                    ++requests;
+                    if (stall)
+                        return;
+                    const QByteArray response = "HTTP/1.1 " + QByteArray::number(status)
+                        + " Result\r\nContent-Type: application/json\r\nContent-Length: "
+                        + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+                    socket->write(response);
+                    socket->disconnectFromHost();
+                });
+                connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+            }
+        });
+    }
+    QUrl endpoint() const
+    {
+        return QUrl(QStringLiteral("http://127.0.0.1:%1/latest").arg(serverPort()));
+    }
+};
+
+class UpdateBrowser final : public QObject
+{
+    Q_OBJECT
+public:
+    QUrl opened;
+public slots:
+    void open(const QUrl &url) { opened = url; }
+};
+} // namespace
+
+void AppModelTests::updateCheckResponses_data()
+{
+    QTest::addColumn<QByteArray>("body");
+    QTest::addColumn<int>("status");
+    QTest::addColumn<QString>("local");
+    QTest::addColumn<bool>("expected");
+    const auto release = [](const char *tag) {
+        return QByteArray("{\"tag_name\":\"") + tag + "\",\"draft\":false,\"prerelease\":false}";
+    };
+    QTest::newRow("patch") << release("v0.5.5") << 200 << QStringLiteral("0.5.4") << true;
+    QTest::newRow("minor-numeric") << release("v0.10.0") << 200 << QStringLiteral("0.9.9") << true;
+    QTest::newRow("major") << release("v1.0.0") << 200 << QStringLiteral("0.99.99") << true;
+    QTest::newRow("equal") << release("v0.5.4") << 200 << QStringLiteral("0.5.4") << false;
+    QTest::newRow("older") << release("v0.5.3") << 200 << QStringLiteral("0.5.4") << false;
+    QTest::newRow("invalid-local") << release("v0.5.5") << 200 << QStringLiteral("dev") << false;
+    for (const auto *tag : {"1.0.0", "v1.0", "v1.0.0.1", "v1.0.0-rc1", "v99999999999999999999.0.0", "v1.0.0\n"})
+        QTest::newRow(tag) << release(tag) << 200 << QStringLiteral("0.5.4") << false;
+    QTest::newRow("prerelease") << QByteArray(R"({"tag_name":"v1.0.0","draft":false,"prerelease":true})") << 200 << QStringLiteral("0.5.4") << false;
+    QTest::newRow("draft") << QByteArray(R"({"tag_name":"v1.0.0","draft":true,"prerelease":false})") << 200 << QStringLiteral("0.5.4") << false;
+    QTest::newRow("missing-flags") << QByteArray(R"({"tag_name":"v1.0.0"})") << 200 << QStringLiteral("0.5.4") << false;
+    QTest::newRow("invalid-json") << QByteArray("oops") << 200 << QStringLiteral("0.5.4") << false;
+    QTest::newRow("array") << QByteArray("[]") << 200 << QStringLiteral("0.5.4") << false;
+    QTest::newRow("oversized") << QByteArray(1024 * 1024 + 1, 'x') << 200 << QStringLiteral("0.5.4") << false;
+    for (const int status : {404, 403, 429, 500})
+        QTest::newRow(qPrintable(QString::number(status))) << release("v1.0.0") << status << QStringLiteral("0.5.4") << false;
+}
+
+void AppModelTests::updateCheckResponses()
+{
+    QFETCH(QByteArray, body);
+    QFETCH(int, status);
+    QFETCH(QString, local);
+    QFETCH(bool, expected);
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    UpdateHttpFixture server;
+    server.body = body;
+    server.status = status;
+    OKILTV::App::UpdateCheckController updates(&settings, local, server.endpoint(), 1000);
+    QSignalSpy finished(&updates, &OKILTV::App::UpdateCheckController::checkFinished);
+    updates.check();
+    updates.check();
+    QTRY_COMPARE(finished.count(), 1);
+    QCOMPARE(updates.pending(), expected);
+    QVERIFY(updates.errorText().isEmpty());
+    QCOMPARE(server.requests, 1);
+    QVERIFY(server.lastRequest.contains("Accept: application/vnd.github+json"));
+    QVERIFY(server.lastRequest.contains("User-Agent: OKILTV/" + local.toUtf8()));
+    updates.check();
+    QCOMPARE(finished.count(), 1);
+}
+
+void AppModelTests::updateCheckChoicesPersist()
+{
+    QTemporaryDir dir;
+    const auto path = dir.filePath(QStringLiteral("settings.json"));
+    SettingsManager settings(path);
+    settings.load();
+    QVERIFY(settings.current().skippedUpdateVersions.isEmpty());
+    UpdateHttpFixture server;
+    const auto check = [&](OKILTV::App::UpdateCheckController &controller) {
+        QSignalSpy finished(&controller, &OKILTV::App::UpdateCheckController::checkFinished);
+        controller.check();
+        QTRY_COMPARE(finished.count(), 1);
+    };
+    OKILTV::App::UpdateCheckController first(&settings, QStringLiteral("0.5.4"), server.endpoint(), 1000);
+    check(first);
+    QVERIFY(first.pending());
+    first.dismiss();
+    QVERIFY(!first.pending());
+    QVERIFY(settings.current().skippedUpdateVersions.isEmpty());
+    OKILTV::App::UpdateCheckController second(&settings, QStringLiteral("0.5.4"), server.endpoint(), 1000);
+    check(second);
+    QVERIFY(second.pending());
+    UpdateBrowser browser;
+    QDesktopServices::setUrlHandler(QStringLiteral("https"), &browser, "open");
+    const auto cleanup = qScopeGuard([]() { QDesktopServices::unsetUrlHandler(QStringLiteral("https")); });
+    second.openRelease();
+    QCOMPARE(browser.opened, QUrl(QStringLiteral("https://github.com/d4rk-4lchemy/okiltv/releases/tag/v0.5.5")));
+    QVERIFY(!second.pending());
+    QVERIFY(settings.current().skippedUpdateVersions.isEmpty());
+    OKILTV::App::UpdateCheckController third(&settings, QStringLiteral("0.5.4"), server.endpoint(), 1000);
+    check(third);
+    QVERIFY(third.pending());
+    third.skipVersion();
+    QVERIFY(!third.pending());
+    QVERIFY(third.errorText().isEmpty());
+    settings.current().theme = QStringLiteral("Dark");
+    settings.save();
+    SettingsManager reloaded(path);
+    reloaded.load();
+    QCOMPARE(reloaded.current().skippedUpdateVersions, QStringList {QStringLiteral("0.5.5")});
+    OKILTV::App::UpdateCheckController skipped(&reloaded, QStringLiteral("0.5.4"), server.endpoint(), 1000);
+    check(skipped);
+    QVERIFY(!skipped.pending());
+    server.body.replace("v0.5.5", "v0.5.6");
+    OKILTV::App::UpdateCheckController newer(&reloaded, QStringLiteral("0.5.4"), server.endpoint(), 1000);
+    check(newer);
+    QVERIFY(newer.pending());
+    newer.skipVersion();
+    reloaded.load();
+    QCOMPARE(reloaded.current().skippedUpdateVersions.size(), 2);
+    server.body.replace("v0.5.6", "v0.5.5");
+    OKILTV::App::UpdateCheckController olderLatest(&reloaded, QStringLiteral("0.5.4"), server.endpoint(), 1000);
+    check(olderLatest);
+    QVERIFY(!olderLatest.pending());
+}
+
+void AppModelTests::updateCheckSaveFailure()
+{
+    QTemporaryDir dir;
+    // A directory at the settings filename fails reliably even when tests run as root.
+    SettingsManager settings(dir.path());
+    UpdateHttpFixture server;
+    OKILTV::App::UpdateCheckController updates(&settings, QStringLiteral("0.5.4"), server.endpoint(), 1000);
+    QSignalSpy finished(&updates, &OKILTV::App::UpdateCheckController::checkFinished);
+    updates.check();
+    QTRY_COMPARE(finished.count(), 1);
+    updates.skipVersion();
+    QVERIFY(updates.pending());
+    QVERIFY(!updates.errorText().isEmpty());
+    QVERIFY(settings.current().skippedUpdateVersions.isEmpty());
+    updates.dismiss();
+    QVERIFY(!updates.pending());
+    QVERIFY(updates.errorText().isEmpty());
+}
+
+void AppModelTests::updateCheckTimeoutAndShutdown()
+{
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    UpdateHttpFixture server;
+    server.stall = true;
+    OKILTV::App::UpdateCheckController timeout(&settings, QStringLiteral("0.5.4"), server.endpoint(), 100);
+    QSignalSpy finished(&timeout, &OKILTV::App::UpdateCheckController::checkFinished);
+    timeout.check();
+    QTRY_COMPARE(finished.count(), 1);
+    QVERIFY(!timeout.pending());
+    QVERIFY(timeout.errorText().isEmpty());
+    OKILTV::App::UpdateCheckController closing(&settings, QStringLiteral("0.5.4"), server.endpoint(), 1000);
+    QSignalSpy changed(&closing, &OKILTV::App::UpdateCheckController::changed);
+    QSignalSpy closedFinished(&closing, &OKILTV::App::UpdateCheckController::checkFinished);
+    closing.check();
+    QTRY_COMPARE(server.requests, 2);
+    closing.shutdown();
+    closing.check();
+    QTest::qWait(150);
+    QCOMPARE(changed.count(), 0);
+    QCOMPARE(closedFinished.count(), 0);
+    QVERIFY(!closing.pending());
+    QCOMPARE(server.requests, 2);
 }
 
 QTEST_MAIN(AppModelTests)

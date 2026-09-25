@@ -73,6 +73,8 @@ qt_add_executable(OKILTVQtAppTests
     ../src/app/catchupdownloadtransfer.cpp
     ../src/app/catchupdownloadtransfer.h
     ../src/app/catchupdownloadcontroller.h
+    ../src/app/updatecheckcontroller.cpp
+    ../src/app/updatecheckcontroller.h
     ../src/app/appcontroller.cpp
     ../src/app/appcontroller.h
     ../src/app/channellistmodel.cpp
@@ -310,6 +312,8 @@ if (OKILTV_BUILD_UI_TESTS)
 endif ()
 
 qt_add_executable(OKILTVQtDownloadTests
+    ../src/core/m3uservice.cpp
+    ../src/core/networkaccess.cpp
     tst_catchup_downloads.cpp
     ../src/core/epgcache_service.cpp
     ../src/core/epgstore.cpp
@@ -346,5 +350,12 @@ if (NOT CMAKE_CROSSCOMPILING AND OKILTV_QMLTESTRUNNER)
     add_test(NAME OKILTVQtDownloadUiTests COMMAND "${OKILTV_QMLTESTRUNNER}"
         -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_catchupdownloads.qml")
     set_tests_properties(OKILTVQtDownloadUiTests PROPERTIES LABELS qml TIMEOUT 60
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+endif ()
+
+if (NOT CMAKE_CROSSCOMPILING AND OKILTV_QMLTESTRUNNER)
+    add_test(NAME OKILTVQtUpdateUiTests COMMAND "${OKILTV_QMLTESTRUNNER}"
+        -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_updateavailable.qml")
+    set_tests_properties(OKILTVQtUpdateUiTests PROPERTIES LABELS qml TIMEOUT 60
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
 endif ()

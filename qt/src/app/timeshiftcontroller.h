@@ -68,6 +68,8 @@ public:
     bool handlePlaybackStarvation(const QString &reason);
     bool seekRelative(double seconds);
     bool seekToFraction(double fraction);
+    bool containsPlaybackTime(qint64 epochMs) const;
+    bool seekToPlaybackTime(qint64 epochMs);
     bool jumpToLiveEdge();
     bool handlePrimaryPlaybackActivation();
 

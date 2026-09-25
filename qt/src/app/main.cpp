@@ -1,4 +1,5 @@
 #include "appcontroller.h"
+#include "updatecheckcontroller.h"
 #include "catchupdownloadcontroller.h"
 #include "databasestartup.h"
 #include "channellistmodel.h"
@@ -270,6 +271,7 @@ CoreServices constructCoreServices(const StartupLogFn &startupStep)
 
 struct AppServices
 {
+    std::unique_ptr<OKILTV::App::UpdateCheckController> updateCheckController;
     std::unique_ptr<OKILTV::App::ProfilesModel> profilesModel;
     std::unique_ptr<OKILTV::App::ChannelListModel> channelListModel;
     std::unique_ptr<OKILTV::App::NowNextModel> nowNextModel;
@@ -299,6 +301,7 @@ AppServices constructAppServices(
 {
     startupStep(QStringLiteral("Constructing app services."));
     AppServices services;
+    services.updateCheckController = std::make_unique<OKILTV::App::UpdateCheckController>(settings);
 
     services.profilesModel = constructComponent<OKILTV::App::ProfilesModel>(startupStep, QStringLiteral("ProfilesModel"), [settings]() {
         return std::make_unique<OKILTV::App::ProfilesModel>(settings);
@@ -427,6 +430,7 @@ void registerQmlContextProperties(
     OKILTV::App::AppController *appController,
     const AppServices &services)
 {
+    engine.rootContext()->setContextProperty(QStringLiteral("updateCheckController"), services.updateCheckController.get());
     engine.rootContext()->setContextProperty(QStringLiteral("appController"), appController);
     engine.rootContext()->setContextProperty(QStringLiteral("catchupDownloadController"), appController->downloadController());
     engine.rootContext()->setContextProperty(QStringLiteral("profilesModel"), services.profilesModel.get());
@@ -668,6 +672,7 @@ int main(int argc, char *argv[])
                 return;
             }
             shutdownHandled = true;
+            appServices.updateCheckController->shutdown();
 
             OKILTV::Core::DebugLogger::instance().log(
                 QStringLiteral("shutdown"),
@@ -706,6 +711,11 @@ int main(int argc, char *argv[])
 
         startupStep(QStringLiteral("Scheduling AppController initialization."));
         QMetaObject::invokeMethod(appController.get(), "initialize", Qt::QueuedConnection);
+        if (!qEnvironmentVariableIsSet("OKILTV_HEADLESS_TEST")
+            && qEnvironmentVariable("OKILTV_UI_TEST") != QStringLiteral("1")) {
+            QTimer::singleShot(0, appServices.updateCheckController.get(),
+                &OKILTV::App::UpdateCheckController::check);
+        }
         // Windows RAM experiment: exercise Close PiP's backend disposal once.
         // An explicit 0 disables it; 1 also enables it on other platforms for tests.
 #if defined(Q_OS_WIN)

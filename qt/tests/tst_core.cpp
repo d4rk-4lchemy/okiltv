@@ -139,6 +139,8 @@ class CoreTests final : public QObject
     Q_OBJECT
 
 private slots:
+    void channelPublicationRejectsObsoleteImports();
+    void sourceEditInvalidatesChannelImport();
     void initTestCase() { OKILTV::Core::useIsolatedSecretKeyForTests(); }
     void channelTrackPreferencesRoundTrip();
     void trackPreferencesMatchIdentity();
@@ -2557,6 +2559,62 @@ void CoreTests::catchupUrlResolverRejectsUnavailableTargets()
     const auto unresolvedTarget = resolver.resolve(unresolvedPlaceholderChannel, validProgram, &failureReason);
     QVERIFY(!unresolvedTarget.has_value());
     QVERIFY(failureReason.contains(QStringLiteral("unresolved placeholders")));
+}
+
+void CoreTests::channelPublicationRejectsObsoleteImports()
+{
+    QTemporaryDir dir;
+    DatabaseService db(dir.filePath(QStringLiteral("iptv.db")));
+    const auto profile = QUuid::createUuid();
+    Channel a;
+    a.profileId = profile;
+    a.streamUrl = QStringLiteral("https://example.invalid/a");
+    a.name = QStringLiteral("Older");
+    auto b = a;
+    b.streamUrl = QStringLiteral("https://example.invalid/b");
+    b.name = QStringLiteral("Newer");
+    QList<Channel> older {a}, newer {b, a};
+    const auto oldToken = DatabaseService::beginChannelImport(profile);
+    const auto newToken = DatabaseService::beginChannelImport(profile);
+    QVERIFY(db.publishChannels(profile, newToken, newer, true));
+    QVERIFY(!db.publishChannels(profile, oldToken, older, true));
+    QCOMPARE(db.loadChannels(profile).first().name, QStringLiteral("Newer"));
+    const auto aId = newer.last().id;
+    const auto bId = newer.first().id;
+    QList<Channel> reordered {a, b};
+    QVERIFY(db.publishChannels(profile, DatabaseService::beginChannelImport(profile), reordered, true));
+    QCOMPARE(reordered.first().id, aId);
+    QCOMPARE(reordered.last().id, bId);
+    const auto removedToken = DatabaseService::beginChannelImport(profile);
+    // A separate instance, as used by SettingsManager, shares the publication gate.
+    DatabaseService(dir.filePath(QStringLiteral("iptv.db"))).removeProfileData(profile);
+    QVERIFY(!db.publishChannels(profile, removedToken, older, true));
+    QVERIFY(db.loadChannels(profile).isEmpty());
+}
+
+void CoreTests::sourceEditInvalidatesChannelImport()
+{
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    ServerProfile profile;
+    profile.name = QStringLiteral("Source");
+    profile.type = ProfileType::M3UUrl;
+    profile.m3uUrl = QStringLiteral("https://example.invalid/old.m3u");
+    QVERIFY(settings.addProfile(profile));
+    DatabaseService db(dir.filePath(QStringLiteral("iptv.db")));
+    const auto token = DatabaseService::beginChannelImport(profile.id);
+    profile.m3uUrl = QStringLiteral("https://example.invalid/new.m3u");
+    QVERIFY(settings.replaceProfile(profile.id, profile));
+    Channel channel;
+    channel.profileId = profile.id;
+    channel.streamUrl = QStringLiteral("https://example.invalid/old");
+    QList<Channel> channels {channel};
+    QVERIFY(!db.publishChannels(profile.id, token, channels, true));
+    const auto removalToken = DatabaseService::beginChannelImport(profile.id);
+    QVERIFY(settings.removeProfile(profile.id));
+    QVERIFY(!db.publishChannels(profile.id, removalToken, channels, true));
+    QVERIFY(db.loadChannels(profile.id).isEmpty());
 }
 
 QTEST_MAIN(CoreTests)
