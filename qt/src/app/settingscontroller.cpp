@@ -629,6 +629,16 @@ void SettingsController::setDvrRecordingsDirectory(const QString &value)
     emitDirtyChangedIfNeeded(wasDirty);
 }
 
+bool SettingsController::dvrStopVodBeforeRecording() const { return m_dvrStopVodBeforeRecording; }
+void SettingsController::setDvrStopVodBeforeRecording(bool value)
+{
+    if (m_dvrStopVodBeforeRecording == value) return;
+    const auto wasDirty = dirty();
+    m_dvrStopVodBeforeRecording = value;
+    emit settingsChanged();
+    emitDirtyChangedIfNeeded(wasDirty);
+}
+
 bool SettingsController::dvrRemuxToMkv() const
 {
     return ffmpegToolsAvailable() && m_dvrRemuxToMkv;
@@ -721,6 +731,7 @@ bool SettingsController::dirty() const
         || m_minimizeToTrayOnMinimize != settings.minimizeToTrayOnMinimize
         || normalizeOverridePath(m_dvrRecordingsDirectory) != normalizeOverridePath(settings.dvrRecordingsDirectory)
         || dvrRemuxToMkv() != effectiveSettingsDvrRemux
+        || m_dvrStopVodBeforeRecording != settings.dvrStopVodBeforeRecording
         || m_dvrStartOffsetMinutes != settings.dvrStartOffsetMinutes
         || m_dvrEndOffsetMinutes != settings.dvrEndOffsetMinutes;
 }
@@ -769,6 +780,7 @@ void SettingsController::reload()
     m_minimizeToTrayOnMinimize = settings.minimizeToTrayOnMinimize;
     m_dvrRecordingsDirectory = normalizeOverridePath(settings.dvrRecordingsDirectory);
     m_dvrRemuxToMkv = settings.dvrRemuxToMkv;
+    m_dvrStopVodBeforeRecording = settings.dvrStopVodBeforeRecording;
     m_dvrStartOffsetMinutes = settings.dvrStartOffsetMinutes;
     m_dvrEndOffsetMinutes = settings.dvrEndOffsetMinutes;
     emit validationChanged();
@@ -820,6 +832,7 @@ bool SettingsController::save()
     settings.minimizeToTrayOnMinimize = m_minimizeToTrayOnMinimize;
     settings.dvrRecordingsDirectory = normalizeOverridePath(m_dvrRecordingsDirectory);
     settings.dvrRemuxToMkv = dvrRemuxToMkv();
+    settings.dvrStopVodBeforeRecording = m_dvrStopVodBeforeRecording;
     settings.dvrStartOffsetMinutes = m_dvrStartOffsetMinutes;
     settings.dvrEndOffsetMinutes = m_dvrEndOffsetMinutes;
     m_settings->save();
@@ -864,6 +877,7 @@ bool SettingsController::save()
     m_minimizeToTrayOnMinimize = settings.minimizeToTrayOnMinimize;
     m_dvrRecordingsDirectory = settings.dvrRecordingsDirectory;
     m_dvrRemuxToMkv = settings.dvrRemuxToMkv;
+    m_dvrStopVodBeforeRecording = settings.dvrStopVodBeforeRecording;
     m_dvrStartOffsetMinutes = settings.dvrStartOffsetMinutes;
     m_dvrEndOffsetMinutes = settings.dvrEndOffsetMinutes;
 

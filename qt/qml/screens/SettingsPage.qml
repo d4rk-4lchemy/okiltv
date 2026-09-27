@@ -2257,6 +2257,36 @@ Item {
             OverlaySectionPanel {
                 Layout.fillWidth: true
                 panelColor: root.sectionSurface
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingM
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Text {
+                            text: "Stop VOD before recording"
+                            color: Theme.textPrimary
+                            font.pixelSize: 14
+                            font.bold: true
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: "Save progress and stop VOD when a DVR recording starts. Turn off to keep watching VOD while DVR records in the background."
+                            color: Theme.textSecondary
+                            font.pixelSize: 12
+                            wrapMode: Text.Wrap
+                        }
+                    }
+                    FormSwitch {
+                        objectName: "settings.dvrStopVodBeforeRecording"
+                        checked: root.settings.dvrStopVodBeforeRecording
+                        onToggled: root.settings.dvrStopVodBeforeRecording = checked
+                    }
+                }
+            }
+
+            OverlaySectionPanel {
+                Layout.fillWidth: true
+                panelColor: root.sectionSurface
                 panelSpacing: Theme.spacingS
 
                 Text {

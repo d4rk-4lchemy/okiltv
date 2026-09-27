@@ -28,6 +28,7 @@ QVariantMap toVariantMap(const ServerProfile &profile)
         { QStringLiteral("m3UFilePath"), profile.m3uFilePath },
         { QStringLiteral("xmltvUrl"), profile.xmltvUrl },
         { QStringLiteral("catchupSafetyMinutes"), profile.catchupSafetyMinutes },
+        { QStringLiteral("vodEnabled"), profile.vodEnabled },
         { QStringLiteral("autoRefreshIntervalHours"), normalizeAutoRefreshIntervalHours(profile.autoRefreshIntervalHours) },
         { QStringLiteral("lastRefreshed"), profile.lastRefreshed.toUTC().toString(Qt::ISODateWithMs) },
         { QStringLiteral("isActive"), profile.isActive }

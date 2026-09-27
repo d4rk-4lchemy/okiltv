@@ -22,11 +22,11 @@ jobs:
       matrix:
         include:
           - group: core
-            targets: OKILTVQtCoreTests OKILTVQtDatabaseStartupTests
+            targets: OKILTVQtCoreTests OKILTVQtDatabaseStartupTests OKILTVQtVodDomainTests OKILTVQtVodProviderTests OKILTVQtVodStorageTests
           - group: app
-            targets: OKILTVQtAppTests OKILTVQtDownloadTests
+            targets: OKILTVQtAppTests OKILTVQtDownloadTests OKILTVQtVodContractTests
           - group: playback
-            targets: OKILTVQtPlaybackTests OKILTVQtCatchupTests
+            targets: OKILTVQtPlaybackTests OKILTVQtCatchupTests OKILTVQtVodMpvTests
           - group: qml
             targets: ''
           - group: ui

@@ -42,8 +42,11 @@ ApplicationWindow {
     readonly property var downloads: catchupDownloadController
     readonly property var updates: updateCheckController
     readonly property var multiView: multiViewController
+    readonly property var vod: typeof vodRuntime !== "undefined" ? vodRuntime : null
     // qmllint enable unqualified
-    readonly property bool overlayShortcutsEnabled: window.shell.activeOverlay !== "settings" && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
+    readonly property bool vodOpen: window.shell.activeOverlay === "vod"
+    readonly property bool textEditorFocused: activeFocusItem instanceof TextInput || activeFocusItem instanceof TextEdit
+    readonly property bool overlayShortcutsEnabled: window.shell.activeOverlay !== "settings" && !window.vodOpen && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
     readonly property bool liveShortcutsEnabled: window.overlayShortcutsEnabled && !livePage.searchFieldActive
     readonly property var forwardedShortcuts: {
         const shortcuts = [
@@ -176,9 +179,26 @@ ApplicationWindow {
         window.requestAppClose("window")
     }
 
+    function toggleVod() {
+        if (window.textEditorFocused || window.shell.activeOverlay === "settings"
+            || downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
+            return false
+        if (window.vodOpen) closeVod()
+        else {
+            window.shell.openOverlay("vod")
+            vodPage.prepareForOpen()
+        }
+        return true
+    }
+    function closeVod() {
+        window.shell.clearOverlay()
+        window.shell.overlaysVisible = false
+        livePage.forceActiveFocus()
+    }
     function dispatchShortcut(key, modifiers) {
         if (downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
             return false
+        if (window.vodOpen) return key === Qt.Key_Escape ? vodPage.handleEscape() : false
         return livePage.handleWindowKey({
             key: key,
             modifiers: modifiers !== undefined ? modifiers : Qt.NoModifier
@@ -188,6 +208,7 @@ ApplicationWindow {
     function shortcutEnabled(scope) {
         if (downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
             return false
+        if (window.vodOpen) return false
         if (scope === "grid" || scope === "guideOrGrid") {
             return livePage.multiviewSelectionAvailable
                 || (scope === "guideOrGrid" && window.shell.activeOverlay === "guide")
@@ -227,6 +248,14 @@ ApplicationWindow {
     }
 
     Shortcut {
+        sequence: "V"
+        autoRepeat: false
+        enabled: !window.textEditorFocused && window.shell.activeOverlay !== "settings"
+            && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
+        onActivated: window.toggleVod()
+    }
+
+    Shortcut {
         sequence: "M"
         enabled: window.liveShortcutsEnabled
         onActivated: window.dispatchShortcut(Qt.Key_M)
@@ -256,6 +285,25 @@ ApplicationWindow {
         mainWindow: window
         downloadIndicatorVisible: downloadUi.indicatorVisible
         topBarExternalHideLock: windowChromeBar.interactionActive || windowResizeHandles.interactionActive || downloadUi.interactionActive
+    }
+
+    VodMoviesPage {
+        id: vodPage
+        objectName: "ui.vod.page"
+        anchors.fill: parent
+        anchors.topMargin: window.topBarReservedHeight
+        visible: window.vodOpen
+        enabled: visible && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible
+        // qmllint disable unqualified
+        catalog: vodCatalog
+        // qmllint enable unqualified
+        uiTransparency: window.settings.uiTransparency
+        z: 30
+        onCloseRequested: window.closeVod()
+        Connections {
+            target: vodPage.catalog
+            function onPlaybackStarted() { window.closeVod() }
+        }
     }
 
     CatchupDownloads {
@@ -305,6 +353,43 @@ ApplicationWindow {
         running: window.app.isBusy
         visible: running
         z: 20
+    }
+
+    Rectangle {
+        id: vodNotice
+        objectName: "ui.vod.notice"
+        parent: window.Overlay.overlay
+        property string message: ""
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.top: parent.top
+        anchors.topMargin: window.topBarReservedHeight + Theme.spacingL
+        width: Math.min(520, parent.width - 32)
+        height: vodNoticeText.implicitHeight + 24
+        visible: message.length > 0
+        color: Theme.surface
+        radius: Theme.radiusM
+        z: 100
+        Text {
+            id: vodNoticeText
+            anchors.centerIn: parent
+            width: parent.width - 24
+            text: vodNotice.message
+            color: Theme.textPrimary
+            font.pixelSize: 14
+            wrapMode: Text.Wrap
+        }
+        Timer {
+            id: vodNoticeTimer
+            interval: 8000
+            onTriggered: vodNotice.message = ""
+        }
+        Connections {
+            target: window.vod
+            function onNotification(message) {
+                vodNotice.message = message
+                vodNoticeTimer.restart()
+            }
+        }
     }
 
     UpdateAvailableDialog {

@@ -37,13 +37,17 @@ Item {
     readonly property var liveGroups: liveSourceGroupsModel
     readonly property var multiView: multiViewController
     readonly property var dvr: dvrController
+    readonly property var vod: typeof vodRuntime !== "undefined" ? vodRuntime : null
     // qmllint enable unqualified
     property date currentClockTime: new Date()
     readonly property string currentClockText: Qt.locale("en_US").toString(root.currentClockTime, root.dateTime.clockPattern)
     property bool hasPlaybackChannel: root.player.currentChannel.id !== undefined
+    readonly property bool vodActive: root.vod !== null && root.vod.active
+    readonly property bool transportPlaying: root.vodActive ? root.vod.isPlaying : root.player.isPlaying
     property int transportAudioTrackCount: 0
     property int transportSubtitleTrackCount: 0
-    readonly property bool transportTracksReady: root.hasPlaybackChannel
+    readonly property var transportPlayer: root.vodActive ? root.vod : root.player
+    readonly property bool transportTracksReady: root.vodActive ? root.vod.playerObject !== null : root.hasPlaybackChannel
         && !root.player.channelSwitchInProgress && !root.player.channelLoadFailed
     property bool showPlaybackSpinner: (root.player.isLoading
             || root.player.isBuffering
@@ -60,7 +64,7 @@ Item {
     property bool hasActiveProfile: root.app.activeProfileId.length > 0
     readonly property bool multiviewActive: root.multiView.layoutMode !== "off"
     readonly property bool multiviewGridActive: root.multiviewActive && root.multiView.layoutMode !== "pip"
-    readonly property bool showVideoCanvas: root.hasPlaybackChannel || root.multiviewActive
+    readonly property bool showVideoCanvas: root.vodActive || root.hasPlaybackChannel || root.multiviewActive
     readonly property int multiviewVisibleSlots: {
         const tiles = root.multiView.tiles || []
         if (tiles.length > 0) {
@@ -80,6 +84,7 @@ Item {
         return root.multiviewTileData(Number(root.multiView.focusedTileIndex || 0))
     }
     readonly property bool canStopPlaybackAction: {
+        if (root.vodActive) return true
         if (root.multiviewGridActive) {
             const focusedTile = root.focusedMultiviewTileData
             return !!focusedTile && !Boolean(focusedTile.isEmpty)
@@ -320,11 +325,14 @@ Item {
         return Number.isFinite(startMs) && Number.isFinite(stopMs)
             && stopMs > startMs && startMs <= Date.now() && Date.now() < stopMs
     }
-    readonly property string transportTimelineMode: root.player.catchupTimelineActive
+    readonly property string transportTimelineMode: root.vodActive ? "vod" : root.player.catchupTimelineActive
         ? "catchup"
         : (root.player.timeshiftActive ? "timeshift"
             : (root.liveProgramTimelineActive ? "liveProgram"
                 : (root.liveProgramProgressActive ? "liveProgress" : "none")))
+    readonly property real vodPositionFraction: root.vodActive && root.vod.durationSeconds > 0
+        ? Math.max(0, Math.min(1, root.vod.positionSeconds / root.vod.durationSeconds)) : 0
+    readonly property bool vodSeekEnabled: root.vodActive && root.vod.seekable && root.vod.durationSeconds > 0
     readonly property bool transportTimelineActive: root.transportTimelineMode !== "none"
     readonly property bool transportSeekActive: root.player.catchupTimelineActive
         || root.player.timeshiftActive
@@ -349,7 +357,10 @@ Item {
             : nowMs - Math.max(0, Number(root.liveCatchupState.safetySeconds ?? 180)) * 1000
         positionMs: root.transportTimelineUsingCatchup
             ? startMs + Number(root.player.catchupTimelinePositionSeconds || 0) * 1000
-            : Math.min(nowMs, endMs) - Number(root.player.liveBufferBehindLiveSeconds || 0) * 1000
+            // LIVE shares the current-time marker; buffer latency is only shown after rewinding.
+            : (root.timeshiftBadgeShowBehindLive
+                ? Math.min(nowMs, endMs) - Number(root.player.liveBufferBehindLiveSeconds || 0) * 1000
+                : nowMs)
     }
     readonly property real transportBehindLiveSeconds: root.player.catchupTimelineActive
         ? Math.max(0, (Date.now() - Number(root.player.catchupTimelineStartEpochMs || 0)) / 1000
@@ -546,6 +557,11 @@ Item {
     }
 
     function handleStopPlaybackAction() {
+        if (root.vodActive) {
+            root.vod.stop()
+            root.revealUi("pointer")
+            return
+        }
         const handledByRetainedMultiview = root.multiView.stopRetainedPromotedAndRestoreGrid()
         if (!handledByRetainedMultiview) {
             if (root.multiView.layoutMode === "pip" && root.multiView.focusedTileIndex > 0)
@@ -807,6 +823,10 @@ Item {
     }
 
     function seekTimeshiftRelativeWithBadge(seconds) {
+        if (root.vodActive) {
+            if (root.vod.seekable) root.vod.seekRelative(Number(seconds))
+            return true
+        }
         if (!root.transportSeekActive) {
             return false
         }
@@ -836,6 +856,10 @@ Item {
         if (!Number.isFinite(Number(fraction)))
             return false
         const clamped = Math.max(0, Math.min(1, Number(fraction)))
+        if (root.vodActive) {
+            if (root.vodSeekEnabled) root.vod.seekTo(clamped * root.vod.durationSeconds)
+            return root.vodSeekEnabled
+        }
         // Future programme time is an explicit request to resume the live channel.
         if (root.programmeTimelineActive && programmeTimeline.isFuture(clamped, Date.now())) {
             if (root.transportTimelineUsingCatchup) {
@@ -906,6 +930,10 @@ Item {
     }
 
     function togglePauseWithBadge() {
+        if (root.vodActive) {
+            root.vod.togglePause()
+            return
+        }
         if (!root.hasPlaybackChannel)
             return
         if (!root.transportTimelineUsingLiveProgram
@@ -924,7 +952,18 @@ Item {
         liveTimelineNoticeTimer.restart()
     }
 
+    function formatVodTime(seconds) {
+        if (!Number.isFinite(seconds) || seconds < 0) return "--:--"
+        const total = Math.floor(seconds)
+        const hours = Math.floor(total / 3600)
+        const minutes = Math.floor(total / 60) % 60
+        return (hours > 0 ? hours + ":" : "")
+            + String(minutes).padStart(2, "0") + ":" + String(total % 60).padStart(2, "0")
+    }
+
     function timeshiftHoverClockText(fraction) {
+        if (root.vodActive)
+            return root.formatVodTime(Math.max(0, Math.min(1, fraction)) * root.vod.durationSeconds)
         let startMs = 0
         let endMs = 0
         if (root.transportTimelineUsingCatchup) {
@@ -1247,6 +1286,7 @@ Item {
                     || rightChromeHover.hovered
                     || bottomChromeHover.hovered
                     || guideButtonHover.hovered
+                    || vodBackButtonHover.hovered
                     || volumeControl.hoverActive
                     || root.hoverBubbleActive))
     }
@@ -1792,7 +1832,7 @@ Item {
     }
 
     function refreshDebugBubbleData() {
-        const snapshot = root.player.debugOverlaySnapshot()
+        const snapshot = root.transportPlayer.debugOverlaySnapshot()
         root.debugBubbleData = snapshot ? snapshot : ({})
         root.appendDebugBufferSample(
             Number(root.debugBubbleData.bufferDurationSeconds),
@@ -2254,9 +2294,9 @@ Item {
             root.transportSubtitleTrackCount = 0
             return
         }
-        root.transportAudioTrackCount = root.player.audioTracks().length
+        root.transportAudioTrackCount = root.transportPlayer.audioTracks().length
         // The subtitle picker includes a synthetic "None" row (id 0).
-        root.transportSubtitleTrackCount = root.player.subtitleTracks().filter(function(track) {
+        root.transportSubtitleTrackCount = root.transportPlayer.subtitleTracks().filter(function(track) {
             return Number(track.id) !== 0
         }).length
     }
@@ -2271,7 +2311,7 @@ Item {
         root.sourcePickerOpen = false
         root.subtitlePickerOpen = false
         root.subtitlePickerRows = []
-        root.audioPickerRows = root.player.audioTracks()
+        root.audioPickerRows = root.transportPlayer.audioTracks()
         root.audioPickerOpen = true
         const selectedAudio = root.audioPickerRows.find(function(track) { return track.selected })
         root.audioPickerHighlightedId = selectedAudio ? selectedAudio.id
@@ -2330,7 +2370,7 @@ Item {
         if (root.audioPickerHighlightedId < 0) {
             return false
         }
-        root.player.selectAudioTrack(root.audioPickerHighlightedId)
+        root.transportPlayer.selectAudioTrack(root.audioPickerHighlightedId)
         root.closeAudioPicker(false)
         return true
     }
@@ -2345,7 +2385,7 @@ Item {
         root.sourcePickerOpen = false
         root.audioPickerOpen = false
         root.audioPickerRows = []
-        root.subtitlePickerRows = root.player.subtitleTracks()
+        root.subtitlePickerRows = root.transportPlayer.subtitleTracks()
         root.subtitlePickerOpen = true
         const selectedSubtitle = root.subtitlePickerRows.find(function(track) { return track.selected })
         root.subtitlePickerHighlightedId = selectedSubtitle ? selectedSubtitle.id
@@ -2404,7 +2444,7 @@ Item {
         if (root.subtitlePickerHighlightedId < 0) {
             return false
         }
-        root.player.selectSubtitleTrack(root.subtitlePickerHighlightedId)
+        root.transportPlayer.selectSubtitleTrack(root.subtitlePickerHighlightedId)
         root.closeSubtitlePicker(false)
         return true
     }
@@ -2943,6 +2983,10 @@ Item {
     }
 
     function handleWindowKey(event) {
+        if (event.key === Qt.Key_V && event.modifiers === Qt.NoModifier && root.mainWindow)
+            return root.mainWindow.toggleVod()
+        if (root.shell.activeOverlay === "vod") return false
+
         if (root.isMultiviewPromotion(event))
             return root.promoteMultiviewSelection()
         if (root.multiviewSelectionMode && !root.isMultiviewArrow(event)) {
@@ -3165,6 +3209,22 @@ Item {
 
     onKeyboardModeLockedChanged: root.updateAutoHide()
     onTransportTracksReadyChanged: root.refreshTransportTracks()
+    onTransportPlayerChanged: {
+        root.closeAudioPicker(false)
+        root.closeSubtitlePicker(false)
+        root.refreshTransportTracks()
+        root.resetDebugBufferChart()
+        root.resetDebugBitrateChart()
+        if (root.debugBubbleVisible) root.refreshDebugBubbleData()
+    }
+    Connections {
+        target: root.vodActive ? root.vod.playerObject : null
+        function onTrackListReady() {
+            root.refreshTransportTracks()
+            if (root.audioPickerOpen) root.audioPickerRows = root.transportPlayer.audioTracks()
+            if (root.subtitlePickerOpen) root.subtitlePickerRows = root.transportPlayer.subtitleTracks()
+        }
+    }
     onPlayerChanged: Qt.callLater(root.refreshFocusedPlaybackContext)
 
     function refreshFocusedPlaybackContext() {
@@ -3552,6 +3612,13 @@ Item {
         anchors.fill: parent
         visible: root.showVideoCanvas
         clip: true
+
+        MpvVideoItem {
+            objectName: "vodVideo"
+            anchors.fill: parent
+            visible: root.vodActive
+            playerObject: root.vodActive ? root.vod.playerObject : null
+        }
 
         Repeater {
             model: root.multiviewVisibleSlots
@@ -4444,7 +4511,7 @@ Item {
 
     Item {
         anchors.centerIn: parent
-        visible: !root.hasPlaybackChannel
+        visible: !root.vodActive && !root.hasPlaybackChannel
             && !root.multiviewActive
             && !root.multiviewRetainedSelectionVisible
         z: 3
@@ -4546,6 +4613,7 @@ Item {
 
     Item {
         id: leftChrome
+        visible: !root.vodActive || root.audioPickerOpen || root.subtitlePickerOpen
         objectName: "ui.region.left_pane"
         readonly property bool leftPaneVisible: root.showShellChrome || root.leftPickerOpen || root.pendingEmptyPipActive
         width: root.leftPanelWidth
@@ -5639,7 +5707,39 @@ Item {
     }
 
     IconActionButton {
+        id: vodBackButton
+        objectName: "ui.vod.backToCatalog"
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.leftMargin: Theme.spacingL
+        anchors.topMargin: root.topOverlayMargin
+        width: 48
+        height: 48
+        visible: root.vodActive && opacity > 0
+        opacity: root.showShellChrome ? 1 : 0
+        enabled: root.vodActive && root.showShellChrome && !root.chromeAnimationsRunning
+        z: 2
+        borderless: true
+        glassMode: true
+        iconSource: root.iconPath("left-arrow.svg")
+        caption: "Back to movies (V)"
+        onClicked: if (root.mainWindow) root.mainWindow.toggleVod()
+
+        HoverHandler {
+            id: vodBackButtonHover
+            target: vodBackButton
+            onHoveredChanged: root.updateAutoHide()
+        }
+
+        Behavior on opacity {
+            NumberAnimation { duration: Theme.transitionMs * 0.8 }
+        }
+    }
+
+    IconActionButton {
         id: guideButtonChrome
+        objectName: "ui.live.guideButton"
+        visible: !root.vodActive
         width: (root.shell.layoutBand === "compact" ? 52 : 56) * 4
         height: 48
         anchors.top: parent.top
@@ -5683,6 +5783,7 @@ Item {
 
     Item {
         id: rightChrome
+        visible: !root.vodActive
         objectName: "ui.region.right_pane"
         width: root.rightPanelWidth
         anchors.right: parent.right
@@ -5828,7 +5929,7 @@ Item {
     EpgHoverBubble {
         timePattern: root.dateTime.timePattern
         id: epgHoverBubble
-        visible: root.hoverBubbleVisible
+        visible: !root.vodActive && root.hoverBubbleVisible
             && root.showShellChrome
             && root.shell.activeOverlay === "none"
             && root.hoverAnchorItem !== null
@@ -5881,7 +5982,7 @@ Item {
 
     Item {
         id: hoverBubbleBridge
-        visible: root.hoverBubbleVisible
+        visible: !root.vodActive && root.hoverBubbleVisible
             && root.showShellChrome
             && root.shell.activeOverlay === "none"
             && root.hoverAnchorItem !== null
@@ -5962,7 +6063,7 @@ Item {
         readonly property int controlsTopPadding: root.transportTimelineActive ? 8 : 4
         readonly property int controlsBottomPadding: 4
         readonly property int controlsVerticalGap: root.transportTimelineActive ? 3 : 0
-        readonly property bool timeshiftNoticeVisible: (root.transportTimelineUsingCatchup
+        readonly property bool timeshiftNoticeVisible: !root.vodActive && (root.transportTimelineUsingCatchup
                 ? root.player.catchupTimelineNoticeText
                 : (root.transportTimelineUsingLiveProgram
                     ? root.liveTimelineNoticeText
@@ -6034,7 +6135,9 @@ Item {
 
                         Text {
                             Layout.alignment: Qt.AlignVCenter
-                            text: root.formatTimeshiftClock(root.transportTimelineUsingCatchup
+                            objectName: "ui.transport.position"
+                            text: root.vodActive ? root.formatVodTime(root.vod.positionSeconds)
+                                : root.formatTimeshiftClock(root.transportTimelineUsingCatchup
                                 ? root.player.catchupTimelineStartEpochMs
                                 : (root.transportTimelineUsingTimeshift
                                     ? root.player.timeshiftWindowStartEpochMs
@@ -6048,7 +6151,8 @@ Item {
                             Layout.alignment: Qt.AlignVCenter
                             Layout.fillWidth: true
                             visible: root.transportTimelineActive
-                            text: root.transportTimelineUsingCatchup
+                            objectName: "ui.transport.title"
+                            text: root.vodActive ? root.vod.title : root.transportTimelineUsingCatchup
                                 ? (root.player.catchupProgramLabel || "")
                                 : (root.transportTimelineUsingTimeshift
                                     ? root.app.timeshiftProgramTitle
@@ -6100,7 +6204,9 @@ Item {
 
                         Text {
                             Layout.alignment: Qt.AlignVCenter
-                            text: root.formatTimeshiftClock(root.transportTimelineUsingCatchup
+                            objectName: "ui.transport.duration"
+                            text: root.vodActive ? root.formatVodTime(root.vod.durationSeconds)
+                                : root.formatTimeshiftClock(root.transportTimelineUsingCatchup
                                 ? root.player.catchupTimelineEndEpochMs
                                 : (root.transportTimelineUsingTimeshift
                                     ? root.player.timeshiftLiveEdgeEpochMs
@@ -6123,7 +6229,7 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             height: 6
                             radius: 3
-                            color: root.programmeTimelineActive || root.transportTimelineUsingLiveProgress ? "#283542" : "#36454f"
+                            color: root.programmeTimelineActive || root.transportTimelineUsingLiveProgress ? "#283542" : Theme.vodTimelineTrack
 
                             // Published archive, including material ahead of the watched position.
                             Rectangle {
@@ -6172,7 +6278,7 @@ Item {
                             }
 
                             Rectangle {
-                                width: root.transportTimelineUsingLiveProgress
+                                width: root.vodActive ? parent.width * root.vodPositionFraction : root.transportTimelineUsingLiveProgress
                                     ? parent.width * Math.min(100, Math.max(0,
                                         Number((root.playbackNowNext.currentProgram || {}).progressPercent || 0))) / 100
                                     : (root.programmeTimelineActive
@@ -6182,12 +6288,12 @@ Item {
                                             : parent.width))
                                 height: parent.height
                                 radius: parent.radius
-                                color: root.transportTimelineUsingLiveProgress ? Theme.accent : "#a9d8ff"
+                                color: root.transportTimelineUsingLiveProgress ? Theme.accent : Theme.vodTimelineFill
                             }
 
                             Rectangle {
                                 visible: root.programmeTimelineActive && programmeTimeline.hasFuture
-                                x: Math.max(0, Math.min(parent.width - width, parent.width * programmeTimeline.nowFraction - width / 2))
+                                x: parent.width * programmeTimeline.nowFraction - width / 2
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 2
                                 height: parent.height
@@ -6205,6 +6311,8 @@ Item {
                                 border.color: "#26445b"
                                 anchors.verticalCenter: parent.verticalCenter
                                 x: {
+                                    if (root.vodActive)
+                                        return timeshiftTrack.width * root.vodPositionFraction - width / 2
                                     if (root.programmeTimelineActive)
                                         return timeshiftTrack.width * programmeTimeline.positionFraction - width / 2
                                     const available = Math.max(1, timeshiftTrack.width - width)
@@ -6218,7 +6326,7 @@ Item {
 
                             MouseArea {
                                 anchors.fill: parent
-                                enabled: !root.transportTimelineUsingLiveProgress
+                                enabled: root.vodActive ? root.vodSeekEnabled : !root.transportTimelineUsingLiveProgress
                                 hoverEnabled: true
 
                                 onEnabledChanged: {
@@ -6304,12 +6412,12 @@ Item {
                     implicitWidth: bottomChrome.mediaButtonSize
                     implicitHeight: bottomChrome.mediaButtonSize
                     iconInset: 1
-                    iconSource: root.iconPath(root.hasPlaybackChannel && root.player.isPlaying ? "pause.svg" : "play.svg")
+                    iconSource: root.iconPath((root.vodActive || root.hasPlaybackChannel) && root.transportPlaying ? "pause.svg" : "play.svg")
                     objectName: "ui.live.playPause"
-                    caption: root.hasPlaybackChannel && root.player.isPlaying ? "Pause" : "Play"
-                    enabled: root.hasPlaybackChannel || root.hasSelectedChannel
+                    caption: (root.vodActive || root.hasPlaybackChannel) && root.transportPlaying ? "Pause" : "Play"
+                    enabled: root.vodActive || root.hasPlaybackChannel || root.hasSelectedChannel
                     onClicked: {
-                        if (root.hasPlaybackChannel) {
+                        if (root.vodActive || root.hasPlaybackChannel) {
                             root.togglePauseWithBadge()
                         } else {
                             root.playSelection("pointer")
@@ -6787,7 +6895,7 @@ Item {
         anchors.bottomMargin: root.showShellChrome
             ? bottomChrome.height + Theme.spacingM + 12
             : Theme.spacingL
-        visible: root.channelChangeBubbleVisible && root.hasPlaybackChannel && !root.leftPickerOpen && !root.multiviewActive
+        visible: !root.vodActive && root.channelChangeBubbleVisible && root.hasPlaybackChannel && !root.leftPickerOpen && !root.multiviewActive
         opacity: visible ? 1 : 0
         z: 7
 

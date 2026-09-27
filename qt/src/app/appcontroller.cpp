@@ -487,6 +487,7 @@ AppController::AppController(
     });
     connect(m_timeshiftController, &TimeshiftController::statusMessageRequested, this, &AppController::setStatusText);
     connect(m_multiViewController, &MultiViewController::statusMessageRequested, this, &AppController::setStatusText);
+    connect(m_profilesModel, &ProfilesModel::profileMutationFailed, this, &AppController::setStatusText);
     connect(m_multiViewController, &MultiViewController::primaryTileAssignmentRequested, this, [this](const int channelId) {
         const auto channel = m_channelListModel->channelById(channelId);
         if (!channel.has_value()) {

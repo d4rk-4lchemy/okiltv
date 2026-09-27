@@ -7,6 +7,7 @@
 #include <QJsonArray>
 #include <QSet>
 #include <QString>
+#include <functional>
 
 namespace OKILTV::Core {
 
@@ -39,6 +40,10 @@ public:
     QString settingsFilePath() const;
     QString lastLoadError() const;
     QString lastSaveError() const;
+    // Optional application-owned barrier; nullptr replacement means deletion.
+    // Return only after VOD progress/stop and durable publication fencing finish.
+    std::function<bool(const QUuid &, const ServerProfile *, QString *)> prepareProfileMutation;
+    std::function<void(const QUuid &, bool)> profileMutationFinished;
 
 private:
     void resetToDefaultsWithError(const QString &loadError);
@@ -60,6 +65,7 @@ private:
     mutable QString m_lastLoadError;
     QJsonArray m_unavailableProtectedSettings;
     mutable QString m_lastSaveError;
+    bool m_profileMutationInProgress = false;
 };
 
 } // namespace OKILTV::Core

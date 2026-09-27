@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(OKILTVQt VERSION 0.5.4 LANGUAGES CXX)
+project(OKILTVQt VERSION 0.6.0 LANGUAGES CXX)
 
 # Keep runtime identification independent of packaging metadata.  Core code also
 # uses this in tests, where QCoreApplication may not have an application version.
@@ -59,7 +59,16 @@ endif ()
 
 qt_standard_project_setup()
 
+add_subdirectory(src/core/vod)
+add_subdirectory(src/app/vod)
+
 qt_add_executable(OKILTVQt
+    src/player/mpvplaybackengine.cpp
+    src/app/vod/vodruntime.cpp
+    src/app/vod/vodmediaprobe.cpp
+    src/app/vod/vodmediaprobe.h
+    src/app/vod/vodartworkcache.cpp
+    src/app/vod/vodcatalogmodel.cpp
     src/app/catchupdownloadcontroller.cpp
     src/app/catchuparchivetransfer.cpp
     src/app/catchuparchivetransfer.h
@@ -194,6 +203,7 @@ qt_add_resources(OKILTVQt app_assets
         resources/icons/favourites.svg
         resources/icons/fullscreen-close.svg
         resources/icons/fullscreen-enter.svg
+        resources/icons/left-arrow.svg
         resources/icons/next-channel.svg
         resources/icons/on-top.svg
         resources/icons/pause.svg
@@ -238,6 +248,8 @@ if (UNIX AND NOT APPLE)
 endif ()
 
 target_link_libraries(OKILTVQt PRIVATE
+    OKILTVVodApplication
+    OKILTVVodInfrastructure
     ${OKILTV_SECRET_LIB}
     Qt6::Concurrent
     Qt6::Core
@@ -295,6 +307,7 @@ set(OKILTV_QML_FILES
     qml/components/WindowResizeHandles.qml
     qml/components/SourceGroupsList.qml
     qml/components/SourceManagerPane.qml
+    qml/screens/VodMoviesPage.qml
     qml/screens/GuidePage.qml
     qml/screens/LiveTvPage.qml
     qml/screens/SettingsPage.qml

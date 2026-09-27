@@ -197,6 +197,9 @@ bool ProfilesModel::replaceProfile(const QString &profileId, const QVariantMap &
     if (changes.contains(QStringLiteral("catchupSafetyMinutes"))) {
         profile.catchupSafetyMinutes = std::clamp(changes.value(QStringLiteral("catchupSafetyMinutes")).toInt(), 0, 30);
     }
+    if (changes.contains(QStringLiteral("vodEnabled"))) {
+        profile.vodEnabled = changes.value(QStringLiteral("vodEnabled")).toBool();
+    }
     if (changes.contains(QStringLiteral("m3UUrl"))) {
         profile.m3uUrl = changes.value(QStringLiteral("m3UUrl")).toString().trimmed();
     }
@@ -225,6 +228,7 @@ bool ProfilesModel::replaceProfile(const QString &profileId, const QVariantMap &
     }
 
     if (!m_settings->replaceProfile(summary.id, profile)) {
+        emit profileMutationFailed(m_settings->lastSaveError());
         return false;
     }
     emit dataChanged(index(row, 0), index(row, 0));
@@ -241,6 +245,7 @@ bool ProfilesModel::removeProfile(const QString &profileId)
 
     const auto oldActive = activeProfileId();
     if (!m_settings->removeProfile(parsedId)) {
+        emit profileMutationFailed(m_settings->lastSaveError());
         return false;
     }
     if (oldActive != activeProfileId()) {

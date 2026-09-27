@@ -40,6 +40,8 @@ struct ServerProfile
     QString xtreamPassword;
     QString xtreamServerTimezone;
     int catchupSafetyMinutes { 3 };
+    bool vodEnabled { false };
+    quint64 vodCredentialRevision { 1 };
 
     QString m3uUrl;
     QString m3uFilePath;
@@ -129,6 +131,8 @@ struct AppSettings
     QString timeFormat { QStringLiteral("system") };
     QString theme { QStringLiteral("Dark") };
     QStringList skippedUpdateVersions;
+    bool vodEnabled { false };
+    bool vodSeriesEnabled { false };
     QString lastSection { QStringLiteral("live") };
     bool showOnTopModeIndicator { true };
     bool preventDisplaySleep { true };
@@ -171,6 +175,7 @@ struct AppSettings
     bool reopenMaximizedOnLaunch { false };
     QString dvrRecordingsDirectory;
     bool dvrRemuxToMkv { true };
+    bool dvrStopVodBeforeRecording { true };
     int dvrStartOffsetMinutes { 2 };
     int dvrEndOffsetMinutes { 2 };
     QList<DvrScheduleEntry> dvrSchedules;

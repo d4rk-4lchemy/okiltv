@@ -202,6 +202,79 @@ bool MultiViewController::hasCatchupSession() const
     });
 }
 
+bool MultiViewController::hasRecordingForHandoff() const
+{
+    if (m_originalController->isRecording() || m_playerController->isRecording()
+        || (m_pipController && m_pipController->isRecording())) return true;
+    for (const auto &slot : m_secondarySlots)
+        if ((slot.controller && slot.controller->isRecording()) || (slot.controls && slot.controls->isRecording())) return true;
+    return false;
+}
+
+void MultiViewController::releasePlaybackForHandoff(const QUuid &request, std::function<void(bool)> completion)
+{
+    if (hasRecordingForHandoff()) { completion(false); return; }
+    QSet<PlayerController *> controllers{m_originalController, m_playerController};
+    if (m_pipController) controllers.insert(m_pipController.get());
+    QSet<Player::MpvPlayer *> backends;
+    for (const auto &slot : m_secondarySlots) {
+        if (slot.controller) controllers.insert(slot.controller);
+        if (slot.controls) controllers.insert(slot.controls.get());
+        if (slot.playbackPlayer()) backends.insert(slot.playbackPlayer());
+    }
+    for (auto *controller : controllers)
+        for (auto *backend : controller->playbackBackendsForHandoff()) backends.insert(backend);
+    if (m_adoptedPrimaryPlayer) backends.insert(m_adoptedPrimaryPlayer.get());
+    for (const auto &backend : m_retiredPlayers) backends.insert(backend.get());
+
+    auto *guard = new QObject(this);
+    struct Release {
+        QSet<QObject *> pending;
+        bool issued = false;
+        bool success = true;
+        std::function<void(bool)> completion;
+    };
+    auto release = std::make_shared<Release>();
+    release->completion = std::move(completion);
+    const auto finish = [release, guard](bool timedOut = false) {
+        if (!release->completion || (!timedOut && (!release->issued || !release->pending.isEmpty()))) return;
+        auto done = std::move(release->completion);
+        guard->deleteLater();
+        done(!timedOut && release->success);
+    };
+    QList<QPointer<Player::MpvPlayer>> retained;
+    for (auto *backend : backends) {
+        release->pending.insert(backend);
+        retained.append(backend);
+        connect(backend, &Player::MpvPlayer::handoffStopped, guard, [release, finish, backend, request](const QUuid &token, bool success) {
+            if (token != request) return;
+            release->pending.remove(backend);
+            release->success = release->success && success;
+            finish();
+        });
+        connect(backend, &QObject::destroyed, guard, [release, finish, backend]() {
+            release->pending.remove(backend);
+            finish();
+        });
+    }
+    QTimer::singleShot(9000, guard, [finish]() { finish(true); });
+    m_swappingPrimaryAndSecondary = true;
+    for (auto *controller : controllers) controller->stop();
+    const bool layoutChanged = isActive();
+    m_layoutMode = QStringLiteral("off");
+    setFocusedTileIndexInternal(0, false);
+    clearAllSecondarySlots();
+    clearRetainedSelectionTracking();
+    clearDegradePrompt(true);
+    resetDegradeMonitor();
+    m_swappingPrimaryAndSecondary = false;
+    if (layoutChanged) emit layoutModeChanged();
+    emitTilesChanged();
+    for (const auto &backend : retained) if (backend) backend->stopForHandoff(request);
+    release->issued = true;
+    finish();
+}
+
 void MultiViewController::shutdownPlaybackSessions()
 {
     m_swappingPrimaryAndSecondary = true;
@@ -434,6 +507,7 @@ bool MultiViewController::focusedTileIsPrimary() const
 
 bool MultiViewController::assignResolvedChannel(const Channel &channel)
 {
+    if (playbackStartGate && playbackStartGate([this, channel]() { assignResolvedChannel(channel); })) return true;
     if (!isActive()) {
         return false;
     }
@@ -482,6 +556,7 @@ void MultiViewController::cycleLayout()
 
 void MultiViewController::setLayoutMode(const QString &mode)
 {
+    if (playbackStartGate && playbackStartGate([this, mode]() { setLayoutMode(mode); })) return;
     if (hasCatchupSession() && isGridLayout(normalizedLayoutModeValue(mode))) {
         emit statusMessageRequested(QStringLiteral("Multiview is unavailable during catch-up playback."));
         return;
@@ -506,6 +581,7 @@ void MultiViewController::setLayoutMode(const QString &mode)
 
 bool MultiViewController::togglePictureInPicture(const int channelId)
 {
+    if (playbackStartGate && playbackStartGate([this, channelId]() { togglePictureInPicture(channelId); })) return true;
     if (!multiviewEnabled()) {
         emit statusMessageRequested(QStringLiteral("Multiview is disabled in Settings."));
         return false;
@@ -742,6 +818,7 @@ void MultiViewController::assignChannelToFocusedTile(const int channelId)
 
 void MultiViewController::assignChannelToPictureInPicture(const int channelId)
 {
+    if (playbackStartGate && playbackStartGate([this, channelId]() { assignChannelToPictureInPicture(channelId); })) return;
     if (!multiviewEnabled()) {
         return;
     }

@@ -1,3 +1,4 @@
+#include "playback/trackpresentation.h"
 #include "playercontroller.h"
 
 #include "timeshiftcontroller.h"
@@ -1199,60 +1200,14 @@ QVariantMap PlayerController::debugOverlaySnapshot()
     };
 }
 
-static QString trackSubtitle(const QVariantMap &track)
-{
-    auto title = track.value(QStringLiteral("title")).toString().trimmed();
-    if (!title.isEmpty()) {
-        return title;
-    }
-    return track.value(QStringLiteral("lang")).toString().trimmed();
-}
-
 QVariantList PlayerController::audioTracks()
 {
-    const auto *activePlayer = playbackPlayer();
-    QVariantList result;
-    int displayIndex = 1;
-    for (const auto &t : activePlayer->trackList()) {
-        const auto tm = t.toMap();
-        if (tm.value(QStringLiteral("type")).toString() != QLatin1String("audio")) {
-            continue;
-        }
-        QVariantMap entry;
-        entry[QStringLiteral("id")]       = tm.value(QStringLiteral("id"));
-        entry[QStringLiteral("name")]     = QStringLiteral("Audio #%1").arg(displayIndex++);
-        entry[QStringLiteral("subtitle")] = trackSubtitle(tm);
-        entry[QStringLiteral("selected")] = tm.value(QStringLiteral("selected")).toBool();
-        result.append(entry);
-    }
-    return result;
+    return Playback::audioTracks(playbackPlayer());
 }
 
 QVariantList PlayerController::subtitleTracks()
 {
-    const auto *activePlayer = playbackPlayer();
-    QVariantMap none;
-    none[QStringLiteral("id")]       = 0;
-    none[QStringLiteral("name")]     = QStringLiteral("Subtitle #0");
-    none[QStringLiteral("subtitle")] = QStringLiteral("None");
-    const auto tracks = activePlayer->trackList();
-    none[QStringLiteral("selected")] = Core::selectedTrackId(tracks, QStringLiteral("sub")) == 0;
-    QVariantList result;
-    result.append(none);
-    int displayIndex = 1;
-    for (const auto &t : tracks) {
-        const auto tm = t.toMap();
-        if (tm.value(QStringLiteral("type")).toString() != QLatin1String("sub")) {
-            continue;
-        }
-        QVariantMap entry;
-        entry[QStringLiteral("id")]       = tm.value(QStringLiteral("id"));
-        entry[QStringLiteral("name")]     = QStringLiteral("Subtitle #%1").arg(displayIndex++);
-        entry[QStringLiteral("subtitle")] = trackSubtitle(tm);
-        entry[QStringLiteral("selected")] = tm.value(QStringLiteral("selected")).toBool();
-        result.append(entry);
-    }
-    return result;
+    return Playback::subtitleTracks(playbackPlayer());
 }
 
 void PlayerController::selectAudioTrack(const int id)
@@ -1878,6 +1833,14 @@ void PlayerController::setTimeshiftController(TimeshiftController *controller)
     emit timeshiftStateChanged();
 }
 
+QList<Player::MpvPlayer *> PlayerController::playbackBackendsForHandoff()
+{
+    QSet<Player::MpvPlayer *> backends{&m_player, &m_catchupStandbyPlayer};
+    for (auto *backend : {m_sharedPlaybackPlayer.data(), m_catchupSeamlessStandbyPlayer.data(), m_catchupSeamlessPrewarmPlayer.data()})
+        if (backend) backends.insert(backend);
+    return backends.values();
+}
+
 Player::MpvPlayer *PlayerController::primaryBasePlayer()
 {
     return &m_player;
@@ -1919,6 +1882,12 @@ void PlayerController::attachSharedPlayback(
     const bool protectedSession,
     const bool stopBasePlayerOnInitialAttach)
 {
+    if (playbackStartGate) {
+        QPointer<Player::MpvPlayer> backend(sharedPlayer);
+        if (playbackStartGate([this, backend, channel, protectedSession, stopBasePlayerOnInitialAttach]() {
+            if (backend) attachSharedPlayback(backend, channel, protectedSession, stopBasePlayerOnInitialAttach);
+        })) return;
+    }
     ++m_playbackGeneration;
     if (sharedPlayer == nullptr) {
         return;
@@ -3735,6 +3704,7 @@ QString PlayerController::recoveryLoadfileOptions() const
 
 void PlayerController::playChannel(const Channel &channel, const QString &playbackUrl)
 {
+    if (playbackStartGate && playbackStartGate([this, channel, playbackUrl]() { playChannel(channel, playbackUrl); })) return;
     ++m_playbackGeneration;
     checkpointCatchupProgress();
     auto *activePlayer = playbackPlayer();
@@ -3818,6 +3788,10 @@ void PlayerController::playCatchupChannel(
     const bool endless,
     std::optional<Core::EpgEntry> program)
 {
+    if (playbackStartGate && playbackStartGate([=, this]() {
+        playCatchupChannel(channel, catchupUrl, programLabel, programStartUtc, programStopUtc, canonicalCatchupUrl,
+            initialProgramSeekSeconds, initialStreamBaseOffsetSeconds, initialTimelinePositionSeconds, safetySeconds, endless, program);
+    })) return;
     ++m_playbackGeneration;
     auto *activePlayer = playbackPlayer();
     if (activePlayer == nullptr) {
@@ -3923,6 +3897,9 @@ void PlayerController::playCurrentPlaybackUrl(
     const bool pauseWhenReady,
     const QString &loadfileOptions)
 {
+    if (playbackStartGate && playbackStartGate([this, url, pauseWhenReady, loadfileOptions]() {
+        playCurrentPlaybackUrl(url, pauseWhenReady, loadfileOptions);
+    })) return;
     if (!m_currentChannel.has_value()) {
         return;
     }

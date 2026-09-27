@@ -141,6 +141,7 @@ class CoreTests final : public QObject
 private slots:
     void channelPublicationRejectsObsoleteImports();
     void sourceEditInvalidatesChannelImport();
+    void vodSourceMutationGuardPreservesCredentialsOnFailure();
     void initTestCase() { OKILTV::Core::useIsolatedSecretKeyForTests(); }
     void channelTrackPreferencesRoundTrip();
     void trackPreferencesMatchIdentity();
@@ -414,6 +415,37 @@ void CoreTests::trackPreferencesMatchIdentity()
     const auto unnamed = makeTrackPreference(anonymous, audio, 2);
     QCOMPARE(matchTrackPreference(anonymous, audio, unnamed), 2);
     QCOMPARE(matchTrackPreference({ track(2, {}, {}) }, audio, unnamed), -1);
+    const QVariantList probedActual {
+        QVariantMap{{QStringLiteral("type"), audio}, {QStringLiteral("id"), 5}, {QStringLiteral("title"), QStringLiteral("Main")},
+            {QStringLiteral("lang"), QStringLiteral("pol")}, {QStringLiteral("codec"), QStringLiteral("aac")}},
+        QVariantMap{{QStringLiteral("type"), audio}, {QStringLiteral("id"), 8}, {QStringLiteral("title"), QStringLiteral("Original")},
+            {QStringLiteral("lang"), QStringLiteral("eng")}, {QStringLiteral("codec"), QStringLiteral("ac3")}}
+    };
+    const QJsonObject probedPreference{{QStringLiteral("mode"), QStringLiteral("track")},
+        {QStringLiteral("ordinal"), 1}, {QStringLiteral("title"), QStringLiteral("original")},
+        {QStringLiteral("lang"), QStringLiteral("eng")}, {QStringLiteral("codec"), QStringLiteral("ac3")}};
+    QCOMPARE(matchTrackPreference(probedActual, audio, probedPreference), 8);
+    auto modernMpvTracks = probedActual;
+    auto english = modernMpvTracks[1].toMap();
+    english[QStringLiteral("lang")] = QStringLiteral("en");
+    modernMpvTracks[1] = english;
+    QCOMPARE(matchTrackPreference(modernMpvTracks, audio, probedPreference), 8);
+    QCOMPARE(matchTrackPreference(probedActual, audio,
+        makeTrackPreference(modernMpvTracks, audio, 8)), 8);
+    const QVariantList polishSubtitles {
+        QVariantMap{{QStringLiteral("type"), QStringLiteral("sub")}, {QStringLiteral("id"), 1},
+            {QStringLiteral("lang"), QStringLiteral("pl")}, {QStringLiteral("codec"), QStringLiteral("subrip")}},
+        QVariantMap{{QStringLiteral("type"), QStringLiteral("sub")}, {QStringLiteral("id"), 2},
+            {QStringLiteral("lang"), QStringLiteral("pl")}, {QStringLiteral("codec"), QStringLiteral("subrip")},
+            {QStringLiteral("forced"), true}, {QStringLiteral("default"), true}}
+    };
+    const QJsonObject polishChoice{{QStringLiteral("mode"), QStringLiteral("track")},
+        {QStringLiteral("ordinal"), 0}, {QStringLiteral("lang"), QStringLiteral("pol")},
+        {QStringLiteral("codec"), QStringLiteral("subrip")}};
+    QCOMPARE(matchTrackPreference(polishSubtitles, QStringLiteral("sub"), polishChoice), 1);
+    QCOMPARE(normalizedTrackLanguage(QStringLiteral(" ger ")), normalizedTrackLanguage(QStringLiteral("deu")));
+    QCOMPARE(normalizedTrackLanguage(QStringLiteral("unknown-a")), QStringLiteral("unknown-a"));
+    QVERIFY(normalizedTrackLanguage(QString{}).isEmpty());
     QCOMPARE(matchTrackPreference({}, QStringLiteral("sub"), makeTrackPreference({}, QStringLiteral("sub"), 0)), 0);
     QVERIFY(makeTrackPreference(original, audio, 99).isEmpty());
     QCOMPARE(matchTrackPreference(original, audio, QJsonObject {}), -1);
@@ -2590,6 +2622,50 @@ void CoreTests::channelPublicationRejectsObsoleteImports()
     DatabaseService(dir.filePath(QStringLiteral("iptv.db"))).removeProfileData(profile);
     QVERIFY(!db.publishChannels(profile, removedToken, older, true));
     QVERIFY(db.loadChannels(profile).isEmpty());
+}
+
+void CoreTests::vodSourceMutationGuardPreservesCredentialsOnFailure()
+{
+    QTemporaryDir directory;
+    SettingsManager settings(directory.filePath(QStringLiteral("settings.json")));
+    ServerProfile profile;
+    profile.xtreamBaseUrl = QStringLiteral("https://fixture.invalid");
+    profile.xtreamUsername = QStringLiteral("synthetic");
+    profile.xtreamPassword = QStringLiteral("before");
+    profile.vodEnabled = true;
+    QVERIFY(settings.addProfile(profile));
+    bool allow = false;
+    int preparations = 0;
+    int completions = 0;
+    bool validPreparation = true;
+    settings.prepareProfileMutation = [&](const QUuid &id, const ServerProfile *replacement, QString *) {
+        ++preparations;
+        validPreparation = validPreparation && id == profile.id
+            && (!replacement || replacement->vodCredentialRevision == 2);
+        return allow;
+    };
+    settings.profileMutationFinished = [&](const QUuid &, bool success) { ++completions; QCOMPARE(success, allow); };
+    auto edited = profile;
+    edited.xtreamPassword = QStringLiteral("after");
+    QVERIFY(!settings.replaceProfile(profile.id, edited));
+    QCOMPARE(settings.profileById(profile.id)->xtreamPassword, profile.xtreamPassword);
+    QCOMPARE(settings.profileById(profile.id)->vodCredentialRevision, quint64(1));
+    allow = true;
+    QVERIFY(settings.replaceProfile(profile.id, edited));
+    QCOMPARE(settings.profileById(profile.id)->vodCredentialRevision, quint64(2));
+    edited = *settings.profileById(profile.id);
+    edited.name = QStringLiteral("Only a label");
+    QVERIFY(settings.replaceProfile(profile.id, edited));
+    QCOMPARE(preparations, 2); // descriptive metadata never stops playback
+    allow = false;
+    QVERIFY(!settings.removeProfile(profile.id));
+    QVERIFY(settings.profileById(profile.id));
+    QCOMPARE(completions, 3);
+    QVERIFY(validPreparation);
+    SettingsManager restarted(settings.settingsFilePath());
+    restarted.load();
+    QVERIFY(restarted.profileById(profile.id)->vodEnabled);
+    QCOMPARE(restarted.profileById(profile.id)->vodCredentialRevision, quint64(2));
 }
 
 void CoreTests::sourceEditInvalidatesChannelImport()

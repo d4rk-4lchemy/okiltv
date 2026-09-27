@@ -177,6 +177,11 @@ QString AppDataPaths::epgCacheFile(const QUuid &profileId)
     return QDir(epgCacheDirectory()).filePath(QStringLiteral("%1.cache").arg(profileId.toString(QUuid::WithoutBraces).toLower()));
 }
 
+QString AppDataPaths::vodArtworkDirectory(const QString &dataRoot)
+{
+    return QDir(dataRoot.isEmpty() ? dataDirectory() : dataRoot).filePath(QStringLiteral("vod-artwork"));
+}
+
 QString AppDataPaths::iconCacheDirectory()
 {
     return ensureExists(QDir(dataDirectory()).filePath(QStringLiteral("icons")));

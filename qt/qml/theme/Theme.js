@@ -14,6 +14,11 @@ var textSecondary = "#aac0d3"
 var textMuted = "#8096ab"
 var channelProgressTrack = "#424242"
 var channelProgressFill = "#929292"
+// Shared VOD transport and poster progress colors.
+var vodLibraryBackground = "#f508131d"
+var vodLibrarySidebar = "#800d1a27"
+var vodTimelineTrack = "#36454f"
+var vodTimelineFill = "#a9d8ff"
 var success = "#5ac88f"
 var warning = "#d4aa56"
 var danger = "#e17474"
@@ -42,3 +47,16 @@ var spacingL = 24
 var spacingXL = 36
 var railWidth = 104
 var transitionMs = 180
+
+// Opaque, compact labels remain legible on bright movie artwork.
+var vodResolutionText = "#ffffff"
+function vodResolutionColor(label) {
+    switch (label) {
+    case "480p": return "#475569"
+    case "720p": return "#1d4ed8"
+    case "1080p": return "#15803d"
+    case "1440p": return "#7e22ce"
+    case "4K": return "#a16207"
+    default: return "#475569"
+    }
+}

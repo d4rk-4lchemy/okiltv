@@ -212,7 +212,7 @@ QString ShellController::computeLayoutBand(const int width, const bool fullscree
 QString ShellController::normalizeOverlayName(const QString &value)
 {
     auto normalized = value.trimmed().toLower();
-    if (normalized == QStringLiteral("guide") || normalized == QStringLiteral("settings")) {
+    if (normalized == QStringLiteral("guide") || normalized == QStringLiteral("settings") || normalized == QStringLiteral("vod")) {
         return normalized;
     }
     return QStringLiteral("none");

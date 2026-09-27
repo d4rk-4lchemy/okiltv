@@ -1,4 +1,6 @@
 #include "appcontroller.h"
+#include "vod/vodruntime.h"
+#include "vod/vodcatalogmodel.h"
 #include "updatecheckcontroller.h"
 #include "catchupdownloadcontroller.h"
 #include "databasestartup.h"
@@ -118,7 +120,8 @@ void updateDisplaySleepBlockerForWindowState(
     OKILTV::App::DisplaySleepBlocker *blocker,
     const OKILTV::App::SettingsController *settingsController,
     const OKILTV::App::PlayerController *playerController,
-    const QQuickWindow *window)
+    const QQuickWindow *window,
+    bool vodPlaying = false)
 {
     if (blocker == nullptr) {
         return;
@@ -133,7 +136,7 @@ void updateDisplaySleepBlockerForWindowState(
     const auto windowAllowsBlocking = visibility != QWindow::Hidden
         && visibility != QWindow::Minimized;
     const auto shouldBlock = settingsController->preventDisplaySleep()
-        && playerController->isPlaying()
+        && (playerController->isPlaying() || vodPlaying)
         && windowAllowsBlocking;
     blocker->setBlocked(shouldBlock);
 }
@@ -570,6 +573,19 @@ int main(int argc, char *argv[])
                 appServices.uiTestBridge->setPlayerController(appServices.multiViewController->primaryController());
             });
 
+        // Production adapters remain dormant unless globally and individually enabled.
+        OKILTV::Vod::VodRuntime vodRuntime(coreServices.settings.get(), appServices.multiViewController.get(),
+            appServices.dvrController.get(), appServices.timeshiftController.get());
+        QObject::connect(appServices.settingsController.get(), &OKILTV::App::SettingsController::saved,
+            &vodRuntime, &OKILTV::Vod::VodRuntime::applyPictureSettings);
+        QObject::connect(&vodRuntime, &OKILTV::Vod::VodRuntime::errorOccurred,
+            appServices.multiViewController.get(), &OKILTV::App::MultiViewController::statusMessageRequested);
+        QObject::connect(&vodRuntime, &OKILTV::Vod::VodRuntime::sourcesReconciled,
+            appServices.profilesModel.get(), &OKILTV::App::ProfilesModel::reload);
+
+        OKILTV::Vod::VodCatalogModel vodCatalog(&vodRuntime, coreServices.settings.get());
+        QObject::connect(appServices.settingsController.get(), &OKILTV::App::SettingsController::saved,
+            &vodCatalog, &OKILTV::Vod::VodCatalogModel::reloadSources);
         startupStep(QStringLiteral("Creating QQmlApplicationEngine."));
         QQmlApplicationEngine engine;
         startupStep(QStringLiteral("Registering QML context properties."));
@@ -578,6 +594,8 @@ int main(int argc, char *argv[])
                 appController.get(), &OKILTV::App::AppController::dismissGroupAutoEnableNotice);
         }
         registerQmlContextProperties(engine, appController.get(), appServices);
+        engine.rootContext()->setContextProperty(QStringLiteral("vodRuntime"), &vodRuntime);
+        engine.rootContext()->setContextProperty(QStringLiteral("vodCatalog"), &vodCatalog);
         startupStep(QStringLiteral("QML context properties registered."));
 
         startupStep(QStringLiteral("Loading main QML."));
@@ -616,51 +634,57 @@ int main(int argc, char *argv[])
                 mainWindow,
                 &QWindow::visibilityChanged,
                 &application,
-                [&appServices, mainWindow]() {
+                [&appServices, &vodRuntime, mainWindow]() {
                     updateDisplaySleepBlockerForWindowState(
                         appServices.displaySleepBlocker.get(),
                         appServices.settingsController.get(),
                         appServices.multiViewController->primaryController(),
-                        mainWindow);
+                        mainWindow, vodRuntime.isPlaying());
                 });
             QObject::connect(
                 mainWindow,
                 &QWindow::windowStateChanged,
                 &application,
-                [&appServices, mainWindow]() {
+                [&appServices, &vodRuntime, mainWindow]() {
                     updateDisplaySleepBlockerForWindowState(
                         appServices.displaySleepBlocker.get(),
                         appServices.settingsController.get(),
                         appServices.multiViewController->primaryController(),
-                        mainWindow);
+                        mainWindow, vodRuntime.isPlaying());
                 });
             QObject::connect(
                 appServices.multiViewController.get(),
                 &OKILTV::App::MultiViewController::primaryPlaybackChanged,
                 &application,
-                [&appServices, mainWindow]() {
+                [&appServices, &vodRuntime, mainWindow]() {
                     updateDisplaySleepBlockerForWindowState(
                         appServices.displaySleepBlocker.get(),
                         appServices.settingsController.get(),
                         appServices.multiViewController->primaryController(),
-                        mainWindow);
+                        mainWindow, vodRuntime.isPlaying());
                 });
             QObject::connect(
                 appServices.settingsController.get(),
                 &OKILTV::App::SettingsController::settingsChanged,
                 &application,
-                [&appServices, mainWindow]() {
+                [&appServices, &vodRuntime, mainWindow]() {
                     updateDisplaySleepBlockerForWindowState(
                         appServices.displaySleepBlocker.get(),
                         appServices.settingsController.get(),
                         appServices.multiViewController->primaryController(),
-                        mainWindow);
+                        mainWindow, vodRuntime.isPlaying());
                 });
             updateDisplaySleepBlockerForWindowState(
                 appServices.displaySleepBlocker.get(),
                 appServices.settingsController.get(),
                 appServices.multiViewController->primaryController(),
-                mainWindow);
+                mainWindow, vodRuntime.isPlaying());
+            QObject::connect(&vodRuntime, &OKILTV::Vod::VodRuntime::stateChanged, mainWindow,
+                [&appServices, &vodRuntime, mainWindow]() {
+                    updateDisplaySleepBlockerForWindowState(appServices.displaySleepBlocker.get(),
+                        appServices.settingsController.get(), appServices.multiViewController->primaryController(),
+                        mainWindow, vodRuntime.isPlaying());
+                });
         }
         appServices.uiTestCaptureController->setWindow(engine.rootObjects().constFirst());
         appServices.uiTestBridge->setWindow(engine.rootObjects().constFirst());
@@ -672,6 +696,7 @@ int main(int argc, char *argv[])
                 return;
             }
             shutdownHandled = true;
+            vodRuntime.shutdown();
             appServices.updateCheckController->shutdown();
 
             OKILTV::Core::DebugLogger::instance().log(

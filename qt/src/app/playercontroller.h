@@ -213,6 +213,10 @@ public:
     void detachSharedPlayback(bool clearChannel = true);
     void adoptExistingPlaybackChannel(const Core::Channel &channel);
     Player::MpvPlayer *primaryBasePlayer();
+    QList<Player::MpvPlayer *> playbackBackendsForHandoff();
+    // Application-owned arbitration. True means the supplied operation was
+    // deferred/rejected; false permits the normal legacy path immediately.
+    std::function<bool(std::function<void()>)> playbackStartGate;
     bool isSharedPlaybackPlayer(const Player::MpvPlayer *candidate) const;
     bool usingSharedPlayback() const;
     QString currentPlaybackUrl() const;

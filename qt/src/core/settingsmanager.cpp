@@ -13,8 +13,11 @@
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QSaveFile>
+#include <QScopeGuard>
+#include <QScopedValueRollback>
 
 #include <algorithm>
+#include <limits>
 
 namespace OKILTV::Core {
 
@@ -339,6 +342,7 @@ void SettingsManager::setActiveProfileId(const std::optional<QUuid> &profileId)
 
 bool SettingsManager::addProfile(const ServerProfile &profile)
 {
+    if (m_profileMutationInProgress) return false;
     auto normalized = profile;
     if (normalized.id.isNull()) {
         normalized.id = QUuid::createUuid();
@@ -362,6 +366,7 @@ bool SettingsManager::addProfile(const ServerProfile &profile)
 
 bool SettingsManager::replaceProfile(const QUuid &id, const ServerProfile &profile)
 {
+    if (m_profileMutationInProgress) return false;
     if (id.isNull()) {
         return false;
     }
@@ -381,6 +386,27 @@ bool SettingsManager::replaceProfile(const QUuid &id, const ServerProfile &profi
     auto normalized = profile;
     normalized.id = id;
     normalized.autoRefreshIntervalHours = normalizeAutoRefreshIntervalHours(normalized.autoRefreshIntervalHours);
+
+    const bool accessChanged = !previous || previous->type != normalized.type
+        || previous->xtreamBaseUrl != normalized.xtreamBaseUrl
+        || previous->xtreamUsername != normalized.xtreamUsername
+        || previous->xtreamPassword != normalized.xtreamPassword
+        || previous->vodEnabled != normalized.vodEnabled;
+    normalized.vodCredentialRevision = previous ? previous->vodCredentialRevision : 1;
+    if (accessChanged) {
+        if (normalized.vodCredentialRevision >= quint64(std::numeric_limits<qint64>::max())) {
+            m_lastSaveError = QStringLiteral("Source credential revision limit reached.");
+            return false;
+        }
+        ++normalized.vodCredentialRevision;
+    }
+    QScopedValueRollback mutation(m_profileMutationInProgress, true);
+    const bool guarded = accessChanged && bool(prepareProfileMutation);
+    bool succeeded = false;
+    const auto finishMutation = qScopeGuard([&]() {
+        if (guarded && profileMutationFinished) profileMutationFinished(id, succeeded);
+    });
+    if (guarded && !prepareProfileMutation(id, &normalized, &m_lastSaveError)) return false;
 
     if (!m_sourceStore.saveDetail(normalized, &m_lastSaveError)) {
         return false;
@@ -409,11 +435,13 @@ bool SettingsManager::replaceProfile(const QUuid &id, const ServerProfile &profi
     }
 
     save();
-    return m_lastSaveError.isEmpty();
+    succeeded = m_lastSaveError.isEmpty();
+    return succeeded;
 }
 
 bool SettingsManager::removeProfile(const QUuid &id)
 {
+    if (m_profileMutationInProgress) return false;
     if (id.isNull()) {
         return false;
     }
@@ -429,6 +457,12 @@ bool SettingsManager::removeProfile(const QUuid &id)
         return false;
     }
 
+    QScopedValueRollback mutation(m_profileMutationInProgress, true);
+    bool succeeded = false;
+    const auto finishMutation = qScopeGuard([&]() {
+        if (prepareProfileMutation && profileMutationFinished) profileMutationFinished(id, succeeded);
+    });
+    if (prepareProfileMutation && !prepareProfileMutation(id, nullptr, &m_lastSaveError)) return false;
     DatabaseService::beginChannelImport(id);
     const auto databasePath = QFileInfo(m_settingsFilePath).dir().filePath(QStringLiteral("iptv.db"));
     try {
@@ -456,7 +490,8 @@ bool SettingsManager::removeProfile(const QUuid &id)
     }
 
     save();
-    return m_lastSaveError.isEmpty();
+    succeeded = m_lastSaveError.isEmpty();
+    return succeeded;
 }
 
 bool SettingsManager::setProfileLastRefreshed(const QUuid &id, const QDateTime &lastRefreshed)
