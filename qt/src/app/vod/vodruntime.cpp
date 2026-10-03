@@ -113,7 +113,8 @@ void VodRuntime::initialize(EngineFactory engineFactory)
         };
         composition.dependencies = {provider, m_store, m_store, m_store, m_store,
             [artwork](const QUuid &profile, const ArtworkRef &ref, const RequestContext &context) { return artwork->resolve(profile, ref, context); },
-            [](const PlaybackDescriptor &descriptor, const RequestContext &context) { return probeVodMedia(descriptor, context); }};
+            [](const PlaybackDescriptor &descriptor, const RequestContext &context) { return probeVodMedia(descriptor, context); },
+            [artwork](const QUuid &profile, const ArtworkRef &ref, const RequestContext &context) { return artwork->cached(profile, ref, context); }, m_store};
         composition.legacy = legacy;
         composition.createEngine = [this]() {
             auto backend = std::make_unique<Player::MpvPlayer>();
@@ -132,6 +133,7 @@ void VodRuntime::initialize(EngineFactory engineFactory)
     });
     m_module->changed = [this](const SessionSnapshot &snapshot) {
         emit stateChanged();
+        updatePlaybackMetadata(snapshot);
         if (snapshot.state == SessionState::Failed) {
             const auto message = tr("The movie could not be played. Press V to return to the library and try again.");
             emit errorOccurred(message);
@@ -196,6 +198,13 @@ VodRuntime::~VodRuntime() { shutdown(); }
 bool VodRuntime::active() const { return m_module->enabled() && m_module->session()->snapshot().ref.playable() && !m_module->session()->snapshot().end; }
 bool VodRuntime::isPlaying() const { return active() && m_module->session()->snapshot().state == SessionState::Playing; }
 bool VodRuntime::isPaused() const { return active() && m_module->session()->snapshot().pauseRequested; }
+bool VodRuntime::isLoading() const
+{
+    if (!active()) return false;
+    const auto &snapshot = m_module->session()->snapshot();
+    return snapshot.state == SessionState::Opening || snapshot.state == SessionState::SeekingResume
+        || snapshot.state == SessionState::Recovering || (snapshot.buffering && !snapshot.pauseRequested);
+}
 QObject *VodRuntime::playerObject() const { return active() && m_module->session()->engine() ? static_cast<Player::MpvPlayer *>(m_module->session()->engine()->renderHandle()) : nullptr; }
 double VodRuntime::volume() const { return m_multiview->primaryController()->volume(); }
 double VodRuntime::positionSeconds() const { return active() ? static_cast<double>(m_module->session()->snapshot().positionMs) / 1000.0 : 0; }
@@ -221,6 +230,40 @@ void VodRuntime::selectAudioTrack(int id)
 void VodRuntime::selectSubtitleTrack(int id)
 {
     if (auto *backend = qobject_cast<Player::MpvPlayer *>(playerObject())) backend->selectSubtitleTrack(id, true);
+}
+std::optional<VodMediaProbe> VodRuntime::playbackMetadata(const ContentRef &ref) const
+{
+    return ref == m_metadataRef ? m_metadata : std::nullopt;
+}
+void VodRuntime::updatePlaybackMetadata(const SessionSnapshot &snapshot)
+{
+    if (snapshot.end || snapshot.loadToken.isNull() || snapshot.loadToken == m_metadataLoad
+        || !snapshot.videoWidth || !snapshot.videoHeight || snapshot.tracks.isEmpty()) return;
+    VodMediaProbe metadata;
+    metadata.videoWidth = snapshot.videoWidth;
+    metadata.videoHeight = snapshot.videoHeight;
+    metadata.observedAtUtc = QDateTime::currentDateTimeUtc();
+    for (const auto &entry : snapshot.tracks) {
+        const auto track = entry.toMap();
+        const auto type = track.value(QStringLiteral("type")).toString();
+        if (type != QLatin1String("audio") && type != QLatin1String("sub")) continue;
+        auto &tracks = type == QLatin1String("audio") ? metadata.audioTracks : metadata.subtitleTracks;
+        VodMediaTrack value;
+        value.streamIndex = track.value(QStringLiteral("id")).toInt();
+        value.ordinal = static_cast<int>(tracks.size());
+        value.type = type;
+        value.codec = track.value(QStringLiteral("codec")).toString();
+        value.title = track.value(QStringLiteral("title")).toString();
+        value.language = track.value(QStringLiteral("lang")).toString();
+        value.isDefault = track.value(QStringLiteral("default")).toBool();
+        value.forced = track.value(QStringLiteral("forced")).toBool();
+        tracks.append(value);
+    }
+    m_metadataLoad = snapshot.loadToken;
+    m_metadataRef = snapshot.ref;
+    m_metadata = metadata;
+    m_module->controller()->cachePlaybackMetadata(snapshot.ref, metadata, snapshot.durationMs);
+    emit playbackMetadataChanged(snapshot.ref);
 }
 QVariantMap VodRuntime::debugOverlaySnapshot() const
 {
@@ -276,11 +319,16 @@ QString VodRuntime::title() const
 {
     return active() && m_module->session()->snapshot().ref == m_titleRef ? m_title : QString{};
 }
-void VodRuntime::setPlaybackTitle(const ContentRef &ref, const QString &title)
+QString VodRuntime::playbackYear() const
+{
+    return active() && m_module->session()->snapshot().ref == m_titleRef ? m_year : QString{};
+}
+void VodRuntime::setPlaybackTitle(const ContentRef &ref, const QString &title, const QString &year)
 {
     if (!active() || m_module->session()->snapshot().ref != ref) return;
     m_titleRef = ref;
     m_title = title;
+    m_year = year;
     emit stateChanged();
 }
 void VodRuntime::seekTo(double seconds)

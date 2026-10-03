@@ -41,7 +41,7 @@ inline QByteArray scopeKey(const CatalogScope &scope)
 // Executable reference contract, not a production/persistent repository. A single
 // lock models the SQL transaction/barrier required of B2 implementations.
 class MemoryStore final : public IVodSourceAccess, public IVodCatalogRepository,
-    public IVodProgressRepository, public IVodMigrations {
+    public IVodProgressRepository, public IVodMigrations, public IVodMovieListsRepository {
 public:
     explicit MemoryStore(SourceContext source) : m_source(std::move(source)) {}
     std::atomic_int migrations{0};
@@ -129,6 +129,10 @@ public:
                 if (identity(item) == query.page->lastIdentity) pastCursor = true;
                 continue;
             }
+            const auto lists = m_lists.value(identity(item));
+            if (query.movieList == MovieList::ToWatch && !lists.toWatch) continue;
+            if (query.movieList == MovieList::Favourites && !lists.favourite) continue;
+            page.movieLists.insert(identity(item), lists);
             if (query.continueWatchingOnly) {
                 const auto progress = m_progress.value(identity(item));
                 if (progress.positionMs <= 0 || progress.status == WatchStatus::Watched
@@ -202,7 +206,7 @@ public:
         m_sequences[ref.key()] = 0;
         return Success{};
     }
-    Outcome checkpoint(const ContentRef &ref, const VodProgress &progress, const RequestContext &context) override
+    Outcome checkpoint(const ContentRef &ref, const VodProgress &progress, const RequestContext &context, bool completed = false) override
     {
         QMutexLocker lock(&m_mutex);
         if (const auto error = check(context)) return *error;
@@ -210,14 +214,32 @@ public:
             || progress.positionMs < 0) return Error{ErrorCode::Cancelled, context.operationId};
         m_sequences[ref.key()] = progress.sequence;
         m_progress[ref.key()] = progress;
+        if (completed && progress.status == WatchStatus::Watched) m_lists[ref.key()].toWatch = false;
         ++checkpoints;
         return Success{};
+    }
+    Result<MovieListState> readMovieLists(const ContentRef &ref, const RequestContext &context) override
+    {
+        QMutexLocker lock(&m_mutex);
+        if (const auto error = check(context)) return *error;
+        return m_lists.value(ref.key());
+    }
+    Result<MovieListState> setMovieList(const ContentRef &ref, MovieList list, bool enabled, const RequestContext &context) override
+    {
+        QMutexLocker lock(&m_mutex);
+        if (const auto error = check(context)) return *error;
+        if (ref.kind != ContentKind::Movie || (list != MovieList::ToWatch && list != MovieList::Favourites))
+            return Error{ErrorCode::InvalidResponse, context.operationId};
+        auto &state = m_lists[ref.key()];
+        if (list == MovieList::ToWatch) state.toWatch = enabled;
+        else state.favourite = enabled;
+        return state;
     }
     Outcome removeSourceState(const QUuid &id) override
     {
         QMutexLocker lock(&m_mutex);
         if (!m_removing || id != m_source.revision.profileId) return Error{ErrorCode::StorageUnavailable, {}};
-        m_pages.clear(); m_categories.clear(); m_categoryRequests.clear(); m_details.clear(); m_progress.clear(); m_sessions.clear(); m_sequences.clear(); m_staging.clear();
+        m_lists.clear(); m_pages.clear(); m_categories.clear(); m_categoryRequests.clear(); m_details.clear(); m_progress.clear(); m_sessions.clear(); m_sequences.clear(); m_staging.clear();
         return Success{};
     }
 private:
@@ -239,6 +261,7 @@ private:
     QHash<QByteArray, CategorySnapshot> m_categories;
     QHash<QByteArray, QUuid> m_categoryRequests;
     QHash<QByteArray, VodProgress> m_progress;
+    QHash<QByteArray, MovieListState> m_lists;
     QHash<QByteArray, QUuid> m_sessions;
     QHash<QByteArray, quint64> m_sequences;
 };
@@ -300,7 +323,7 @@ struct Fixture {
     LegacyResources resources;
     bool deferRelease = false;
     LegacyPlaybackAdapter::Acknowledgement releaseAck;
-    VodDependencies dependencies() const { return {provider, store, store, store, store}; }
+    VodDependencies dependencies() const { return {provider, store, store, store, store, {}, {}, {}, store}; }
     VodComposition composition()
     {
         auto legacy = std::make_shared<LegacyPlaybackAdapter>(LegacyPlaybackAdapter::Hooks{

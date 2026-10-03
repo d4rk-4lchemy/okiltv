@@ -69,6 +69,8 @@ public:
     QString diagnostics() const;
     bool isAvailable() const;
     bool catchupStreamProtocolAvailable() const;
+    bool vodRangeCacheEligible(const PlaybackRequest &request);
+    QByteArray vodUserAgent() const;
     bool usesLiveMpegTsTransport() const { return m_liveStream != nullptr; }
 
     void setRenderUpdateTarget(QObject *target);
@@ -290,6 +292,7 @@ private:
     QPointer<QObject> m_updateTarget;
     std::atomic_bool m_frameUpdateQueued { false };
     CachedTelemetry m_cachedTelemetry;
+    bool m_vodRangeProtocolAvailable = false;
     std::atomic_bool m_eventThreadRunning { false };
     std::unique_ptr<std::thread> m_eventThread;
     std::atomic_bool m_trackListRefreshPending { false };

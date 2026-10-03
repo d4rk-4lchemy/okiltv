@@ -2,6 +2,7 @@
 #include "core/vod/ivodprovider.h"
 #include "core/vod/ivodcatalogrepository.h"
 #include "core/vod/ivodprogressrepository.h"
+#include "core/vod/ivodmovielistsrepository.h"
 #include "core/vod/storage/vodmigrations.h"
 #include "vodjobrunner.h"
 
@@ -16,6 +17,8 @@ struct VodDependencies {
     std::shared_ptr<IVodMigrations> migrations;
     std::function<Result<ArtworkRef>(const QUuid &, const ArtworkRef &, const RequestContext &)> artwork;
     std::function<Result<VodMediaProbe>(const PlaybackDescriptor &, const RequestContext &)> mediaProbe;
+    std::function<Result<std::optional<ArtworkRef>>(const QUuid &, const ArtworkRef &, const RequestContext &)> cachedArtwork;
+    std::shared_ptr<IVodMovieListsRepository> lists;
     [[nodiscard]] bool complete() const;
 };
 class VodCatalogService {

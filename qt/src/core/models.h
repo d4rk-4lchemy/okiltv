@@ -86,6 +86,7 @@ struct Channel
     QString cachedIconPath;
     ChannelSource source { ChannelSource::M3U };
     int sortOrder { 0 };
+    QString channelNumber; // Canonical positive decimal; empty uses legacy numbering.
     QUuid profileId;
     bool catchupSupported { false };
     int catchupWindowHours { 0 };
@@ -141,6 +142,7 @@ struct AppSettings
     int overlayAutoHideSeconds { 3 };
     int overlayInactivitySeconds { 60 };
     int uiTransparency { 100 };
+    int vodLibrarySidebarWidth { 0 }; // 0: automatic; otherwise logical pixels, >= 208
     int guidePastHours { 6 };
     int epgLookAheadHours { 24 };
     bool autoRefreshEpg { true };
@@ -184,6 +186,7 @@ struct AppSettings
     QJsonObject channelTrackPreferences; // profile UUID -> channel key -> audio/sub preference
     QMap<QString, int> lastWatchedChannelId;
     QMap<QString, QList<int>> favoriteChannelIdsByProfile;
+    QMap<QString, QList<int>> autoFavoriteExcludedChannelIdsByProfile;
     QMap<QString, QString> selectedGroupByProfile;
     QMap<QString, QStringList> hiddenGroupsByProfile;
     QMap<QString, QStringList> groupOrderByProfile;

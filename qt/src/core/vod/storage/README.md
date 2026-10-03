@@ -1,6 +1,6 @@
 # VOD storage contract
 
-`IVodMigrations`, `IVodCatalogRepository`, `IVodProgressRepository` and
+`IVodMigrations`, `IVodCatalogRepository`, `IVodProgressRepository`, `IVodMovieListsRepository` and
 `IVodSourceAccess` are ports. `SqliteVodStore` implements them with per-operation,
 thread-owned connections, additive versioned migrations, consistent `VACUUM INTO`
 backups, staging and transactional publication. `VodRuntime` wires these ports
@@ -9,7 +9,7 @@ into the application; B4 integration is still undergoing verification.
 contract, never an application fallback. The logical table inventory is in
 `.project/OKILTV_ARCHITEKTURA_VOD.md`, section 8.
 
-## Identity and schema version 6
+## Identity and schema version 8
 
 Use the existing application database, additive `vod_*` tables, and an independent
 `vod_schema_migrations(version INTEGER PRIMARY KEY)` marker. Migration runs on a
@@ -17,6 +17,30 @@ worker before first repository access. A newer version, failed migration or
 unavailable secret protection disables VOD without resetting Live data. Repeated
 prepare calls are idempotent and serialized. Back up consistently before B2
 migration and test rollback/restart with the real database service.
+
+Schema 8 adds `vod_movie_lists`, keyed by full content identity, with independent
+`to_watch` and `favourite` flags and a source lookup index. There is no foreign key
+to catalogue rows: refresh, provider disappearance, eviction and credential edits
+retain the flags. Explicit source removal deletes them. Queries return membership
+for their page and apply the selected movie-list filter before keyset pagination.
+No provider or media requests are needed to change a list.
+
+`checkpoint(..., completed=true)` clears To Watch in the progress transaction only
+for a Movie whose effective status is Watched, after session/sequence validation.
+Failure rolls back both changes. The application supplies a completion event once
+per automatic playback session, or for an explicit Mark as watched action. Re-adding
+an already completed movie is allowed and does not reset progress; later checkpoints
+without a new completion event preserve it. Favourites is never auto-cleared.
+Membership writes share the serial progress lane and source mutation barriers.
+
+Schema 7 recomputes `vod_items.sort_key` and retained `vod_staging.sort_key` in
+bounded 256-row batches inside the migration transaction. Keys use Unicode case
+folding, NFKD and combining-mark removal, with the explicit Latin mappings
+ł/l, ø/o, đ/ð/d, ħ/h, ı/i, æ/ae, œ/oe, þ/th and ß/ss. Display titles stay unchanged.
+Source catalogue generations advance once to reject pre-migration cursors;
+refresh timestamps, content identities, artwork, progress and track preferences
+remain intact. Existing catalogues need no provider refresh. Failure rolls back
+keys, generations and the schema marker together; the next prepare can retry.
 
 Schema 6 adds `vod_progress.track_preferences`, a JSON object containing confirmed
 explicit audio/subtitle choices (including subtitle off). Existing progress rows
@@ -67,8 +91,12 @@ retains category metadata. Source removal deletes both tables, without leaving l
 
 Item/category links are many-to-many. Seasons belong to a series; episode identity
 lives once in `vod_items`, with separate season/series links. Details contain
-validated fields, format version and UTC fetch time. Signed artwork URLs require
-secret protection; playback descriptors and headers are never persisted.
+validated fields, format version and UTC fetch time. The existing `mediaProbe`
+payload also stores technical metadata observed through the active mpv load:
+actual dimensions and audio/subtitle tracks with UTC observation time. Playback
+updates only existing details using local repository reads/writes and no extra
+provider/media connection; actual duration replaces the provider hint. Signed
+artwork URLs require secret protection; playback descriptors and headers are never persisted.
 
 ## Publication and local queries
 
@@ -85,7 +113,10 @@ must retain a staging marker for later reconciliation. Abandon never deletes the
 published snapshot. Another category and lazily absent episode details are not
 implicitly missing from this import.
 
-Local page tokens carry generation and a stable `(sort_key, identity)` cursor.
+Local page tokens carry generation and a `(sort_key, identity)` cursor. Title
+queries and prefix/substring filters use the same base-letter normalized titles;
+Continue watching uses the numeric UTC progress
+update time, serialized in `lastSortKey`, with descending identity as a tiebreaker.
 Reject stale-generation cursors instead of mixing generations. Index source,
 namespace, kind, category links and normalized title with identity as tiebreaker.
 Prefix search is the initial contract; no FTS or substring performance guarantee.
@@ -103,7 +134,10 @@ retired session fail. Cache eviction/provider disappearance retains history.
 `CatalogQuery.continueWatchingOnly` filters on durable progress before keyset
 pagination: positive position, InProgress status, and at least 5% remaining when
 duration is known. Strictly greater than 95% is watched; unknown duration never
-auto-completes. The serial application progress lane also handles manual status
+auto-completes. Results sort by `vod_progress.updated` descending, independently
+of title sorting, before applying the page limit. The shelf and full category
+therefore show the most recently watched movies first. The serial application
+progress lane also handles manual status
 changes, preserving tracks and clearing position for Mark as unwatched. Manual
 choices override checkpoints for that session; a new playback session restores
 automatic tracking. No schema migration is needed for these existing fields.
@@ -125,6 +159,9 @@ Staged and published item rows retain opaque artwork IDs/roles in an additive
 without artwork. Protected remote URLs live in the per-source artwork registry,
 never in public catalog events or QML. Decoded JPEG cache files have a separate
 256-MiB LRU budget; source deletion/reconciliation removes the associated files.
+Application workers add existing validated JPEG paths to transient `ArtworkRef`
+values before catalogue/detail publication. Neither cached local paths nor remote
+URLs are serialized in staged/published catalogue rows.
 `CatalogQuery.titleContains` adds normalized substring matching on worker SQL
 queries; the existing title-prefix contract and generation-tagged keyset pages
 remain available.

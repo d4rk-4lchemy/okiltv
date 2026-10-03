@@ -17,7 +17,8 @@ MpvPlaybackEngine::MpvPlaybackEngine(std::unique_ptr<MpvPlayer> player, bool req
     if (m_requireRenderSurface) m_player->requireNativeRenderSurface();
     connect(m_player.get(), &MpvPlayer::renderContextReady, this, [this]() {
         if (!m_waitingForRender || m_token.isNull() || !m_player->renderContextAvailable()) return;
-        const auto request = std::exchange(m_waitingForRender, {});
+        auto request = std::exchange(m_waitingForRender, {});
+        request->startPaused = m_requestedPause;
         if (!m_player->play(*request, m_token)) finish(m_token, EndReason::Error);
         else m_timer.start();
     });
@@ -45,7 +46,14 @@ MpvPlaybackEngine::MpvPlaybackEngine(std::unique_ptr<MpvPlayer> player, bool req
         if (token == m_token && m_loaded) sample(false, true);
     });
 }
-MpvPlaybackEngine::~MpvPlaybackEngine() { m_listener = {}; m_pending.reset(); m_player->stop(); }
+MpvPlaybackEngine::~MpvPlaybackEngine()
+{
+    m_listener = {}; m_pending.reset();
+    if (m_rangeStream) m_rangeStream->cancel();
+    m_player->stop();
+    m_player.reset(); // Release mpv callback references before the GUI-owned stream.
+    m_rangeStream.reset();
+}
 void MpvPlaybackEngine::setListener(Listener listener) { m_listener = std::move(listener); }
 void MpvPlaybackEngine::load(const PlaybackRequest &request, const QUuid &token)
 {
@@ -56,6 +64,7 @@ void MpvPlaybackEngine::load(const PlaybackRequest &request, const QUuid &token)
         return;
     }
     m_token = token;
+    m_requestedPause = request.startPaused;
     m_trackPreferences = request.trackPreferences;
     // Load-scoped identity fences confirmations; persistence belongs to the VOD
     // session. Keep unavailable choices and remember explicit baseline choices.
@@ -65,6 +74,28 @@ void MpvPlaybackEngine::load(const PlaybackRequest &request, const QUuid &token)
     m_stopReason.reset();
     m_last = {token, EngineState::Loading, -1, {}, false, false, {}};
     if (m_listener) m_listener(m_last);
+    if (m_token != token) return;
+    if (m_player->vodRangeCacheEligible(request)) {
+        m_preparingRange = true;
+        m_rangeStream = VodRangeStream::create(request.mediaUri,
+            request.allowedHeaders.value("User-Agent", request.allowedHeaders.value("user-agent", m_player->vodUserAgent())));
+        m_rangeStream->prepare([this, request, token](bool ready) {
+            if (token != m_token || !m_preparingRange) return;
+            m_preparingRange = false;
+            auto effective = request;
+            effective.startPaused = m_requestedPause;
+            if (ready) effective.mediaUri = QUrl(m_rangeStream->virtualUrl());
+            else if (m_rangeStream->nativeFallbackAllowed()) m_rangeStream.reset();
+            else { finish(token, EndReason::Error, true); return; }
+            startLoad(effective);
+        });
+        return;
+    }
+    startLoad(request);
+}
+void MpvPlaybackEngine::startLoad(const PlaybackRequest &request)
+{
+    const auto token = m_token;
     if (m_requireRenderSurface && !m_player->renderContextAvailable()) {
         m_waitingForRender = request;
         QTimer::singleShot(5000, this, [this, token]() {
@@ -75,8 +106,14 @@ void MpvPlaybackEngine::load(const PlaybackRequest &request, const QUuid &token)
     if (!m_player->play(request, token)) { finish(token, EndReason::Error); return; }
     m_timer.start();
 }
-void MpvPlaybackEngine::pause() { if (!m_token.isNull()) m_player->setPaused(true); }
-void MpvPlaybackEngine::resume() { if (!m_token.isNull()) m_player->setPaused(false); }
+void MpvPlaybackEngine::pause()
+{
+    if (!m_token.isNull()) { m_requestedPause = true; m_player->setPaused(true); }
+}
+void MpvPlaybackEngine::resume()
+{
+    if (!m_token.isNull()) { m_requestedPause = false; m_player->setPaused(false); }
+}
 void MpvPlaybackEngine::seek(qint64 position)
 {
     if (m_loaded && m_player->seekable().value_or(false)) m_player->seekAbsoluteExact(static_cast<double>(std::max(qint64(0), position)) / 1000);
@@ -84,7 +121,8 @@ void MpvPlaybackEngine::seek(qint64 position)
 void MpvPlaybackEngine::stop(EndReason reason)
 {
     if (m_token.isNull()) return;
-    if (m_waitingForRender) { finish(m_token, reason); return; }
+    if (m_waitingForRender || m_preparingRange) { finish(m_token, reason); return; }
+    if (m_rangeStream) m_rangeStream->cancel();
     m_stopReason = reason;
     m_player->stop();
 }
@@ -102,18 +140,30 @@ void MpvPlaybackEngine::sample(bool loaded, bool seekCompleted)
         : (m_player->pauseState().value_or(false) ? EngineState::Paused : EngineState::Playing));
     event.seekCompleted = seekCompleted;
     event.trackPreferences = m_trackPreferences;
+    event.videoWidth = m_player->videoWidth();
+    event.videoHeight = m_player->videoHeight();
+    event.tracks = m_player->trackList();
     m_last = event;
     if (m_listener) m_listener(event);
 }
 void MpvPlaybackEngine::finish(const QUuid &token, EndReason reason, bool retryable)
 {
     if (token.isNull() || token != m_token) return;
+    // Some demuxers report a failed read as EOF. Never mark an interrupted
+    // remote transfer watched; retain the observed position for bounded recovery.
+    if (!m_stopReason && m_rangeStream && m_rangeStream->failed()) {
+        reason = EndReason::Error;
+        retryable = true;
+    }
     auto event = m_last;
     event.end = reason == EndReason::UserStop ? m_stopReason.value_or(EndReason::UserStop) : reason;
     event.state = EngineState::Stopped;
     event.seekCompleted = false;
     event.retryable = retryable && !m_stopReason;
     m_timer.stop();
+    if (m_rangeStream) m_rangeStream->cancel();
+    m_rangeStream.reset();
+    m_preparingRange = false;
     m_waitingForRender.reset();
     m_token = QUuid{};
     m_loaded = false;

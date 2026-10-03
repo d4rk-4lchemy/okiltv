@@ -30,7 +30,34 @@ QList<ArtworkRef> decodeArtwork(const QByteArray &bytes) {
     }
     return result;
 }
-QString sortKey(const QString &title) { return title.normalized(QString::NormalizationForm_KC).toCaseFolded(); }
+QString sortKey(const QString &title)
+{
+    // Locale-independent base-letter ordering, also shared by search queries.
+    // NFKD handles accents across languages; these Latin letters do not decompose.
+    const auto decomposed = title.normalized(QString::NormalizationForm_KD).toCaseFolded()
+        .normalized(QString::NormalizationForm_KD);
+    QString result;
+    result.reserve(decomposed.size());
+    for (const auto scalar : decomposed.toUcs4()) {
+        const auto codepoint = static_cast<char32_t>(scalar);
+        const auto category = QChar::category(codepoint);
+        if (category == QChar::Mark_NonSpacing || category == QChar::Mark_SpacingCombining
+            || category == QChar::Mark_Enclosing) continue;
+        switch (codepoint) {
+        case U'ł': result += u'l'; break;
+        case U'ø': result += u'o'; break;
+        case U'đ': case U'ð': result += u'd'; break;
+        case U'ħ': result += u'h'; break;
+        case U'ı': result += u'i'; break;
+        case U'æ': result += QStringLiteral("ae"); break;
+        case U'œ': result += QStringLiteral("oe"); break;
+        case U'þ': result += QStringLiteral("th"); break;
+        case U'ß': result += QStringLiteral("ss"); break;
+        default: result += QString::fromUcs4(&codepoint, 1); break;
+        }
+    }
+    return result;
+}
 QVariant optionalString(const std::optional<QString> &value) { return value ? QVariant(*value) : QVariant(QMetaType::fromType<QString>()); }
 template<class T> QVariant optionalNumber(const std::optional<T> &value)
 { return value ? QVariant::fromValue(*value) : QVariant(QMetaType::fromType<qint64>()); }
@@ -162,8 +189,8 @@ Outcome SqliteVodStore::prepare(const RequestContext &context)
         const bool hasMarker = marker.next(); marker.finish();
         if (hasMarker) {
             auto latest = connection.sql(QStringLiteral("SELECT COALESCE(MAX(version),0) FROM vod_schema_migrations"));
-            latest.next(); const auto currentVersion = latest.value(0).toInt(); latest.finish();
-            if (currentVersion > schemaVersion) throw Error{ErrorCode::UnsupportedCapability, context.operationId};
+            latest.next(); version = latest.value(0).toInt(); latest.finish();
+            if (version > schemaVersion) throw Error{ErrorCode::UnsupportedCapability, context.operationId};
         }
         const QStringList statements{
             QStringLiteral("CREATE TABLE IF NOT EXISTS vod_schema_migrations(version INTEGER PRIMARY KEY)"),
@@ -184,6 +211,8 @@ Outcome SqliteVodStore::prepare(const RequestContext &context)
             QStringLiteral("CREATE TABLE IF NOT EXISTS vod_progress(identity BLOB PRIMARY KEY,profile TEXT NOT NULL,namespace TEXT NOT NULL,kind INTEGER NOT NULL,provider_id TEXT NOT NULL,parent TEXT NOT NULL,session TEXT NOT NULL,sequence INTEGER NOT NULL DEFAULT 0,position INTEGER,duration INTEGER,status INTEGER,content_revision TEXT,updated INTEGER,UNIQUE(profile,namespace,kind,provider_id,parent))")
         };
         for (const auto &statement : statements) connection.sql(statement);
+        connection.sql(QStringLiteral("CREATE TABLE IF NOT EXISTS vod_movie_lists(identity BLOB PRIMARY KEY,profile TEXT NOT NULL,namespace TEXT NOT NULL,kind INTEGER NOT NULL,provider_id TEXT NOT NULL,parent TEXT NOT NULL,to_watch INTEGER NOT NULL DEFAULT 0,favourite INTEGER NOT NULL DEFAULT 0,UNIQUE(profile,namespace,kind,provider_id,parent))"));
+        connection.sql(QStringLiteral("CREATE INDEX IF NOT EXISTS vod_movie_lists_source ON vod_movie_lists(profile,namespace,kind)"));
         auto progressColumns = connection.sql(QStringLiteral("PRAGMA table_info(vod_progress)"));
         bool hasTrackPreferences = false;
         while (progressColumns.next())
@@ -218,6 +247,25 @@ Outcome SqliteVodStore::prepare(const RequestContext &context)
             if (!hasArtwork) connection.sql(QStringLiteral("ALTER TABLE %1 ADD COLUMN artwork BLOB NOT NULL DEFAULT '[]'").arg(table));
         }
         connection.sql(QStringLiteral("DELETE FROM vod_sync_runs WHERE owner<>?"), {processInstance()});
+        if (version < 7) {
+            // Bound memory and release read queries before updating their rows.
+            // The enclosing transaction rolls back every key and generation on failure.
+            for (const auto &table : {QStringLiteral("vod_items"), QStringLiteral("vod_staging")}) {
+                qint64 lastRow = 0;
+                for (;;) {
+                    if (const auto error = context.interruption()) throw *error;
+                    auto rows = connection.sql(QStringLiteral("SELECT rowid,title FROM %1 WHERE rowid>? ORDER BY rowid LIMIT 256").arg(table), {lastRow});
+                    QList<QPair<qint64, QString>> batch;
+                    while (rows.next()) batch.append({rows.value(0).toLongLong(), sortKey(rows.value(1).toString())});
+                    rows.finish();
+                    if (batch.isEmpty()) break;
+                    for (const auto &[row, key] : batch)
+                        connection.sql(QStringLiteral("UPDATE %1 SET sort_key=? WHERE rowid=?").arg(table), {key, row});
+                    lastRow = batch.last().first;
+                }
+            }
+            connection.sql(QStringLiteral("UPDATE vod_generations SET generation=generation+1"));
+        }
         connection.sql(QStringLiteral("INSERT OR IGNORE INTO vod_schema_migrations(version) VALUES(?)"), {schemaVersion});
         connection.commit();
         m_prepared = true;
@@ -473,13 +521,23 @@ Result<CatalogPage> SqliteVodStore::query(const CatalogQuery &input, const Reque
         if (generation.next()) { page.generation = generation.value(0).toULongLong(); page.refreshedAtUtc = QDateTime::fromMSecsSinceEpoch(generation.value(1).toLongLong(), QTimeZone::UTC); }
         generation.finish();
         if (input.page && input.page->generation != page.generation) throw Error{ErrorCode::Cancelled, context.operationId};
-        QString statement = QStringLiteral("SELECT identity,provider_id,parent,title,year,availability,sort_key,artwork FROM vod_items WHERE profile=? AND namespace=? AND kind=?");
+        const auto orderKey = input.continueWatchingOnly
+            ? QStringLiteral("(SELECT COALESCE(updated,0) FROM vod_progress WHERE vod_progress.identity=vod_items.identity)")
+            : QStringLiteral("sort_key");
+        QString statement = QStringLiteral("SELECT identity,provider_id,parent,title,year,availability,%1,artwork,COALESCE((SELECT to_watch FROM vod_movie_lists WHERE vod_movie_lists.identity=vod_items.identity),0),COALESCE((SELECT favourite FROM vod_movie_lists WHERE vod_movie_lists.identity=vod_items.identity),0) FROM vod_items WHERE profile=? AND namespace=? AND kind=?").arg(orderKey);
         QVariantList args{uuid(input.scope.profileId), uuid(input.scope.catalogNamespace), contentKind(input.scope.kind)};
         if (const auto category = input.scope.categoryId) {
             statement += QStringLiteral(" AND identity IN (SELECT identity FROM vod_item_categories WHERE category=?)"); args.append(*category);
         }
         if (input.continueWatchingOnly)
             statement += QStringLiteral(" AND identity IN (SELECT identity FROM vod_progress WHERE status=0 AND position>0 AND (duration IS NULL OR duration<=0 OR position<=duration*0.95))");
+        if (input.movieList != MovieList::None) {
+            if (input.scope.kind != CatalogKind::Movies || (input.movieList != MovieList::ToWatch && input.movieList != MovieList::Favourites))
+                throw Error{ErrorCode::InvalidResponse, context.operationId};
+            statement += input.movieList == MovieList::ToWatch
+                ? QStringLiteral(" AND identity IN (SELECT identity FROM vod_movie_lists WHERE to_watch=1)")
+                : QStringLiteral(" AND identity IN (SELECT identity FROM vod_movie_lists WHERE favourite=1)");
+        }
         const auto prefix = sortKey(input.titlePrefix);
         if (!prefix.isEmpty()) {
             statement += QStringLiteral(" AND sort_key>=? AND substr(sort_key,1,length(?))=?");
@@ -487,12 +545,13 @@ Result<CatalogPage> SqliteVodStore::query(const CatalogQuery &input, const Reque
         }
         const auto contains = sortKey(input.titleContains);
         if (!contains.isEmpty()) { statement += QStringLiteral(" AND instr(sort_key,?)>0"); args.append(contains); }
-        const bool descending = input.sort == CatalogSort::TitleDescending;
+        const bool descending = input.continueWatchingOnly || input.sort == CatalogSort::TitleDescending;
         if (const auto cursor = input.page) {
-            statement += descending ? QStringLiteral(" AND (sort_key,identity)<(?,?)") : QStringLiteral(" AND (sort_key,identity)>(?,?)");
-            args.append(cursor->lastSortKey); args.append(cursor->lastIdentity);
+            statement += (descending ? QStringLiteral(" AND (%1,identity)<(?,?)") : QStringLiteral(" AND (%1,identity)>(?,?)")).arg(orderKey);
+            args.append(input.continueWatchingOnly ? QVariant(cursor->lastSortKey.toLongLong()) : QVariant(cursor->lastSortKey));
+            args.append(cursor->lastIdentity);
         }
-        statement += descending ? QStringLiteral(" ORDER BY sort_key DESC,identity DESC LIMIT ?") : QStringLiteral(" ORDER BY sort_key,identity LIMIT ?");
+        statement += (descending ? QStringLiteral(" ORDER BY %1 DESC,identity DESC LIMIT ?") : QStringLiteral(" ORDER BY %1,identity LIMIT ?")).arg(orderKey);
         args.append(input.pageSize + 1);
         auto rows = connection.sql(statement, args);
         LocalPageToken last;
@@ -505,6 +564,7 @@ Result<CatalogPage> SqliteVodStore::query(const CatalogQuery &input, const Reque
             if (!rows.value(4).isNull()) summary.year = rows.value(4).toInt();
             summary.availability = Availability(rows.value(5).toInt());
             summary.artwork = decodeArtwork(rows.value(7).toByteArray());
+            page.movieLists.insert(summary.ref.key(), {rows.value(8).toBool(), rows.value(9).toBool()});
             auto categories = connection.sql(QStringLiteral("SELECT category FROM vod_item_categories WHERE identity=? ORDER BY category"), {rows.value(0)});
             while (categories.next()) summary.categoryIds.append(categories.value(0).toString());
             if (input.scope.kind == CatalogKind::Movies) page.items.append(summary);
@@ -634,7 +694,7 @@ Outcome SqliteVodStore::removeSourceState(const QUuid &id)
         auto state = connection.sql(QStringLiteral("SELECT removed FROM vod_source_state WHERE profile=?"), {uuid(id)});
         if (!state.next() || state.value(0).toInt() == 0) throw Error{ErrorCode::StorageUnavailable, {}};
         state.finish();
-        for (const auto &table : {QStringLiteral("vod_category_snapshots"), QStringLiteral("vod_items"), QStringLiteral("vod_seasons"), QStringLiteral("vod_details"), QStringLiteral("vod_generations"), QStringLiteral("vod_sync_runs"), QStringLiteral("vod_progress")})
+        for (const auto &table : {QStringLiteral("vod_category_snapshots"), QStringLiteral("vod_items"), QStringLiteral("vod_seasons"), QStringLiteral("vod_details"), QStringLiteral("vod_generations"), QStringLiteral("vod_sync_runs"), QStringLiteral("vod_progress"), QStringLiteral("vod_movie_lists")})
             connection.sql(QStringLiteral("DELETE FROM %1 WHERE profile=?").arg(table), {uuid(id)});
         connection.commit(); return {};
     });
@@ -650,7 +710,7 @@ Outcome SqliteVodStore::beginSession(const ContentRef &ref, const QUuid &session
         connection.commit(); return {};
     });
 }
-Outcome SqliteVodStore::checkpoint(const ContentRef &ref, const VodProgress &progress, const RequestContext &context)
+Outcome SqliteVodStore::checkpoint(const ContentRef &ref, const VodProgress &progress, const RequestContext &context, bool completed)
 {
     return guarded<Success>(context, [&]() -> Success {
         Connection connection(m_path, context); connection.open(); connection.begin(); connection.checkRef(ref);
@@ -661,7 +721,33 @@ Outcome SqliteVodStore::checkpoint(const ContentRef &ref, const VodProgress &pro
             {progress.positionMs, optionalNumber(progress.durationMs), int(progress.status), optionalString(progress.contentRevision),
              progress.updatedAtUtc.toMSecsSinceEpoch(), QVariant::fromValue(progress.sequence), QJsonDocument(progress.trackPreferences).toJson(QJsonDocument::Compact), ref.key(), uuid(progress.sessionToken), QVariant::fromValue(progress.sequence)});
         if (update.numRowsAffected() != 1) throw Error{ErrorCode::Cancelled, context.operationId};
+        if (completed && ref.kind == ContentKind::Movie && progress.status == WatchStatus::Watched)
+            connection.sql(QStringLiteral("UPDATE vod_movie_lists SET to_watch=0 WHERE identity=?"), {ref.key()});
         connection.current(); connection.commit(); return {};
+    });
+}
+Result<MovieListState> SqliteVodStore::readMovieLists(const ContentRef &ref, const RequestContext &context)
+{
+    return guarded<MovieListState>(context, [&]() -> MovieListState {
+        Connection connection(m_path, context); connection.open(); connection.begin(false); connection.checkRef(ref);
+        if (ref.kind != ContentKind::Movie) throw Error{ErrorCode::ContentUnavailable, context.operationId};
+        auto row = connection.sql(QStringLiteral("SELECT to_watch,favourite FROM vod_movie_lists WHERE identity=?"), {ref.key()});
+        const MovieListState result = row.next() ? MovieListState{row.value(0).toBool(), row.value(1).toBool()} : MovieListState{};
+        row.finish(); connection.commit(); return result;
+    });
+}
+Result<MovieListState> SqliteVodStore::setMovieList(const ContentRef &ref, MovieList list, bool enabled, const RequestContext &context)
+{
+    return guarded<MovieListState>(context, [&]() -> MovieListState {
+        Connection connection(m_path, context); connection.open(); connection.begin(); connection.checkRef(ref);
+        if (ref.kind != ContentKind::Movie || (list != MovieList::ToWatch && list != MovieList::Favourites))
+            throw Error{ErrorCode::InvalidResponse, context.operationId};
+        const auto column = list == MovieList::ToWatch ? QStringLiteral("to_watch") : QStringLiteral("favourite");
+        connection.sql(QStringLiteral("INSERT INTO vod_movie_lists(identity,profile,namespace,kind,provider_id,parent,%1) VALUES(?,?,?,?,?,?,?) ON CONFLICT(identity) DO UPDATE SET %1=excluded.%1").arg(column),
+            {ref.key(), uuid(ref.profileId), uuid(ref.catalogNamespace), int(ref.kind), ref.providerItemId, ref.parentNamespace.value_or(QStringLiteral("")), enabled});
+        auto row = connection.sql(QStringLiteral("SELECT to_watch,favourite FROM vod_movie_lists WHERE identity=?"), {ref.key()});
+        row.next(); const MovieListState result{row.value(0).toBool(), row.value(1).toBool()}; row.finish();
+        connection.current(); connection.commit(); return result;
     });
 }
 Result<std::optional<VodProgress>> SqliteVodStore::read(const ContentRef &ref, const RequestContext &context)

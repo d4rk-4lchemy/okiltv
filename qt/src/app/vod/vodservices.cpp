@@ -3,7 +3,7 @@
 #include <algorithm>
 
 namespace OKILTV::Vod {
-bool VodDependencies::complete() const { return provider && sources && catalog && progress && migrations; }
+bool VodDependencies::complete() const { return provider && sources && catalog && progress && migrations && lists; }
 Result<quint64> VodCatalogService::refresh(const VodDependencies &deps, const SourceContext &source,
     const CatalogScope &scope, const RequestContext &request)
 {

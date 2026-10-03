@@ -329,6 +329,8 @@ QJsonObject toJson(const AppSettings &settings)
     object.insert(QStringLiteral("overlayAutoHide"), settings.overlayAutoHide);
     object.insert(QStringLiteral("overlayAutoHideSeconds"), settings.overlayAutoHideSeconds);
     object.insert(QStringLiteral("overlayInactivitySeconds"), settings.overlayInactivitySeconds);
+    object.insert(QStringLiteral("vodLibrarySidebarWidth"),
+                  settings.vodLibrarySidebarWidth >= 208 ? settings.vodLibrarySidebarWidth : 0);
     object.insert(QStringLiteral("uiTransparency"), std::clamp(settings.uiTransparency, 0, 100));
     object.insert(QStringLiteral("guidePastHours"), normalizeGuideHours(settings.guidePastHours));
     object.insert(QStringLiteral("epgLookAheadHours"), normalizeGuideHours(settings.epgLookAheadHours));
@@ -393,6 +395,9 @@ QJsonObject toJson(const AppSettings &settings)
     object.insert(
         QStringLiteral("favoriteChannelIdsByProfile"),
         intListMapToJson(settings.favoriteChannelIdsByProfile));
+    object.insert(
+        QStringLiteral("autoFavoriteExcludedChannelIdsByProfile"),
+        intListMapToJson(settings.autoFavoriteExcludedChannelIdsByProfile));
     object.insert(QStringLiteral("selectedGroupByProfile"), stringMapToJson(settings.selectedGroupByProfile));
     object.insert(QStringLiteral("hiddenGroupsByProfile"), stringListMapToJson(settings.hiddenGroupsByProfile));
     object.insert(QStringLiteral("groupOrderByProfile"), stringListMapToJson(settings.groupOrderByProfile));
@@ -435,6 +440,8 @@ AppSettings appSettingsFromJson(const QJsonObject &object)
         std::max(1, object.value(QStringLiteral("overlayAutoHideSeconds")).toInt(settings.overlayAutoHideSeconds));
     settings.overlayInactivitySeconds =
         std::clamp(object.value(QStringLiteral("overlayInactivitySeconds")).toInt(settings.overlayInactivitySeconds), 1, 3600);
+    settings.vodLibrarySidebarWidth = object.value(QStringLiteral("vodLibrarySidebarWidth")).toInt(0);
+    if (settings.vodLibrarySidebarWidth < 208) settings.vodLibrarySidebarWidth = 0;
     settings.uiTransparency =
         std::clamp(object.value(QStringLiteral("uiTransparency")).toInt(settings.uiTransparency), 0, 100);
     settings.guidePastHours =
@@ -532,6 +539,8 @@ AppSettings appSettingsFromJson(const QJsonObject &object)
         intMapFromJson(object.value(QStringLiteral("lastWatchedChannelId")).toObject());
     settings.favoriteChannelIdsByProfile = intListMapFromJson(
         object.value(QStringLiteral("favoriteChannelIdsByProfile")).toObject());
+    settings.autoFavoriteExcludedChannelIdsByProfile = intListMapFromJson(
+        object.value(QStringLiteral("autoFavoriteExcludedChannelIdsByProfile")).toObject());
     settings.selectedGroupByProfile = stringMapFromJson(
         object.value(QStringLiteral("selectedGroupByProfile")).toObject());
     settings.hiddenGroupsByProfile = stringListMapFromJson(

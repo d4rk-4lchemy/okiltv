@@ -1,4 +1,5 @@
 #include "../src/core/secretprotection.h"
+#include "../src/core/channelnumber.h"
 #include "../src/core/appdatapaths.h"
 #include "../src/core/catchupurlresolver.h"
 #include "../src/core/database_service.h"
@@ -139,6 +140,8 @@ class CoreTests final : public QObject
     Q_OBJECT
 
 private slots:
+    void decimalChannelNumbers();
+    void decimalChannelImportAndStorage();
     void channelPublicationRejectsObsoleteImports();
     void sourceEditInvalidatesChannelImport();
     void vodSourceMutationGuardPreservesCredentialsOnFailure();
@@ -219,6 +222,90 @@ private slots:
     void settingsReloadCommitsExistingFile();
     void channelGroupIdsDoNotDecryptChannels();
 };
+
+void CoreTests::decimalChannelNumbers()
+{
+    QCOMPARE(normalizeChannelNumber(QStringLiteral("002.500")), QStringLiteral("2.5"));
+    QCOMPARE(normalizeChannelNumber(QStringLiteral("2.10")), QStringLiteral("2.1"));
+    QCOMPARE(normalizeChannelNumber(QStringLiteral("2.0")), QStringLiteral("2"));
+    QCOMPARE(normalizeChannelNumber(QStringLiteral("0.00000100")), QStringLiteral("0.000001"));
+    for (const auto &bad : {"0", "00.00", "-2", "+2", "2,5", "2.", ".5", "1e2", "2..5", "nan", "1 000"})
+        QVERIFY2(normalizeChannelNumber(QString::fromLatin1(bad)).isEmpty(), bad);
+    QVERIFY(compareChannelNumbers(QStringLiteral("2.05"), QStringLiteral("2.5")) < 0);
+    QVERIFY(compareChannelNumbers(QStringLiteral("2.9"), QStringLiteral("10")) < 0);
+    QVERIFY(compareChannelNumbers(QStringLiteral("2.0000000000000000001"), QStringLiteral("2")) > 0);
+    QCOMPARE(channelNumberFromJson(QJsonValue(2.1)), QStringLiteral("2.1"));
+    QCOMPARE(channelNumberFromJson(QJsonValue(1e-7)), QStringLiteral("0.0000001"));
+    QCOMPARE(channelNumberFromJson(QJsonValue(1e20)), QStringLiteral("100000000000000000000"));
+    QVERIFY(channelNumberFromJson(QJsonValue(true)).isEmpty());
+}
+
+void CoreTests::decimalChannelImportAndStorage()
+{
+    const auto profileId = QUuid::createUuid();
+    M3UService m3u;
+    auto channels = m3u.parse(QByteArrayLiteral(
+        "#EXTM3U\n#EXTINF:-1 tvg-chno=\"4\",Four\nhttp://test/4\n"
+        "#EXTINF:-1 tvg-chno=\"002.500\",Fraction\nhttp://test/25\n"
+        "#EXTINF:-1 tvg-chno=\"bad\",Fallback\nhttp://test/3\n"), profileId);
+    QCOMPARE(channels.size(), 3);
+    QCOMPARE(channels[0].channelNumber, QStringLiteral("4"));
+    QCOMPARE(channels[1].channelNumber, QStringLiteral("2.5"));
+    QCOMPARE(channels[1].sortOrder, 2);
+    QVERIFY(channels[2].channelNumber.isEmpty());
+    QCOMPARE(effectiveChannelNumber(channels[2]), QStringLiteral("3"));
+    QCOMPARE(toVariantMap(channels[1]).value(QStringLiteral("channelNumber")).toString(), QStringLiteral("2.5"));
+
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    const auto path = temp.filePath(QStringLiteral("channels.db"));
+    {
+        DatabaseService database(path);
+        database.upsertChannels(channels);
+        QCOMPARE(database.loadChannels(profileId)[1].channelNumber, QStringLiteral("2.5"));
+        auto refreshed = channels;
+        refreshed[1].channelNumber = QStringLiteral("2.1000000000000000001");
+        qint64 nextId = 3;
+        M3UService::retainChannelIds(refreshed, channels, nextId);
+        QCOMPARE(refreshed[1].id, channels[1].id);
+        database.replaceChannelsForProfile(profileId, refreshed);
+        QCOMPARE(database.loadChannels(profileId)[1].channelNumber, refreshed[1].channelNumber);
+    }
+    // Simulate a pre-feature database, then reopen it through the real migration.
+    const auto connectionName = QStringLiteral("channel-number-migration");
+    {
+        auto connection = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        connection.setDatabaseName(path);
+        QVERIFY(connection.open());
+        QSqlQuery query(connection);
+        QVERIFY(query.exec(QStringLiteral("ALTER TABLE channels DROP COLUMN channel_number")));
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+    DatabaseService migrated(path);
+    const auto legacy = migrated.loadChannels(profileId);
+    QCOMPARE(legacy.size(), 3);
+    QVERIFY(legacy[1].channelNumber.isEmpty());
+    QCOMPARE(effectiveChannelNumber(legacy[1]), QStringLiteral("2"));
+    migrated.upsertChannels(channels);
+    QCOMPARE(migrated.loadChannels(profileId)[1].channelNumber, QStringLiteral("2.5"));
+
+    auto network = std::make_shared<MockNetworkAccess>();
+    ServerProfile profile;
+    profile.xtreamBaseUrl = QStringLiteral("https://xtream.example");
+    profile.xtreamUsername = QStringLiteral("alice");
+    profile.xtreamPassword = QStringLiteral("secret");
+    network->setResponse(QUrl(QStringLiteral("https://xtream.example/player_api.php?username=alice&password=secret&action=get_live_streams")),
+        QByteArrayLiteral(R"([{"stream_id":3,"name":"Three","num":3},{"stream_id":25,"name":"Fraction","num":"2.50"},{"stream_id":21,"name":"Decimal","num":2.1}])"));
+    XtreamService xtream(network);
+    xtream.setProfile(profile);
+    const auto imported = xtream.getLiveStreams();
+    QCOMPARE(imported.size(), 3);
+    QCOMPARE(imported[2].channelNumber, QStringLiteral("2.1"));
+    QCOMPARE(imported[1].channelNumber, QStringLiteral("2.5"));
+    QCOMPARE(imported[0].id, 3);
+    QCOMPARE(imported[0].sortOrder, 3);
+    QCOMPARE(imported[1].sortOrder, 2);
+}
 
 void CoreTests::dateTimeFormatDetection_data()
 {

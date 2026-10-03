@@ -9,7 +9,17 @@
 
 namespace OKILTV::Vod {
 namespace {
-constexpr qsizetype kMaxProbeOutput = 2 * 1024 * 1024;
+constexpr qsizetype kMaxProbeOutput = qsizetype(2) * 1024 * 1024;
+
+void stopProbe(QProcess &process)
+{
+    // Runs on the probe worker, never the GUI thread. Do not acknowledge
+    // cancellation (and permit playback) until the child is actually reaped.
+    while (process.state() != QProcess::NotRunning) {
+        process.kill();
+        process.waitForFinished(1000);
+    }
+}
 
 QString boundedText(const QJsonValue &value, qsizetype limit)
 {
@@ -100,18 +110,19 @@ Result<VodMediaProbe> probeVodMedia(const PlaybackDescriptor &descriptor, const 
     process.setProcessChannelMode(QProcess::SeparateChannels);
     process.start(Core::resolveProcessBinary(QStringLiteral("ffprobe")), arguments);
     if (!process.waitForStarted(static_cast<int>(std::clamp<qint64>(context.deadline.remainingTime(), 0, 3000)))) {
+        stopProbe(process);
         if (const auto interrupted = context.interruption()) return *interrupted;
         return Error{ErrorCode::UnsupportedCapability, context.operationId};
     }
     qint64 diagnosticBytes = 0;
     while (process.state() != QProcess::NotRunning) {
         if (const auto interrupted = context.interruption()) {
-            process.kill(); process.waitForFinished(1000); return *interrupted;
+            stopProbe(process); return *interrupted;
         }
         process.waitForFinished(static_cast<int>(std::clamp<qint64>(context.deadline.remainingTime(), 1, 50)));
         diagnosticBytes += process.readAllStandardError().size();
         if (process.bytesAvailable() > kMaxProbeOutput || diagnosticBytes > kMaxProbeOutput) {
-            process.kill(); process.waitForFinished(1000);
+            stopProbe(process);
             return Error{ErrorCode::ResponseTooLarge, context.operationId};
         }
     }

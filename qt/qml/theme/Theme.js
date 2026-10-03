@@ -14,9 +14,20 @@ var textSecondary = "#aac0d3"
 var textMuted = "#8096ab"
 var channelProgressTrack = "#424242"
 var channelProgressFill = "#929292"
+// Shared neutral palette for video overlays. Keep color in small semantic accents.
+var overlayBackground = "#f5101010"
+var overlaySidebar = "#800d0d0d"
+var overlaySurface = "#1a1a1a"
+var overlaySurfaceRaised = "#242424"
+var overlaySurfaceMuted = "#2b2b2b"
+var overlaySurfaceInteractive = "#363636"
+var overlayBorder = "#474747"
+var overlayTextPrimary = "#f4f4f4"
+var overlayTextSecondary = "#bdbdbd"
+var overlayTextMuted = "#909090"
+var vodLibraryBackground = overlayBackground
+var vodLibrarySidebar = overlaySidebar
 // Shared VOD transport and poster progress colors.
-var vodLibraryBackground = "#f508131d"
-var vodLibrarySidebar = "#800d1a27"
 var vodTimelineTrack = "#36454f"
 var vodTimelineFill = "#a9d8ff"
 var success = "#5ac88f"
@@ -45,6 +56,9 @@ var spacingS = 10
 var spacingM = 16
 var spacingL = 24
 var spacingXL = 36
+var vodSidebarMinimumWidth = 208
+var vodSidebarDefaultWidth = 268
+var vodSidebarResizeHandleWidth = 8
 var railWidth = 104
 var transitionMs = 180
 

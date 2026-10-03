@@ -1,6 +1,7 @@
 #pragma once
 #include "../ivodcatalogrepository.h"
 #include "../ivodprogressrepository.h"
+#include "../ivodmovielistsrepository.h"
 #include "../ivodprovider.h"
 #include "vodmigrations.h"
 #include <QMutex>
@@ -11,7 +12,7 @@ namespace OKILTV::Vod {
 // All SQL connections are invocation-local. SourceLoader reads a protected
 // SourceStore snapshot on the caller's worker, never SettingsManager::current().
 class SqliteVodStore final : public IVodMigrations, public IVodSourceAccess,
-    public IVodCatalogRepository, public IVodProgressRepository {
+    public IVodCatalogRepository, public IVodProgressRepository, public IVodMovieListsRepository {
 public:
     using SourceLoader = std::function<Result<SourceContext>(const QUuid &)>;
     SqliteVodStore(QString databasePath, SourceLoader loader);
@@ -41,7 +42,9 @@ public:
     Outcome removeSourceState(const QUuid &) override;
     Result<std::optional<VodProgress>> read(const ContentRef &, const RequestContext &) override;
     Outcome beginSession(const ContentRef &, const QUuid &, const RequestContext &) override;
-    Outcome checkpoint(const ContentRef &, const VodProgress &, const RequestContext &) override;
+    Outcome checkpoint(const ContentRef &, const VodProgress &, const RequestContext &, bool completed = false) override;
+    Result<MovieListState> readMovieLists(const ContentRef &, const RequestContext &) override;
+    Result<MovieListState> setMovieList(const ContentRef &, MovieList, bool, const RequestContext &) override;
     [[nodiscard]] QString backupPath() const;
 private:
     QString m_path;

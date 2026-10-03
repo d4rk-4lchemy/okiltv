@@ -412,6 +412,7 @@ private slots:
     void vodRuntimeDisabledIsInert();
     void vodCatalogSessionLibrary();
     void vodArtworkInvalidAndRemoved();
+    void vodArtworkPersistentConcurrentCache();
     void vodRuntimeRecoversFailedCredentialWrite();
     void vodRuntimeRemovesSourceWithHistory();
     void vodRuntimeMutatesActiveSource_data();
@@ -429,6 +430,7 @@ private slots:
     void removingProfileClearsTrackPreferences();
     void playerRemembersTracksAcrossRestartAndFallsBack();
     void profilesModelGetTracksActiveSource();
+    void shellControllerSidebarWidthPersistence();
     void shellControllerRestoreLastViewClearsOverlayState();
     void shellControllerOpenOverlayPreservesOverlayStateExclusive();
     void appControllerKeepsSettingsOverlayOpenDuringProfileLoad();
@@ -667,6 +669,7 @@ private slots:
     void channelListModelKeyboardSelectionHelpersWrapAndJump();
     void channelListModelSelectByIdNoOpWhenUnchanged();
     void channelListModelActivatesByDisplayNumber();
+    void channelListModelActivatesDecimalNumbers();
     void channelListModelExposesCurrentProgramRoles();
     void channelListModelExposesDvrRecordingRole();
     void sourceGroupsModelAppliesSelectionThresholdAndPersistsReorder();
@@ -678,6 +681,7 @@ private slots:
     void sourceGroupsModelReorderVisibleGroupsAppendsHiddenInRelativeOrder();
     void sourceGroupsModelClearsStaleRowsForInvalidProfile();
     void epgGridModelRefreshPreservesViewport();
+    void epgGridModelConstructionIgnoresPreviousStorage();
     void epgGridModelInitializesTimeWindow();
     void epgGridModelSelectionUpdatesOnlyAffectedRows();
     void epgGridModelNavigationHelpersFollowTimeAndBounds();
@@ -1026,6 +1030,11 @@ void AppModelTests::vodRuntimeNativePlayback()
     QTRY_VERIFY_WITH_TIMEOUT(runtime.isPlaying(), 10000);
     QVERIFY(runtime.playerObject()); QVERIFY(runtime.seekable()); QVERIFY(runtime.durationSeconds() > 59);
     QTRY_VERIFY(runtime.positionSeconds() > 0.2);
+    QTRY_VERIFY(runtime.playbackMetadata(ref));
+    QCOMPARE(runtime.playbackMetadata(ref)->videoWidth, std::optional<int>(160));
+    QCOMPARE(runtime.playbackMetadata(ref)->videoHeight, std::optional<int>(120));
+    QCOMPARE(runtime.playbackMetadata(ref)->audioTracks.size(), 2);
+    QCOMPARE(runtime.playbackMetadata(ref)->subtitleTracks.size(), 2);
     if (render) {
         auto redFrame = [&]() {
             const auto frame = window->grabWindow();
@@ -1422,6 +1431,45 @@ void AppModelTests::vodRuntimeReleasesLegacyBackends()
     QCOMPARE(multiview.layoutMode(), QStringLiteral("off"));
     QVERIFY(!multiview.primaryController()->currentChannelValue());
     QVERIFY(!player.currentChannelValue());
+}
+
+void AppModelTests::shellControllerSidebarWidthPersistence()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    auto &shell = *harness.shellController;
+    auto &draft = *harness.settingsController;
+    const auto original = harness.settings->current().preventDisplaySleep;
+    draft.setPreventDisplaySleep(!original);
+    QSignalSpy changed(&shell, &ShellController::vodLibrarySidebarWidthChanged);
+    QCOMPARE(shell.vodLibrarySidebarWidth(), 0);
+    QVERIFY(!shell.setVodLibrarySidebarWidth(207));
+    QVERIFY(shell.setVodLibrarySidebarWidth(360));
+    QCOMPARE(changed.count(), 1);
+    QVERIFY(draft.dirty());
+    SettingsManager restored(harness.settingsPath);
+    restored.load();
+    QCOMPARE(restored.current().vodLibrarySidebarWidth, 360);
+    QCOMPARE(restored.current().preventDisplaySleep, original);
+    QVERIFY(draft.save());
+    restored.load();
+    QCOMPARE(restored.current().vodLibrarySidebarWidth, 360);
+    QCOMPARE(restored.current().preventDisplaySleep, !original);
+    const auto backup = harness.settingsPath + QStringLiteral(".backup");
+    QVERIFY(QFile::rename(harness.settingsPath, backup));
+    QVERIFY(QDir().mkdir(harness.settingsPath));
+    QVERIFY(!shell.setVodLibrarySidebarWidth(400));
+    QCOMPARE(shell.vodLibrarySidebarWidth(), 360);
+    QCOMPARE(changed.count(), 1);
+    QVERIFY(QDir().rmdir(harness.settingsPath));
+    QVERIFY(QFile::rename(backup, harness.settingsPath));
+    QVERIFY(shell.setVodLibrarySidebarWidth(400));
+    restored.load();
+    QCOMPARE(restored.current().vodLibrarySidebarWidth, 400);
+    QCOMPARE(appSettingsFromJson({}).vodLibrarySidebarWidth, 0);
+    for (const auto &invalid : {QJsonValue(-1), QJsonValue(207), QJsonValue(250.5), QJsonValue("wide")}) {
+        QCOMPARE(appSettingsFromJson({{QStringLiteral("vodLibrarySidebarWidth"), invalid}}).vodLibrarySidebarWidth, 0);
+    }
 }
 
 void AppModelTests::shellControllerRestoreLastViewClearsOverlayState()
@@ -11746,6 +11794,38 @@ void AppModelTests::channelListModelSupportsAutoFavouritesAndGroupPrefs()
     QVERIFY(!model.isFavorite(2));
     QCOMPARE(model.rowCount(), 1);
 
+    // Removing either kind of favourite suppresses future automatic eligibility.
+    QVERIFY(model.toggleFavorite(1));
+    QVERIFY(!model.isFavorite(1));
+    QCOMPARE(model.rowCount(), 0);
+    model.setWatchSeconds({ { 1, 20 * 60 * 60 }, { 2, 10 * 60 * 60 } });
+    QVERIFY(!model.isFavorite(1));
+    QVERIFY(!model.isFavorite(2));
+    QCOMPARE(model.rowCount(), 0);
+    QCOMPARE(model.categories().at(0).toMap().value(QStringLiteral("count")).toInt(), 0);
+
+    SettingsManager reloaded(tempDir.filePath(QStringLiteral("settings.json")));
+    reloaded.load();
+    ChannelListModel restored(&reloaded);
+    restored.setActiveProfileId(QStringLiteral("profile-a"));
+    restored.setChannels({ news, sports }, {});
+    restored.setWatchSeconds({ { 1, 20 * 60 * 60 }, { 2, 10 * 60 * 60 } });
+    QVERIFY(!restored.isFavorite(1));
+    QVERIFY(!restored.isFavorite(2));
+    restored.setActiveProfileId(QStringLiteral("profile-b"));
+    restored.setWatchSeconds({ { 1, 20 * 60 * 60 } });
+    QVERIFY(restored.isFavorite(1));
+    restored.setActiveProfileId(QStringLiteral("profile-a"));
+    restored.setWatchSeconds({ { 1, 20 * 60 * 60 } });
+    QVERIFY(!restored.isFavorite(1));
+
+    // A deliberate re-add clears the exclusion and pins the channel.
+    QVERIFY(model.toggleFavorite(1));
+    QVERIFY(model.isFavorite(1));
+    QVERIFY(!settings.current().autoFavoriteExcludedChannelIdsByProfile
+                 .value(QStringLiteral("profile-a")).contains(1));
+    QCOMPARE(model.rowCount(), 1);
+
     QVERIFY(model.setCategoryHidden(QStringLiteral("Sports"), true));
     const auto hiddenCategories = model.categories();
     QCOMPARE(hiddenCategories.size(), 2);
@@ -12340,6 +12420,12 @@ void AppModelTests::sourceGroupsModelAppliesSelectionThresholdAndPersistsReorder
     QTRY_COMPARE_WITH_TIMEOUT(model.loading(), false, 3000);
     QCOMPARE(favouritesCount(), 2);
 
+    settings.current().autoFavoriteExcludedChannelIdsByProfile[profileAKey] = { news.id, sports.id };
+    settings.save();
+    model.reload();
+    QTRY_COMPARE_WITH_TIMEOUT(model.loading(), false, 3000);
+    QCOMPARE(favouritesCount(), 1); // Manual pins still take precedence.
+
     model.setProfileId(profileBKey);
     QTRY_COMPARE_WITH_TIMEOUT(model.totalCount(), 52, 3000);
     QCOMPARE(model.get(0).value(QStringLiteral("id")).toString(), QStringLiteral("__favourites__"));
@@ -12580,6 +12666,46 @@ void AppModelTests::channelListModelSelectByIdNoOpWhenUnchanged()
     QCOMPARE(selectionSpy.count(), 1);
 }
 
+void AppModelTests::channelListModelActivatesDecimalNumbers()
+{
+    QTemporaryDir temp;
+    SettingsManager settings(temp.filePath(QStringLiteral("settings.json")));
+    ChannelListModel model(&settings);
+    const auto profile = QUuid::createUuid();
+    QList<Channel> channels;
+    const QStringList numbers {QStringLiteral("4"), QStringLiteral("2.5"), QStringLiteral("2"),
+        QStringLiteral("2.10"), QStringLiteral("2.1"), QStringLiteral("2.0000000000000000001")};
+    for (int i = 0; i < numbers.size(); ++i) {
+        Channel channel;
+        channel.id = i + 10;
+        channel.profileId = profile;
+        channel.name = QStringLiteral("Channel %1").arg(i);
+        channel.source = ChannelSource::M3U;
+        channel.sortOrder = i + 1;
+        channel.channelNumber = numbers[i];
+        channels.push_back(channel);
+    }
+    model.setChannels(channels, {});
+    QCOMPARE(model.data(model.index(0), ChannelListModel::DisplayNumberRole).toString(), QStringLiteral("4"));
+    QCOMPARE(model.displayNumbers()[1], QStringLiteral("2.5"));
+    QCOMPARE(model.displayNumberForChannel(toVariantMap(channels[1])), QStringLiteral("2.5"));
+    model.setSearchText(QStringLiteral("Channel 0"));
+    QCOMPARE(model.rowCount(), 1);
+    QSignalSpy activation(&model, &ChannelListModel::channelActivated);
+    QVERIFY(model.activateByDisplayNumber(QStringLiteral("002.500")));
+    QCOMPARE(model.selectedChannelId(), 11);
+    QVERIFY(model.activateByDisplayNumber(QStringLiteral("2")));
+    QCOMPARE(model.selectedChannelId(), 12);
+    QVERIFY(model.activateByDisplayNumber(QStringLiteral("2.1")));
+    QCOMPARE(model.selectedChannelId(), 13); // First duplicate in source order.
+    QVERIFY(model.activateByDisplayNumber(QStringLiteral("2.0000000000000000001")));
+    QCOMPARE(model.selectedChannelId(), 15);
+    for (const auto &bad : {"2.", "2,5", "0", "3", "-2"})
+        QVERIFY(!model.activateByDisplayNumber(QString::fromLatin1(bad)));
+    QCOMPARE(activation.count(), 4);
+    QCOMPARE(model.selectedChannelId(), 15);
+}
+
 void AppModelTests::channelListModelActivatesByDisplayNumber()
 {
     QTemporaryDir tempDir;
@@ -12625,24 +12751,24 @@ void AppModelTests::channelListModelActivatesByDisplayNumber()
 
     QSignalSpy activationSpy(&model, &ChannelListModel::channelActivated);
 
-    QVERIFY(model.activateByDisplayNumber(1));
+    QVERIFY(model.activateByDisplayNumber(QStringLiteral("1")));
     QCOMPARE(model.selectedChannelId(), 11);
     QCOMPARE(activationSpy.count(), 1);
     QCOMPARE(activationSpy.at(0).at(0).toInt(), 11);
 
-    QVERIFY(model.activateByDisplayNumber(2));
+    QVERIFY(model.activateByDisplayNumber(QStringLiteral("2")));
     QCOMPARE(model.selectedChannelId(), 22);
     QCOMPARE(activationSpy.count(), 2);
     QCOMPARE(activationSpy.at(1).at(0).toInt(), 22);
 
-    QVERIFY(model.activateByDisplayNumber(77));
+    QVERIFY(model.activateByDisplayNumber(QStringLiteral("77")));
     QCOMPARE(model.selectedChannelId(), 33);
     QCOMPARE(activationSpy.count(), 3);
     QCOMPARE(activationSpy.at(2).at(0).toInt(), 33);
 
     const auto selectedBeforeMissing = model.selectedChannelId();
     const auto activationCountBeforeMissing = activationSpy.count();
-    QVERIFY(!model.activateByDisplayNumber(999));
+    QVERIFY(!model.activateByDisplayNumber(QStringLiteral("999")));
     QCOMPARE(model.selectedChannelId(), selectedBeforeMissing);
     QCOMPARE(activationSpy.count(), activationCountBeforeMissing);
 }
@@ -12725,6 +12851,38 @@ void AppModelTests::epgGridModelRefreshPreservesViewport()
     model.rebuild(channels, 6, 24);
     QCOMPARE(resetSpy.count(), 1);
     QVERIFY(!persistent.isValid());
+}
+
+void AppModelTests::epgGridModelConstructionIgnoresPreviousStorage()
+{
+    EpgService epg;
+    // Deterministically expose constructor reads of not-yet-initialized members.
+    alignas(EpgGridModel) unsigned char storage[sizeof(EpgGridModel)] {};
+    const auto before = QDateTime::currentDateTimeUtc();
+    auto *constructed = std::construct_at(reinterpret_cast<EpgGridModel *>(storage), &epg);
+    const auto destroy = [](EpgGridModel *model) { std::destroy_at(model); };
+    const std::unique_ptr<EpgGridModel, decltype(destroy)> model(constructed, destroy);
+    const auto after = QDateTime::currentDateTimeUtc();
+
+    const auto roundedStart = [](const QDateTime &now) {
+        auto local = now.addSecs(-6 * 3600).toLocalTime();
+        local.setTime(QTime(local.time().hour(), 0));
+        return local.toMSecsSinceEpoch();
+    };
+    QVERIFY(model->windowStartEpochMs() >= roundedStart(before));
+    QVERIFY(model->windowStartEpochMs() <= roundedStart(after));
+    QCOMPARE(model->guidePastHours(), 6);
+    QCOMPARE(model->lookAheadHours(), 24);
+    QCOMPARE(model->timeSlots().size(), 31);
+
+    // Default viewport is 180 minutes with 120 minutes of forward prefetch.
+    const auto visibleSlots = model->visibleTimeSlots();
+    QCOMPARE(visibleSlots.size(), 6);
+    for (int slot = 0; slot < visibleSlots.size(); ++slot) {
+        QCOMPARE(visibleSlots.at(slot).toMap().value(QStringLiteral("offsetMinutes")).toInt(), slot * 60);
+        QCOMPARE(visibleSlots.at(slot).toMap().value(QStringLiteral("label")),
+                 model->timeSlots().at(slot).toMap().value(QStringLiteral("label")));
+    }
 }
 
 void AppModelTests::epgGridModelInitializesTimeWindow()

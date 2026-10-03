@@ -7,7 +7,7 @@
 
 namespace OKILTV::Vod {
 using PublicValue = std::variant<CatalogScope, ArtworkRef, Success, ProviderCapabilities, CategorySnapshot, CatalogPage,
-    VodDetails, VodMediaProbe, quint64, std::optional<VodProgress>>;
+    VodDetails, VodMediaProbe, MovieListState, quint64, std::optional<VodProgress>>;
 struct JobReply {
     SourceRevision source;
     PublicValue value;

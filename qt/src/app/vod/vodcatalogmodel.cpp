@@ -44,10 +44,19 @@ int selectedProbeTrack(const QList<VodMediaTrack> &tracks, const QString &type, 
     return id > 0 ? id - 1 : -1;
 }
 }
-VodCatalogModel::VodCatalogModel(VodRuntime *runtime, Core::SettingsManager *settings, QObject *parent)
-    : QAbstractListModel(parent), m_runtime(runtime), m_settings(settings)
+VodCatalogModel::VodCatalogModel(VodRuntime *runtime, Core::SettingsManager *settings, QObject *parent, Purpose purpose)
+    : QAbstractListModel(parent), m_runtime(runtime), m_settings(settings), m_purpose(purpose)
 {
+    m_probePlayDelay.setSingleShot(true);
+    m_probePlayDelay.setInterval(5000);
+    m_probePlayDelay.setTimerType(Qt::PreciseTimer);
+    connect(&m_probePlayDelay, &QTimer::timeout, this, &VodCatalogModel::changed);
     connect(runtime, &VodRuntime::stateChanged, this, [this]() {
+        if (m_runtime->active() && pending(Operation::Probe)) {
+            cancelKind(Operation::Probe);
+            m_movie.insert(QStringLiteral("mediaProbeLoading"), false);
+        }
+        if (m_purpose == Purpose::PlaybackSidebar) syncPlayback();
         if (!m_runtime->module()->session()) return;
         const auto &snapshot = m_runtime->module()->session()->snapshot();
         if (!snapshot.ref.playable() || !snapshot.positionValid) return;
@@ -58,14 +67,32 @@ VodCatalogModel::VodCatalogModel(VodRuntime *runtime, Core::SettingsManager *set
     connect(runtime, &VodRuntime::errorOccurred, this, [this](const QString &message) {
         if (m_open && !m_runtime->ready()) { m_error = message; emit changed(); }
     });
-    connect(runtime, &VodRuntime::sourcesReconciled, this, [this]() { if (m_open) { attach(); loadScope(); } });
+    connect(runtime, &VodRuntime::playbackMetadataChanged, this, [this](const ContentRef &ref) {
+        if (ref.profileId != m_profile) return;
+        const auto metadata = m_runtime->playbackMetadata(ref);
+        if (!metadata) return;
+        applyResolution(ref, metadata->videoWidth, metadata->videoHeight);
+        if (ref == m_selected) {
+            cancelKind(Operation::Probe);
+            m_mediaProbe = metadata;
+            updateMediaPresentation();
+        }
+        if (ref == m_playingRef) {
+            m_playingMovie.insert(QStringLiteral("durationMinutes"), m_runtime->module()->session()->snapshot().durationMs.value_or(0) / 60000);
+        }
+        emit changed();
+    });
+    connect(runtime, &VodRuntime::sourcesReconciled, this, [this]() { if (m_open) { attach(); loadScope(); if (m_purpose == Purpose::PlaybackSidebar) { m_playingRef = {}; syncPlayback(); } } });
     connect(runtime, &VodRuntime::sourceInvalidated, this, [this](const QUuid &id) {
         if (id != m_profile) return;
-        cancelAll(); m_resolutions.clear(); m_requestedResolutions.clear(); resetRows(); back(); m_scope = {}; m_categories.clear(); m_continueRows.clear(); emit changed();
+        cancelAll(); m_resolutions.clear(); m_requestedResolutions.clear(); resetRows(); back(); m_scope = {}; m_categories.clear(); m_continueRows.clear(); m_continueMoviesLoaded = false; emit changed();
     });
     connect(runtime, &VodRuntime::sourceUpdated, this, [this](const QUuid &id) {
         reloadSources();
-        if (m_open && id == m_profile) loadScope();
+        if (m_open && id == m_profile) {
+            loadScope();
+            if (m_purpose == Purpose::PlaybackSidebar) { m_playingRef = {}; syncPlayback(); }
+        }
     });
 }
 int VodCatalogModel::rowCount(const QModelIndex &parent) const { return parent.isValid() ? 0 : count(); }
@@ -80,26 +107,47 @@ QVariant VodCatalogModel::data(const QModelIndex &index, int role) const
     case PosterRole: return item.artwork.isEmpty() ? QString{} : m_posters.value(item.artwork.first().id);
     case ResolutionRole: return m_resolutions.value(item.ref.key());
     case ProgressRole: return m_progress.value(item.ref.key(), 0.0);
+    case ToWatchRole: return m_movieLists.value(item.ref.key()).toWatch;
+    case FavouriteRole: return m_movieLists.value(item.ref.key()).favourite;
+    case ListsBusyRole: return listsBusy(item.ref);
     case AvailableRole: return item.availability != Availability::Unavailable;
     default: return {};
     }
 }
 QHash<int, QByteArray> VodCatalogModel::roleNames() const
-{ return {{KeyRole, "movieKey"}, {TitleRole, "title"}, {YearRole, "year"}, {PosterRole, "poster"}, {AvailableRole, "available"}, {ProgressRole, "progressFraction"}, {ResolutionRole, "resolutionLabel"}}; }
+{ return {{KeyRole, "movieKey"}, {TitleRole, "title"}, {YearRole, "year"}, {PosterRole, "poster"}, {AvailableRole, "available"}, {ProgressRole, "progressFraction"}, {ResolutionRole, "resolutionLabel"}, {ToWatchRole, "toWatch"}, {FavouriteRole, "favourite"}, {ListsBusyRole, "listsBusy"}}; }
 bool VodCatalogModel::pending(Operation kind) const
 { return std::any_of(m_pending.cbegin(), m_pending.cend(), [kind](const Pending &p) { return p.kind == kind; }); }
 bool VodCatalogModel::busy() const
-{ return m_marking || (m_open && !m_runtime->ready() && !m_profile.isNull() && m_error.isEmpty()) || std::any_of(m_pending.cbegin(), m_pending.cend(), [](const Pending &p) { return p.kind != Operation::Artwork && p.kind != Operation::Progress && p.kind != Operation::CardProgress && p.kind != Operation::CardResolution && p.kind != Operation::ContinueQuery; }); }
+{ return m_marking || (m_open && !m_runtime->ready() && !m_profile.isNull() && m_error.isEmpty()) || std::any_of(m_pending.cbegin(), m_pending.cend(), [](const Pending &p) { return p.kind != Operation::MovieLists && p.kind != Operation::Probe && p.kind != Operation::Artwork && p.kind != Operation::Progress && p.kind != Operation::CardProgress && p.kind != Operation::CardResolution && p.kind != Operation::ContinueQuery && p.kind != Operation::PlayingDetails && p.kind != Operation::PlayingArtwork; }); }
 bool VodCatalogModel::startingPlayback() const { return pending(Operation::Play); }
 void VodCatalogModel::track(const QUuid &id, Operation kind, const ContentRef &ref, bool append)
-{ m_pending.insert(id, {kind, m_queryGeneration, ref, append}); emit changed(); }
+{
+    m_pending.insert(id, {kind, m_queryGeneration, ref, append, m_listsRevision});
+    if (kind == Operation::Probe) m_probePlayDelay.start();
+    emit changed();
+}
 void VodCatalogModel::attach()
 {
     auto *controller = m_runtime->module()->controller();
     if (!controller || controller == m_controller) return;
     m_controller = controller;
     connect(controller, &VodController::eventCompleted, this, &VodCatalogModel::receive);
-    connect(m_runtime->module()->progressService(), &VodProgressService::persisted, this, [this](const ContentRef &ref) {
+    auto *progressService = m_runtime->module()->progressService();
+    connect(progressService, &VodProgressService::movieListWritePendingChanged, this, [this](const ContentRef &ref) {
+        if (ref.profileId != m_profile) return;
+        if (ref == m_selected) m_movie.insert(QStringLiteral("listsBusy"), listsBusy(ref));
+        for (int row = 0; row < count(); ++row)
+            if (m_rows[row].ref == ref) emit dataChanged(index(row), index(row), {ListsBusyRole});
+        emit changed();
+    });
+    connect(progressService, &VodProgressService::movieListsChanged, this, [this](const ContentRef &ref) {
+        if (ref.profileId != m_profile || ref.catalogNamespace != m_scope.catalogNamespace) return;
+        ++m_listsRevision;
+        track(m_controller->movieLists(ref), Operation::MovieLists, ref);
+        if (m_open && (m_category == QStringLiteral("__to_watch__") || m_category == QStringLiteral("__favourites__"))) query();
+    });
+    connect(progressService, &VodProgressService::persisted, this, [this](const ContentRef &ref) {
         if (!m_open || ref.profileId != m_profile) return;
         queryContinue();
         const bool membershipChanged = m_continueChanged.remove(ref.key());
@@ -115,7 +163,7 @@ void VodCatalogModel::reloadSources()
     }
     const auto exists = std::any_of(m_sources.cbegin(), m_sources.cend(), [this](const QVariant &v) { return QUuid(v.toMap().value(QStringLiteral("id")).toString()) == m_profile; });
     if (!exists && !m_profile.isNull()) {
-        cancelAll(); m_profile = QUuid{}; m_scope = {}; m_categories.clear(); m_continueRows.clear(); resetRows(); back();
+        cancelAll(); m_profile = QUuid{}; m_scope = {}; m_categories.clear(); m_continueRows.clear(); m_continueMoviesLoaded = false; resetRows(); back();
     }
     emit changed();
 }
@@ -133,9 +181,11 @@ void VodCatalogModel::open()
     } else if (!m_profile.isNull()) {
         m_runtime->enableForSession(m_profile); attach();
         if (m_runtime->ready() && m_scope.catalogNamespace.isNull()) loadScope();
-        else if (m_runtime->ready() && (m_rows.isEmpty() || m_category == QStringLiteral("__continue_watching__"))) query();
-        if (m_runtime->ready() && m_selected.playable())
+        else if (m_runtime->ready() && (m_rows.isEmpty() || m_category == QStringLiteral("__continue_watching__") || m_category == QStringLiteral("__to_watch__") || m_category == QStringLiteral("__favourites__"))) query();
+        if (m_runtime->ready() && m_selected.playable()) {
             track(m_controller->progress(m_selected), Operation::Progress, m_selected);
+            track(m_controller->movieLists(m_selected), Operation::MovieLists, m_selected);
+        }
     }
     queryContinue();
     emit changed();
@@ -148,11 +198,13 @@ void VodCatalogModel::close()
 }
 void VodCatalogModel::cancelAll()
 {
+    m_probePlayDelay.stop();
     const auto operations = m_pending.keys(); m_pending.clear();
     if (m_controller) for (const auto &id : operations) m_controller->cancel(id);
 }
 void VodCatalogModel::cancelKind(Operation kind)
 {
+    if (kind == Operation::Probe) m_probePlayDelay.stop();
     const auto operations = m_pending.keys();
     for (const auto &id : operations) if (m_pending.value(id).kind == kind) {
         if (m_pending.value(id).kind == Operation::CardResolution) m_requestedResolutions.remove(m_pending.value(id).ref.key());
@@ -167,9 +219,10 @@ void VodCatalogModel::selectSource(const QString &id)
     if (profile.isNull() || std::none_of(m_sources.cbegin(), m_sources.cend(), [&id](const QVariant &v) { return v.toMap().value(QStringLiteral("id")).toString() == id; })) return;
     if (profile == m_profile && !m_scope.catalogNamespace.isNull()) return;
     cancelAll(); m_searchTimer.stop(); resetRows(); back(); m_categories.clear(); m_continueRows.clear();
+    m_continueMoviesLoaded = false;
     m_profile = profile; m_scope = {}; m_category.clear(); m_search.clear(); m_error.clear();
     m_resolutions.clear(); m_requestedResolutions.clear();
-    m_posters.clear(); m_requestedPosters.clear(); m_progress.clear(); m_requestedProgress.clear(); m_continueEligibility.clear(); m_continueChanged.clear(); ++m_queryGeneration;
+    m_movieLists.clear(); ++m_listsRevision; m_posters.clear(); m_requestedPosters.clear(); m_progress.clear(); m_requestedProgress.clear(); m_continueEligibility.clear(); m_continueChanged.clear(); ++m_queryGeneration;
     m_runtime->enableForSession(profile); attach();
     if (m_runtime->ready()) loadScope();
     emit changed();
@@ -203,7 +256,9 @@ void VodCatalogModel::query(bool append)
     }
     CatalogQuery query; query.scope = m_scope;
     query.continueWatchingOnly = m_category == QStringLiteral("__continue_watching__");
-    if (!m_category.isEmpty() && !query.continueWatchingOnly) query.scope.categoryId = m_category;
+    if (m_category == QStringLiteral("__to_watch__")) query.movieList = MovieList::ToWatch;
+    else if (m_category == QStringLiteral("__favourites__")) query.movieList = MovieList::Favourites;
+    else if (!m_category.isEmpty() && !query.continueWatchingOnly) query.scope.categoryId = m_category;
     query.titleContains = m_search.trimmed(); query.sort = m_descending ? CatalogSort::TitleDescending : CatalogSort::TitleAscending;
     query.pageSize = 100; if (append) query.page = m_next;
     track(m_controller->query(query), Operation::Query, {}, append);
@@ -226,10 +281,14 @@ void VodCatalogModel::selectMovie(int row)
     const auto &item = *selected; m_selected = item.ref; m_mediaProbe.reset(); m_playbackTrackPreferences = {};
     m_movie = {{QStringLiteral("title"), item.title}, {QStringLiteral("year"), item.year ? QString::number(*item.year) : QString{}},
         {QStringLiteral("poster"), item.artwork.isEmpty() ? QString{} : m_posters.value(item.artwork.first().id)}, {QStringLiteral("available"), item.availability != Availability::Unavailable},
-        {QStringLiteral("resumeSeconds"), 0}};
+        {QStringLiteral("resumeSeconds"), 0}, {QStringLiteral("movieKey"), QString::fromLatin1(item.ref.key().toHex())},
+        {QStringLiteral("toWatch"), m_movieLists.value(item.ref.key()).toWatch},
+        {QStringLiteral("favourite"), m_movieLists.value(item.ref.key()).favourite},
+        {QStringLiteral("listsLoaded"), m_movieLists.contains(item.ref.key())}, {QStringLiteral("listsBusy"), listsBusy(item.ref)}};
     requestPoster(row);
     track(m_controller->details(item.ref), Operation::Details, item.ref);
     track(m_controller->progress(item.ref), Operation::Progress, item.ref);
+    track(m_controller->movieLists(item.ref), Operation::MovieLists, item.ref);
 }
 void VodCatalogModel::back()
 {
@@ -238,13 +297,80 @@ void VodCatalogModel::back()
 }
 void VodCatalogModel::play(bool fromBeginning)
 {
-    if (!m_controller || !m_selected.playable() || startingPlayback() || !m_movie.value(QStringLiteral("available")).toBool()) return;
+    if (!m_controller || !m_selected.playable() || startingPlayback() || probePlayBlocked() || !m_movie.value(QStringLiteral("available")).toBool()) return;
     cancelKind(Operation::CardProgress); cancelKind(Operation::CardResolution); m_requestedProgress.clear();
     // Playback takes priority over thumbnail work.
     cancelKind(Operation::Artwork); m_requestedPosters.clear();
-    m_error.clear(); PlaybackPreferences preferences; preferences.fromBeginning = fromBeginning;
+    m_error.clear(); m_startTitle = m_movie.value(QStringLiteral("title")).toString();
+    m_startYear = m_movie.value(QStringLiteral("year")).toString();
+    PlaybackPreferences preferences; preferences.fromBeginning = fromBeginning;
     if (m_movie.value(QStringLiteral("progressLoaded")).toBool()) preferences.trackPreferences = m_playbackTrackPreferences;
     track(m_controller->play(m_selected, preferences), Operation::Play, m_selected);
+}
+void VodCatalogModel::playRow(int row)
+{
+    const auto *item = itemAt(row);
+    if (m_purpose != Purpose::PlaybackSidebar || !m_controller || !item || startingPlayback()
+        || item->availability == Availability::Unavailable) return;
+    if (m_runtime->active() && item->ref == m_runtime->module()->session()->snapshot().ref) {
+        emit playbackStarted();
+        return;
+    }
+    m_startTitle = item->title;
+    m_startYear = item->year ? QString::number(*item->year) : QString{};
+    m_error.clear();
+    cancelKind(Operation::Artwork);
+    m_requestedPosters.clear();
+    track(m_controller->play(item->ref, PlaybackPreferences{}), Operation::Play, item->ref);
+}
+void VodCatalogModel::updatePlayingSummary()
+{
+    if (!m_playingRef.playable()) return;
+    const auto title = m_runtime->title();
+    if (!title.isEmpty()) m_playingMovie.insert(QStringLiteral("title"), title);
+    for (const auto &item : m_rows) {
+        if (item.ref != m_playingRef) continue;
+        if (title.isEmpty()) m_playingMovie.insert(QStringLiteral("title"), item.title);
+        m_playingMovie.insert(QStringLiteral("year"), item.year ? QString::number(*item.year) : QString{});
+        if (m_playingMovie.value(QStringLiteral("poster")).toString().isEmpty() && !item.artwork.isEmpty()) {
+            const auto &art = item.artwork.first();
+            const auto poster = m_posters.value(art.id);
+            if (!poster.isEmpty()) m_playingMovie.insert(QStringLiteral("poster"), poster);
+            else if (!pending(Operation::PlayingArtwork))
+                track(m_controller->artwork(item.ref.profileId, art), Operation::PlayingArtwork, item.ref);
+        }
+        break;
+    }
+}
+void VodCatalogModel::syncPlayback()
+{
+    if (!m_runtime->active()) {
+        if (m_playingRef.playable()) {
+            cancelKind(Operation::PlayingDetails); cancelKind(Operation::PlayingArtwork);
+            m_playingRef = {}; m_playingMovie.clear(); emit changed();
+        }
+        return;
+    }
+    const auto ref = m_runtime->module()->session()->snapshot().ref;
+    if (!ref.playable()) return;
+    if (!m_open || m_profile != ref.profileId) {
+        m_open = true;
+        reloadSources();
+        selectSource(ref.profileId.toString(QUuid::WithoutBraces));
+    }
+    if (!m_controller) return;
+    if (ref != m_playingRef) {
+        cancelKind(Operation::PlayingDetails); cancelKind(Operation::PlayingArtwork);
+        m_playingRef = ref;
+        m_playingMovie = {{QStringLiteral("title"), m_runtime->title()}, {QStringLiteral("year"), m_runtime->playbackYear()}};
+        track(m_controller->details(ref), Operation::PlayingDetails, ref);
+        updatePlayingSummary();
+        emit changed();
+    } else if (!m_runtime->title().isEmpty() && (m_playingMovie.value(QStringLiteral("title")).toString() != m_runtime->title()
+        || m_playingMovie.value(QStringLiteral("year")).toString() != m_runtime->playbackYear())) {
+        m_playingMovie.insert(QStringLiteral("title"), m_runtime->title());
+        m_playingMovie.insert(QStringLiteral("year"), m_runtime->playbackYear()); emit changed();
+    }
 }
 void VodCatalogModel::selectAudioOption(int index)
 {
@@ -303,6 +429,10 @@ void VodCatalogModel::updateMediaPresentation()
 }
 void VodCatalogModel::applyResolution(const ContentRef &ref, std::optional<int> width, std::optional<int> height)
 {
+    if (const auto metadata = m_runtime->playbackMetadata(ref)) {
+        width = metadata->videoWidth;
+        height = metadata->videoHeight;
+    }
     QString label;
     const int w = width.value_or(0), h = height.value_or(0);
     if (w > 0 || h > 0) {
@@ -314,6 +444,7 @@ void VodCatalogModel::applyResolution(const ContentRef &ref, std::optional<int> 
     }
     const auto key = ref.key();
     if (ref == m_selected) m_movie.insert(QStringLiteral("resolutionLabel"), label);
+    if (ref == m_playingRef) m_playingMovie.insert(QStringLiteral("resolutionLabel"), label);
     if (m_resolutions.contains(key) && m_resolutions.value(key) == label) return;
     m_resolutions.insert(key, label);
     for (int row = 0; row < count(); ++row)
@@ -359,6 +490,18 @@ void VodCatalogModel::requestPoster(int row)
     m_requestedPosters.insert(art.id);
     track(m_controller->artwork(m_profile, art), Operation::Artwork, item->ref);
 }
+void VodCatalogModel::rememberPosterPaths(const QList<ArtworkRef> &artwork)
+{
+    for (const auto &art : artwork) {
+        if (const auto path = art.cachedPath) {
+            m_posters.insert(art.id, QUrl::fromLocalFile(*path).toString());
+            m_requestedPosters.remove(art.id);
+        } else {
+            m_posters.remove(art.id); // A file evicted from disk is a new cache miss.
+            m_requestedPosters.remove(art.id);
+        }
+    }
+}
 const MovieSummary *VodCatalogModel::itemAt(int row) const
 {
     // Negative indices address the bounded Continue watching shelf.
@@ -372,16 +515,20 @@ QVariantList VodCatalogModel::continueMovies() const
 {
     QVariantList result;
     for (const auto &item : m_continueRows)
-        result.append(QVariantMap{{QStringLiteral("title"), item.title},
+        result.append(QVariantMap{{QStringLiteral("movieKey"), QString::fromLatin1(item.ref.key().toHex())},
+            {QStringLiteral("title"), item.title},
             {QStringLiteral("year"), item.year ? QString::number(*item.year) : QString{}},
             {QStringLiteral("poster"), item.artwork.isEmpty() ? QString{} : m_posters.value(item.artwork.first().id)},
             {QStringLiteral("resolutionLabel"), m_resolutions.value(item.ref.key())},
-            {QStringLiteral("progressFraction"), m_progress.value(item.ref.key())}});
+            {QStringLiteral("progressFraction"), m_progress.value(item.ref.key())},
+            {QStringLiteral("toWatch"), m_movieLists.value(item.ref.key()).toWatch},
+            {QStringLiteral("favourite"), m_movieLists.value(item.ref.key()).favourite},
+            {QStringLiteral("listsBusy"), listsBusy(item.ref)}});
     return result;
 }
 void VodCatalogModel::queryContinue()
 {
-    if (!m_open || !m_controller || m_scope.catalogNamespace.isNull()) return;
+    if (m_purpose == Purpose::PlaybackSidebar || !m_open || !m_controller || m_scope.catalogNamespace.isNull()) return;
     cancelKind(Operation::ContinueQuery);
     CatalogQuery query; query.scope = m_scope; query.continueWatchingOnly = true; query.pageSize = 12;
     track(m_controller->query(query), Operation::ContinueQuery);
@@ -404,6 +551,49 @@ void VodCatalogModel::applyProgress(const ContentRef &ref, const VodProgress &pr
     }
     emit changed();
 }
+bool VodCatalogModel::listsBusy(const ContentRef &ref) const
+{
+    const auto *service = m_runtime->module()->progressService();
+    return service && service->movieListWritePending(ref);
+}
+void VodCatalogModel::applyMovieLists(const ContentRef &ref, const MovieListState &state)
+{
+    if (ref.profileId != m_profile || ref.catalogNamespace != m_scope.catalogNamespace) return;
+    m_movieLists.insert(ref.key(), state);
+    for (int row = 0; row < count(); ++row)
+        if (m_rows[row].ref == ref) emit dataChanged(index(row), index(row), {ToWatchRole, FavouriteRole, ListsBusyRole});
+    if (ref == m_selected) {
+        m_movie.insert(QStringLiteral("toWatch"), state.toWatch);
+        m_movie.insert(QStringLiteral("favourite"), state.favourite);
+        m_movie.insert(QStringLiteral("listsLoaded"), true);
+        m_movie.insert(QStringLiteral("listsBusy"), listsBusy(ref));
+    }
+    emit changed();
+}
+void VodCatalogModel::toggleToWatch(const QString &key) { toggleMovieList(key, MovieList::ToWatch); }
+void VodCatalogModel::toggleFavourite(const QString &key) { toggleMovieList(key, MovieList::Favourites); }
+void VodCatalogModel::toggleMovieList(const QString &key, MovieList list)
+{
+    if (!m_open || !m_controller || startingPlayback()) return;
+    const auto identity = QByteArray::fromHex(key.toLatin1());
+    ContentRef ref;
+    if (m_selected.key() == identity) ref = m_selected;
+    else {
+        for (const auto &item : m_rows) if (item.ref.key() == identity) { ref = item.ref; break; }
+        if (!ref.valid()) for (const auto &item : m_continueRows) if (item.ref.key() == identity) { ref = item.ref; break; }
+    }
+    if (!ref.valid() || !m_movieLists.contains(identity) || listsBusy(ref)) return;
+    const auto state = m_movieLists.value(identity);
+    const bool enabled = list == MovieList::ToWatch ? !state.toWatch : !state.favourite;
+    m_error.clear();
+    const QPointer<VodCatalogModel> self(this);
+    m_runtime->module()->progressService()->setMovieList(ref, list, enabled, [self, ref](Result<MovieListState> result) {
+        if (!self || ref.profileId != self->m_profile || ref.catalogNamespace != self->m_scope.catalogNamespace) return;
+        if (const auto *error = std::get_if<Error>(&result)) self->m_error = error->message();
+        else self->applyMovieLists(ref, std::get<MovieListState>(result));
+        emit self->changed();
+    });
+}
 void VodCatalogModel::toggleWatched()
 {
     if (!m_controller || !m_selected.playable() || busy() || !m_movie.value(QStringLiteral("progressLoaded")).toBool()) return;
@@ -425,15 +615,18 @@ void VodCatalogModel::receive(const VodEvent &event)
 {
     if (!m_pending.contains(event.operationId)) return;
     const auto request = m_pending.take(event.operationId);
+    if (request.kind == Operation::Probe) m_probePlayDelay.stop();
     if (const auto *error = std::get_if<Error>(&event.result)) {
+        if (request.kind == Operation::ContinueQuery && error->code != ErrorCode::Cancelled)
+            m_continueMoviesLoaded = true;
         if (request.kind == Operation::Query && error->code == ErrorCode::Cancelled && request.generation == m_queryGeneration) query();
-        else if (request.kind == Operation::Probe && request.ref == m_selected && error->code != ErrorCode::Cancelled) {
+        else if (request.kind == Operation::Probe && request.ref == m_selected) {
             m_movie.insert(QStringLiteral("mediaProbeLoading"), false);
-            m_movie.insert(QStringLiteral("mediaProbeError"), error->code == ErrorCode::UnsupportedCapability
+            if (error->code != ErrorCode::Cancelled) m_movie.insert(QStringLiteral("mediaProbeError"), error->code == ErrorCode::UnsupportedCapability
                     ? QStringLiteral("ffprobe is unavailable; track selection will be available after playback starts.")
                     : QStringLiteral("Track information could not be read; you can still play this movie."));
         }
-        else if (request.kind != Operation::Artwork && request.kind != Operation::CardProgress && request.kind != Operation::CardResolution && error->code != ErrorCode::Cancelled) m_error = error->message();
+        else if (request.kind != Operation::PlayingDetails && request.kind != Operation::PlayingArtwork && request.kind != Operation::Artwork && request.kind != Operation::CardProgress && request.kind != Operation::CardResolution && error->code != ErrorCode::Cancelled) m_error = error->message();
         emit changed(); return;
     }
     const auto &value = std::get<PublicValue>(event.result);
@@ -442,29 +635,53 @@ void VodCatalogModel::receive(const VodEvent &event)
         m_scope = std::get<CatalogScope>(value);
         track(m_controller->categories(m_scope), Operation::Categories); query(); queryContinue(); break;
     case Operation::Categories: {
-        m_categories = {QVariantMap{{QStringLiteral("id"), QStringLiteral("__continue_watching__")}, {QStringLiteral("name"), QStringLiteral("Continue watching")}}};
+        m_categories = {
+            QVariantMap{{QStringLiteral("id"), QStringLiteral("__continue_watching__")}, {QStringLiteral("name"), QStringLiteral("Continue watching")}, {QStringLiteral("iconSource"), QStringLiteral("qrc:/resources/icons/play.svg")}},
+            QVariantMap{{QStringLiteral("id"), QStringLiteral("__to_watch__")}, {QStringLiteral("name"), QStringLiteral("To Watch")}, {QStringLiteral("iconSource"), QStringLiteral("qrc:/resources/icons/bookmark.svg")}},
+            QVariantMap{{QStringLiteral("id"), QStringLiteral("__favourites__")}, {QStringLiteral("name"), QStringLiteral("Favourites")}, {QStringLiteral("iconSource"), QStringLiteral("qrc:/resources/icons/favourites.svg")}}};
         for (const auto &category : std::get<CategorySnapshot>(value).categories)
             m_categories.append(QVariantMap{{QStringLiteral("id"), category.id}, {QStringLiteral("name"), category.name}});
         break;
     }
     case Operation::Refresh: query(); queryContinue(); break;
     case Operation::ContinueQuery: {
+        if (request.listsRevision != m_listsRevision) { queryContinue(); break; }
+        const auto &page = std::get<CatalogPage>(value);
+        if (!page.refreshedAtUtc.isValid()) break;
+        m_continueMoviesLoaded = true;
         m_continueRows.clear();
-        for (const auto &item : std::get<CatalogPage>(value).items)
-            if (const auto *movie = std::get_if<MovieSummary>(&item)) m_continueRows.append(*movie);
+        for (const auto &item : page.items)
+            if (const auto *movie = std::get_if<MovieSummary>(&item)) {
+                rememberPosterPaths(movie->artwork);
+                m_movieLists.insert(movie->ref.key(), page.movieLists.value(movie->ref.key()));
+                m_continueRows.append(*movie);
+            }
         break;
     }
     case Operation::Query: {
         if (request.generation != m_queryGeneration) break;
+        if (request.listsRevision != m_listsRevision) { query(); break; }
         const auto &page = std::get<CatalogPage>(value);
         if (!page.refreshedAtUtc.isValid()) { refresh(); break; }
         if (!request.append) resetRows();
         if (!page.items.isEmpty()) {
             const int first = count(); beginInsertRows({}, first, first + static_cast<int>(page.items.size()) - 1);
-            for (const auto &item : page.items) if (const auto *movie = std::get_if<MovieSummary>(&item)) m_rows.append(*movie);
+            for (const auto &item : page.items) if (const auto *movie = std::get_if<MovieSummary>(&item)) {
+                rememberPosterPaths(movie->artwork);
+                m_movieLists.insert(movie->ref.key(), page.movieLists.value(movie->ref.key()));
+                m_rows.append(*movie);
+            }
             endInsertRows();
         }
-        m_next = page.next; break;
+        m_next = page.next;
+        if (m_purpose == Purpose::PlaybackSidebar) updatePlayingSummary();
+        break;
+    }
+    case Operation::MovieLists: {
+        if (request.ref.profileId != m_profile || request.ref.catalogNamespace != m_scope.catalogNamespace) break;
+        if (request.listsRevision != m_listsRevision) { track(m_controller->movieLists(request.ref), Operation::MovieLists, request.ref); break; }
+        applyMovieLists(request.ref, std::get<MovieListState>(value));
+        break;
     }
     case Operation::CardResolution: {
         if (request.generation != m_queryGeneration) { m_requestedResolutions.remove(request.ref.key()); break; }
@@ -475,11 +692,18 @@ void VodCatalogModel::receive(const VodEvent &event)
     }
     case Operation::Details: {
         if (request.ref != m_selected) break;
-        const auto &details = std::get<VodDetails>(value);
+        auto details = std::get<VodDetails>(value);
+        if (const auto metadata = m_runtime->playbackMetadata(request.ref)) details.mediaProbe = metadata;
         applyResolution(request.ref, details.mediaProbe ? details.mediaProbe->videoWidth : details.declaredVideoWidth,
             details.mediaProbe ? details.mediaProbe->videoHeight : details.declaredVideoHeight);
-        if (m_movie.value(QStringLiteral("poster")).toString().isEmpty() && !details.artwork.isEmpty())
-            track(m_controller->artwork(m_profile, details.artwork.first()), Operation::Artwork, m_selected);
+        rememberPosterPaths(details.artwork);
+        if (!details.artwork.isEmpty()) {
+            const auto &art = details.artwork.first();
+            const auto poster = m_posters.value(art.id);
+            if (!poster.isEmpty()) m_movie.insert(QStringLiteral("poster"), poster);
+            else if (m_movie.value(QStringLiteral("poster")).toString().isEmpty())
+                track(m_controller->artwork(m_profile, art), Operation::Artwork, m_selected);
+        }
         m_movie.insert(QStringLiteral("description"), details.description);
         m_movie.insert(QStringLiteral("genres"), details.genres.join(QStringLiteral(" · ")));
         m_movie.insert(QStringLiteral("cast"), details.cast.join(QStringLiteral(", ")));
@@ -490,10 +714,39 @@ void VodCatalogModel::receive(const VodEvent &event)
         const bool freshProbe = details.mediaProbe
             && details.mediaProbe->observedAtUtc >= QDateTime::currentDateTimeUtc().addDays(-7);
         if (details.mediaProbe) { m_mediaProbe = details.mediaProbe; updateMediaPresentation(); }
-        if (!freshProbe) {
+        if (!freshProbe && !m_runtime->active() && !startingPlayback()) {
             m_movie.insert(QStringLiteral("mediaProbeLoading"), true);
             track(m_controller->probe(m_selected), Operation::Probe, m_selected);
         }
+        break;
+    }
+    case Operation::PlayingDetails: {
+        if (request.ref != m_playingRef) break;
+        const auto &details = std::get<VodDetails>(value);
+        if (const auto metadata = m_runtime->playbackMetadata(request.ref))
+            m_controller->cachePlaybackMetadata(request.ref, *metadata, m_runtime->module()->session()->snapshot().durationMs);
+        applyResolution(request.ref, details.mediaProbe ? details.mediaProbe->videoWidth : details.declaredVideoWidth,
+            details.mediaProbe ? details.mediaProbe->videoHeight : details.declaredVideoHeight);
+        m_playingMovie.insert(QStringLiteral("description"), details.description);
+        m_playingMovie.insert(QStringLiteral("cast"), details.cast.join(QStringLiteral(", ")));
+        m_playingMovie.insert(QStringLiteral("genres"), details.genres.join(QStringLiteral(" · ")));
+        const auto duration = m_runtime->module()->session()->snapshot().durationMs;
+        m_playingMovie.insert(QStringLiteral("durationMinutes"), duration.value_or(details.declaredDurationMs.value_or(0)) / 60000);
+        rememberPosterPaths(details.artwork);
+        if (!details.artwork.isEmpty()) {
+            const auto &art = details.artwork.first();
+            const auto poster = m_posters.value(art.id);
+            if (!poster.isEmpty()) m_playingMovie.insert(QStringLiteral("poster"), poster);
+            else track(m_controller->artwork(request.ref.profileId, art), Operation::PlayingArtwork, request.ref);
+        }
+        break;
+    }
+    case Operation::PlayingArtwork: {
+        if (request.ref != m_playingRef) break;
+        const auto art = std::get<ArtworkRef>(value);
+        rememberPosterPaths({art});
+        const auto path = art.cachedPath;
+        if (path) m_playingMovie.insert(QStringLiteral("poster"), QUrl::fromLocalFile(*path).toString());
         break;
     }
     case Operation::Probe:
@@ -522,7 +775,7 @@ void VodCatalogModel::receive(const VodEvent &event)
         break;
     }
     case Operation::Play:
-        m_runtime->setPlaybackTitle(request.ref, m_movie.value(QStringLiteral("title")).toString());
+        m_runtime->setPlaybackTitle(request.ref, m_startTitle, m_startYear);
         emit playbackStarted(); break;
     case Operation::Artwork: {
         const auto art = std::get<ArtworkRef>(value);

@@ -1,6 +1,7 @@
 #pragma once
 #include "iplaybackengine.h"
 #include "mpvplayer.h"
+#include "vodrangestream.h"
 #include <QTimer>
 
 namespace OKILTV::Player {
@@ -18,6 +19,7 @@ public:
     void *renderHandle() const override { return m_player.get(); }
     MpvPlayer *player() const { return m_player.get(); }
 private:
+    void startLoad(const PlaybackRequest &request);
     void sample(bool loaded = false, bool seekCompleted = false);
     void finish(const QUuid &, EndReason, bool retryable = false);
     std::unique_ptr<MpvPlayer> m_player;
@@ -32,5 +34,8 @@ private:
     QJsonObject m_trackPreferences;
     bool m_requireRenderSurface = false;
     std::optional<PlaybackRequest> m_waitingForRender;
+    VodRangeStream::Ptr m_rangeStream;
+    bool m_preparingRange = false;
+    bool m_requestedPause = false;
 };
 }

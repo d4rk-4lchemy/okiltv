@@ -293,6 +293,8 @@ void SourceGroupsModel::reload()
 
     const auto profileId = m_profileId;
     const auto favouriteChannelIds = m_settings->current().favoriteChannelIdsByProfile.value(profileId);
+    const auto excludedIds = m_settings->current().autoFavoriteExcludedChannelIdsByProfile.value(profileId);
+    const QSet<int> excludedChannelIds(excludedIds.cbegin(), excludedIds.cend());
     const auto favouritesId = QString::fromUtf8(kFavouritesGroupId);
     const auto persisted = persistedDraftState(profileId);
     const auto draft = m_draftsByProfile.value(profileId);
@@ -301,7 +303,7 @@ void SourceGroupsModel::reload()
 
     setLoading(true);
     m_backgroundTasks.addFuture(QtConcurrent::run([this, generation, profileId, profileUuid,
-                                                  favouriteChannelIds, retainFavourites]() {
+                                                  favouriteChannelIds, excludedChannelIds, retainFavourites]() {
         ReloadResult result;
         result.profileId = profileId;
         try {
@@ -328,7 +330,8 @@ void SourceGroupsModel::reload()
                 if (!channel.categoryName.isEmpty() && !categoryNameById.contains(groupId)) {
                     categoryNameById.insert(groupId, channel.categoryName);
                 }
-                if (watchSecondsByChannelId.value(channel.id, 0) >= kFavouritesEligibleWatchSeconds
+                if ((!excludedChannelIds.contains(channel.id)
+                     && watchSecondsByChannelId.value(channel.id, 0) >= kFavouritesEligibleWatchSeconds)
                     || manualFavouriteChannelIds.contains(channel.id)) {
                     favouritesCount += 1;
                 }

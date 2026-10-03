@@ -1,6 +1,7 @@
 #include "vodcontroller.h"
 #include <QTimer>
 #include <QPointer>
+#include <utility>
 
 namespace OKILTV::Vod {
 namespace {
@@ -11,42 +12,85 @@ template<class T> Result<JobReply> reply(Result<T> result, const SourceRevision 
 }
 bool matches(const SourceContext &source, const CatalogScope &scope)
 { return source.revision.profileId == scope.profileId && source.revision.catalogNamespace == scope.catalogNamespace; }
+Outcome cacheArtwork(const VodDependencies &deps, const QUuid &profile, QList<ArtworkRef> &artwork, const RequestContext &context)
+{
+    for (auto &art : artwork) {
+        art.cachedPath.reset();
+        if (const auto error = context.interruption()) return *error;
+        if (!deps.cachedArtwork) continue;
+        const auto result = deps.cachedArtwork(profile, art, context);
+        if (const auto *error = std::get_if<Error>(&result)) {
+            if (error->code == ErrorCode::Cancelled || error->code == ErrorCode::Timeout) return *error;
+            continue; // An artwork miss/error must not hide the catalogue or details.
+        }
+        if (const auto cached = std::get<std::optional<ArtworkRef>>(result)) art.cachedPath = cached->cachedPath;
+    }
+    return Success{};
+}
 }
 VodController::VodController(VodDependencies deps, PlaybackCoordinator &coordinator, QObject *parent)
-    : QObject(parent), m_deps(std::move(deps)), m_coordinator(coordinator) {}
-QUuid VodController::submit(const QUuid &profile, Operation operation, bool play)
+    : QObject(parent), m_deps(std::move(deps)), m_coordinator(coordinator)
+{
+    m_probeCooldown.setSingleShot(true);
+    m_probeCooldown.setInterval(2000);
+    m_probeCooldown.setTimerType(Qt::PreciseTimer);
+    connect(&m_probeCooldown, &QTimer::timeout, this, [this]() {
+        auto pending = std::exchange(m_deferredPlay, {});
+        if (pending) pending->start();
+    });
+}
+QUuid VodController::submit(const QUuid &profile, Operation operation, OperationKind kind)
 {
     RequestContext request;
     const auto id = request.operationId;
+    const bool play = kind == OperationKind::Play;
     if (play) {
-        if (!m_playRequest.isNull()) cancel(m_playRequest);
+        cancelPendingPlayback();
         m_playRequest = id;
     }
-    if (m_stopped || m_blockedSources.contains(profile)) {
-        QTimer::singleShot(0, this, [this, id, profile]() { deliver(id, profile, Error{ErrorCode::Cancelled, id}, false); });
+    if (m_stopped || m_blockedSources.contains(profile)
+        || (kind == OperationKind::Probe && (!m_playRequest.isNull() || m_probeHandoff || m_probeCooldown.isActive()))) {
+        QTimer::singleShot(0, this, [this, id, profile, play]() { deliver(id, profile, Error{ErrorCode::Cancelled, id}, play); });
         return id;
     }
+    if (kind == OperationKind::Probe) m_probes.insert(id);
     const auto deps = m_deps;
-    m_jobs.submit(profile, request, [deps, profile, operation = std::move(operation)](RequestContext context) -> Result<JobReply> {
-        auto source = deps.sources->snapshot(profile);
-        if (const auto *error = std::get_if<Error>(&source)) return *error;
-        const auto snapshot = std::get<SourceContext>(source);
-        context.source = snapshot.revision;
-        if (!snapshot.enabled) return Error{ErrorCode::UnsupportedCapability, context.operationId};
-        auto migrated = deps.migrations->prepare(context);
-        if (const auto *error = std::get_if<Error>(&migrated)) return *error;
-        if (const auto interrupted = context.interruption()) return *interrupted;
-        return operation(deps, snapshot, context);
-    }, [this, id, profile, play](Result<JobReply> result) { deliver(id, profile, std::move(result), play); });
+    auto start = [this, deps, profile, request, id, play, operation = std::move(operation)]() {
+        m_jobs.submit(profile, request, [deps, profile, operation](RequestContext context) -> Result<JobReply> {
+            auto source = deps.sources->snapshot(profile);
+            if (const auto *error = std::get_if<Error>(&source)) return *error;
+            const auto snapshot = std::get<SourceContext>(source);
+            context.source = snapshot.revision;
+            if (!snapshot.enabled) return Error{ErrorCode::UnsupportedCapability, context.operationId};
+            auto migrated = deps.migrations->prepare(context);
+            if (const auto *error = std::get_if<Error>(&migrated)) return *error;
+            if (const auto interrupted = context.interruption()) return *interrupted;
+            return operation(deps, snapshot, context);
+        }, [this, id, profile, play](Result<JobReply> result) { deliver(id, profile, std::move(result), play); });
+    };
+    if (play && (!m_probes.isEmpty() || m_probeCooldown.isActive())) {
+        m_deferredPlay = DeferredPlay{id, profile, std::move(start)};
+        if (!m_probes.isEmpty()) {
+            m_probeHandoff = true;
+            for (const auto &probe : m_probes) m_jobs.cancel(probe);
+        }
+    } else start();
     return id;
 }
 void VodController::deliver(const QUuid &id, const QUuid &profile, Result<JobReply> result, bool play)
 {
+    // Job completion is delivered only after the worker has reaped ffprobe.
+    // Cancellation alone is not an acknowledgement of process termination.
+    if (m_probes.remove(id) && m_probes.isEmpty() && m_probeHandoff) {
+        m_probeHandoff = false;
+        m_probeCooldown.start();
+    }
     if (m_blockedSources.contains(profile)) result = Error{ErrorCode::Cancelled, id};
     if (play && id != m_playRequest) result = Error{ErrorCode::Cancelled, id};
     if (const auto *value = std::get_if<JobReply>(&result); value && !m_deps.sources->isCurrent(value->source))
         result = Error{ErrorCode::Cancelled, id};
     if (auto *error = std::get_if<Error>(&result)) {
+        if (play && m_playRequest == id) m_playRequest = QUuid{};
         error->operationId = id;
         if (completed) completed({id, profile, *error});
         emit eventCompleted({id, profile, *error});
@@ -57,6 +101,7 @@ void VodController::deliver(const QUuid &id, const QUuid &profile, Result<JobRep
         const auto progress = std::get<std::optional<VodProgress>>(value.value);
         m_coordinator.play(id, *value.playback, QUuid::createUuid(), progress,
             [this, id, profile](Outcome outcome) {
+                if (m_playRequest == id) m_playRequest = QUuid{};
                 if (auto *error = std::get_if<Error>(&outcome)) {
                     error->operationId = id;
                     if (completed) completed({id, profile, *error});
@@ -115,7 +160,16 @@ QUuid VodController::query(const CatalogQuery &query)
     return submit(query.scope.profileId, [query](const VodDependencies &deps, const SourceContext &source, const RequestContext &context) -> Result<JobReply> {
         if (!matches(source, query.scope) || query.pageSize < 1 || query.pageSize > 1000)
             return Error{ErrorCode::InvalidResponse, context.operationId};
-        return reply(deps.catalog->query(query, context), source.revision);
+        auto result = deps.catalog->query(query, context);
+        if (const auto *error = std::get_if<Error>(&result)) return *error;
+        auto page = std::get<CatalogPage>(std::move(result));
+        for (auto &item : page.items) {
+            if (auto *movie = std::get_if<MovieSummary>(&item)) {
+                const auto cached = cacheArtwork(deps, source.revision.profileId, movie->artwork, context);
+                if (const auto *error = std::get_if<Error>(&cached)) return *error;
+            }
+        }
+        return JobReply{source.revision, std::move(page), {}};
     });
 }
 QUuid VodController::details(const ContentRef &ref)
@@ -125,14 +179,20 @@ QUuid VodController::details(const ContentRef &ref)
             return Error{ErrorCode::ContentUnavailable, context.operationId};
         auto stored = deps.catalog->readDetails(ref, context);
         if (const auto *error = std::get_if<Error>(&stored)) return *error;
-        if (const auto cached = std::get<std::optional<VodDetails>>(stored)) return JobReply{source.revision, *cached, {}};
+        if (auto cached = std::get<std::optional<VodDetails>>(std::move(stored))) {
+            const auto artwork = cacheArtwork(deps, ref.profileId, cached->artwork, context);
+            if (const auto *error = std::get_if<Error>(&artwork)) return *error;
+            return JobReply{source.revision, std::move(*cached), {}};
+        }
         auto response = deps.provider->fetchDetails(source, ref, context);
         if (const auto *error = std::get_if<Error>(&response)) return *error;
-        const auto value = std::get<VodDetails>(response);
+        auto value = std::get<VodDetails>(std::move(response));
         if (value.ref != ref) return Error{ErrorCode::InvalidResponse, context.operationId};
         auto saved = deps.catalog->storeDetails(value, context);
         if (const auto *error = std::get_if<Error>(&saved)) return *error;
-        return JobReply{source.revision, value, {}};
+        const auto artwork = cacheArtwork(deps, ref.profileId, value.artwork, context);
+        if (const auto *error = std::get_if<Error>(&artwork)) return *error;
+        return JobReply{source.revision, std::move(value), {}};
     });
 }
 QUuid VodController::probe(const ContentRef &ref)
@@ -158,7 +218,7 @@ QUuid VodController::probe(const ContentRef &ref)
             if (const auto *error = std::get_if<Error>(&saved)) return *error;
         }
         return JobReply{source.revision, std::move(probe), {}};
-    });
+    }, OperationKind::Probe);
 }
 QUuid VodController::refresh(const CatalogScope &scope)
 {
@@ -167,8 +227,26 @@ QUuid VodController::refresh(const CatalogScope &scope)
         return reply(VodCatalogService::refresh(deps, source, scope, context), source.revision);
     });
 }
+QUuid VodController::cachePlaybackMetadata(const ContentRef &ref, const VodMediaProbe &metadata, std::optional<qint64> durationMs)
+{
+    return submit(ref.profileId, [ref, metadata, durationMs](const VodDependencies &deps, const SourceContext &source, const RequestContext &context) -> Result<JobReply> {
+        if (!ref.playable() || ref.catalogNamespace != source.revision.catalogNamespace)
+            return Error{ErrorCode::ContentUnavailable, context.operationId};
+        auto stored = deps.catalog->readDetails(ref, context);
+        if (const auto *error = std::get_if<Error>(&stored)) return *error;
+        auto details = std::get<std::optional<VodDetails>>(std::move(stored));
+        // Only enrich existing details: this path never fetches provider metadata or media.
+        if (!details) return JobReply{source.revision, metadata, {}};
+        details->mediaProbe = metadata;
+        if (durationMs && *durationMs > 0) details->declaredDurationMs = durationMs;
+        const auto saved = deps.catalog->storeDetails(*details, context);
+        if (const auto *error = std::get_if<Error>(&saved)) return *error;
+        return JobReply{source.revision, *details, {}};
+    });
+}
 QUuid VodController::play(const ContentRef &ref, const PlaybackPreferences &preferences)
 {
+    // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDeleteLeaks) -- submit transfers the owning std::function to the deferred start or job; both release their captures.
     return submit(ref.profileId, [ref, preferences](const VodDependencies &deps, const SourceContext &source, const RequestContext &context) -> Result<JobReply> {
         auto descriptor = VodPlaybackResolver::resolve(deps, source, ref, preferences, context);
         if (const auto *error = std::get_if<Error>(&descriptor)) return *error;
@@ -181,10 +259,18 @@ QUuid VodController::play(const ContentRef &ref, const PlaybackPreferences &pref
         }
         if (preferences.fromBeginning && saved) saved->positionMs = 0;
         return JobReply{source.revision, saved, std::get<PlaybackDescriptor>(descriptor)};
-    }, true);
+    }, OperationKind::Play);
+}
+QUuid VodController::movieLists(const ContentRef &ref)
+{
+    // submit transfers the callable into the owned asynchronous job queue.
+    return submit(ref.profileId, [ref](const VodDependencies &deps, const SourceContext &source, const RequestContext &context) { // NOLINT(clang-analyzer-cplusplus.NewDeleteLeaks)
+        return reply(deps.lists->readMovieLists(ref, context), source.revision);
+    });
 }
 QUuid VodController::progress(const ContentRef &ref)
 {
+    // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDeleteLeaks) -- submit transfers the owning std::function to the job runner, which releases its captures on completion.
     return submit(ref.profileId, [ref](const VodDependencies &deps, const SourceContext &source, const RequestContext &context) -> Result<JobReply> {
         if (!ref.playable() || ref.catalogNamespace != source.revision.catalogNamespace)
             return Error{ErrorCode::ContentUnavailable, context.operationId};
@@ -208,7 +294,7 @@ QUuid VodController::removeSource(const QUuid &profile)
             if (completed) completed({id, profile, *error});
             return;
         }
-        m_jobs.cancelSource(profile);
+        sourceChanged(profile);
         QPointer<VodController> self(this);
         m_coordinator.removeSource(profile, [self, id, profile, deps](Outcome stopped) {
             if (!self) return;
@@ -238,14 +324,33 @@ QUuid VodController::removeSource(const QUuid &profile)
     });
     return id;
 }
-void VodController::cancel(const QUuid &operation) { m_jobs.cancel(operation); m_coordinator.cancel(operation); }
+void VodController::cancel(const QUuid &operation)
+{
+    if (m_playRequest == operation) m_playRequest = QUuid{};
+    if (m_deferredPlay && m_deferredPlay->id == operation) {
+        const auto profile = m_deferredPlay->profile;
+        m_deferredPlay.reset();
+        QTimer::singleShot(0, this, [this, operation, profile]() {
+            deliver(operation, profile, Error{ErrorCode::Cancelled, operation}, true);
+        });
+    }
+    m_jobs.cancel(operation);
+    m_coordinator.cancel(operation);
+}
 void VodController::cancelPendingPlayback()
 {
     const auto operation = m_playRequest;
     m_playRequest = QUuid{};
     if (!operation.isNull()) cancel(operation);
 }
-void VodController::sourceChanged(const QUuid &profile) { m_jobs.cancelSource(profile); }
+void VodController::sourceChanged(const QUuid &profile)
+{
+    if (m_deferredPlay && m_deferredPlay->profile == profile) {
+        const auto id = m_deferredPlay->id;
+        cancel(id);
+    }
+    m_jobs.cancelSource(profile);
+}
 void VodController::blockSource(const QUuid &profile) { m_blockedSources.insert(profile); sourceChanged(profile); }
 void VodController::unblockSource(const QUuid &profile) { m_blockedSources.remove(profile); }
 void VodController::resolveForRecovery(const ContentRef &ref, VodPlaybackSession::RecoveryCompletion completion)
@@ -268,5 +373,11 @@ void VodController::resolveForRecovery(const ContentRef &ref, VodPlaybackSession
         completion(*reply.playback);
     });
 }
-void VodController::shutdown() { m_stopped = true; m_jobs.shutdown(); }
+void VodController::shutdown()
+{
+    m_stopped = true;
+    m_deferredPlay.reset();
+    m_probeCooldown.stop();
+    m_jobs.shutdown();
+}
 }

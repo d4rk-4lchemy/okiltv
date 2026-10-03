@@ -19,6 +19,9 @@ struct SessionSnapshot {
     bool pauseRequested = false;
     std::optional<Player::EndReason> end;
     QJsonObject trackPreferences;
+    std::optional<int> videoWidth;
+    std::optional<int> videoHeight;
+    QVariantList tracks;
 };
 class VodPlaybackSession final : public QObject {
 public:

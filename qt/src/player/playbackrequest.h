@@ -3,6 +3,7 @@
 #include <QJsonObject>
 #include <QUrl>
 #include <QUuid>
+#include <QVariantList>
 #include <optional>
 
 namespace OKILTV::Player {
@@ -33,5 +34,8 @@ struct PlaybackEvent {
     std::optional<EndReason> end;
     bool retryable = false;
     std::optional<QJsonObject> trackPreferences;
+    std::optional<int> videoWidth;
+    std::optional<int> videoHeight;
+    QVariantList tracks;
 };
 }

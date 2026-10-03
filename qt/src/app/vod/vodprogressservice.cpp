@@ -20,6 +20,7 @@ void VodProgressService::observe(const SessionSnapshot &snapshot, bool checkpoin
         m_currentRef = snapshot.ref;
         m_sequence = 0;
         m_manualStatus.reset();
+        m_completionQueued = false;
         RequestContext request;
         const auto deps = m_deps;
         m_jobs.submit(snapshot.ref.profileId, request, [deps, snapshot](RequestContext context) -> Result<JobReply> {
@@ -36,7 +37,7 @@ void VodProgressService::observe(const SessionSnapshot &snapshot, bool checkpoin
         || m_snapshot->durationMs != snapshot.durationMs
         || m_snapshot->trackPreferences != snapshot.trackPreferences || checkpoint;
     m_snapshot = snapshot;
-    if (checkpoint) flush();
+    if (checkpoint || (!m_completionQueued && observedProgress(snapshot).status == WatchStatus::Watched)) flush();
 }
 void VodProgressService::flush()
 {
@@ -45,20 +46,26 @@ void VodProgressService::flush()
     m_dirty = false;
     auto progress = observedProgress(snapshot);
     progress.sequence = ++m_sequence;
+    const bool completed = !m_completionQueued && progress.status == WatchStatus::Watched;
+    if (completed) m_completionQueued = true;
     RequestContext request;
     const auto deps = m_deps;
-    m_jobs.submit(snapshot.ref.profileId, request, [deps, snapshot, progress](RequestContext context) -> Result<JobReply> {
+    m_jobs.submit(snapshot.ref.profileId, request, [deps, snapshot, progress, completed](RequestContext context) -> Result<JobReply> {
         auto source = deps.sources->snapshot(snapshot.ref.profileId);
         if (const auto *error = std::get_if<Error>(&source)) return *error;
         context.source = std::get<SourceContext>(source).revision;
-        auto result = deps.progress->checkpoint(snapshot.ref, progress, context);
+        auto result = deps.progress->checkpoint(snapshot.ref, progress, context, completed);
         if (const auto *error = std::get_if<Error>(&result)) return *error;
         return JobReply{context.source, Success{}, {}};
-    }, [this, ref = snapshot.ref, profile = snapshot.ref.profileId](Result<JobReply> result) {
+    }, [this, ref = snapshot.ref, profile = snapshot.ref.profileId, session = snapshot.sessionToken, completed](Result<JobReply> result) {
         if (const auto *error = std::get_if<Error>(&result)) {
             m_writeErrors.insert(profile, *error);
+            if (completed && session == m_session) { m_completionQueued = false; m_dirty = true; }
             if (failed) failed(*error);
-        } else { m_writeErrors.remove(profile); emit persisted(ref); }
+        } else {
+            m_writeErrors.remove(profile); emit persisted(ref);
+            if (completed && ref.kind == ContentKind::Movie) emit movieListsChanged(ref);
+        }
     });
 }
 VodProgress VodProgressService::observedProgress(const SessionSnapshot &snapshot) const
@@ -85,6 +92,8 @@ void VodProgressService::setWatched(const ContentRef &ref, bool watched, std::fu
     const auto previous = m_manualStatus;
     const auto session = m_session;
     if (current) m_manualStatus = watched;
+    const bool previousCompletion = m_completionQueued;
+    if (current && watched) m_completionQueued = true;
     const auto observed = current && m_snapshot ? std::optional<VodProgress>(observedProgress(*m_snapshot)) : std::nullopt;
     const auto sequence = current ? ++m_sequence : 1;
     const auto deps = m_deps;
@@ -105,19 +114,42 @@ void VodProgressService::setWatched(const ContentRef &ref, bool watched, std::fu
         progress.status = watched ? WatchStatus::Watched : WatchStatus::InProgress;
         if (!watched) progress.positionMs = 0;
         progress.updatedAtUtc = QDateTime::currentDateTimeUtc();
-        auto written = deps.progress->checkpoint(ref, progress, context);
+        auto written = deps.progress->checkpoint(ref, progress, context, watched);
         if (const auto *error = std::get_if<Error>(&written)) return *error;
         return JobReply{context.source, std::optional<VodProgress>{progress}, {}};
-    }, [this, ref, current, previous, session, completion = std::move(completion)](Result<JobReply> result) {
+    }, [this, ref, current, previous, previousCompletion, watched, session, completion = std::move(completion)](Result<JobReply> result) {
         if (const auto *error = std::get_if<Error>(&result)) {
-            if (current && session == m_session) { m_manualStatus = previous; m_dirty = true; }
+            if (current && session == m_session) { m_manualStatus = previous; m_completionQueued = previousCompletion; m_dirty = true; }
             completion(*error);
         } else {
             const auto saved = std::get<std::optional<VodProgress>>(std::get<JobReply>(result).value);
             completion(saved.value());
             emit persisted(ref);
+            if (watched && ref.kind == ContentKind::Movie) emit movieListsChanged(ref);
         }
         flush();
+    });
+}
+void VodProgressService::setMovieList(const ContentRef &ref, MovieList list, bool enabled, std::function<void(Result<MovieListState>)> completion)
+{
+    if (m_stopped || !ref.valid() || ref.kind != ContentKind::Movie) { completion(Error{ErrorCode::Cancelled, {}}); return; }
+    if (m_listWrites.contains(ref.key())) { completion(Error{ErrorCode::Cancelled, {}}); return; }
+    m_listWrites.insert(ref.key()); emit movieListWritePendingChanged(ref);
+    const auto deps = m_deps;
+    m_jobs.submit(ref.profileId, {}, [deps, ref, list, enabled](RequestContext context) -> Result<JobReply> {
+        const auto source = deps.sources->snapshot(ref.profileId);
+        if (const auto *error = std::get_if<Error>(&source)) return *error;
+        context.source = std::get<SourceContext>(source).revision;
+        const auto result = deps.lists->setMovieList(ref, list, enabled, context);
+        if (const auto *error = std::get_if<Error>(&result)) return *error;
+        return JobReply{context.source, std::get<MovieListState>(result), {}};
+    }, [this, ref, completion = std::move(completion)](Result<JobReply> result) {
+        m_listWrites.remove(ref.key()); emit movieListWritePendingChanged(ref);
+        if (const auto *error = std::get_if<Error>(&result)) completion(*error);
+        else {
+            completion(std::get<MovieListState>(std::get<JobReply>(result).value));
+            emit movieListsChanged(ref);
+        }
     });
 }
 void VodProgressService::flushSource(const QUuid &profile, std::function<void(Outcome)> completion)

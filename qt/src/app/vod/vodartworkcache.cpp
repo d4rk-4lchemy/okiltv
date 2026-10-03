@@ -7,9 +7,18 @@
 #include <QFile>
 #include <QImageReader>
 #include <QSaveFile>
+#include <QScopeGuard>
 #include <algorithm>
 
 namespace OKILTV::Vod {
+namespace {
+bool validReference(const ArtworkRef &ref)
+{
+    return ref.id.size() == 64 && std::all_of(ref.id.cbegin(), ref.id.cend(), [](QChar c) {
+        return (c >= u'0' && c <= u'9') || (c >= u'a' && c <= u'f');
+    });
+}
+}
 VodArtworkCache::VodArtworkCache(QString directory) : m_directory(std::move(directory)) {}
 QString VodArtworkCache::sourceDirectory(const QUuid &id) const
 { return QDir(m_directory).filePath(id.toString(QUuid::WithoutBraces)); }
@@ -31,31 +40,64 @@ std::optional<ArtworkRef> VodArtworkCache::remember(const SourceContext &source,
     }
     return ArtworkRef{id, QStringLiteral("poster"), {}};
 }
+std::optional<ArtworkRef> VodArtworkCache::cachedLocked(const QUuid &profile, const ArtworkRef &ref)
+{
+    const auto path = QDir(sourceDirectory(profile)).filePath(ref.id + QStringLiteral(".jpg"));
+    QFile file(path);
+    if (!file.exists()) return {};
+    bool usable = false;
+    if (file.open(QIODevice::ReadOnly)) {
+        QImageReader reader(&file, "jpeg");
+        const auto dimensions = reader.size();
+        usable = file.size() <= qint64(8) * 1024 * 1024 && dimensions.isValid()
+            && dimensions.width() <= 480 && dimensions.height() <= 720
+            && !reader.read().isNull();
+        if (usable) file.setFileTime(QDateTime::currentDateTimeUtc(), QFileDevice::FileModificationTime);
+        file.close();
+    }
+    if (!usable) { QFile::remove(path); return {}; }
+    return ArtworkRef{ref.id, ref.role, path};
+}
+Result<std::optional<ArtworkRef>> VodArtworkCache::cached(const QUuid &profile, const ArtworkRef &ref, const RequestContext &context)
+{
+    if (!validReference(ref)) return Error{ErrorCode::InvalidResponse, context.operationId};
+    QMutexLocker lock(&m_mutex);
+    if (m_removed.contains(profile)) return Error{ErrorCode::Cancelled, context.operationId};
+    if (const auto error = context.interruption()) return *error;
+    return cachedLocked(profile, ref);
+}
 Result<ArtworkRef> VodArtworkCache::resolve(const QUuid &profile, const ArtworkRef &ref, const RequestContext &context)
 {
-    if (ref.id.size() != 64 || std::any_of(ref.id.cbegin(), ref.id.cend(), [](QChar c) {
-        return !(c >= u'0' && c <= u'9') && !(c >= u'a' && c <= u'f');
-    })) return Error{ErrorCode::InvalidResponse, context.operationId};
+    if (!validReference(ref)) return Error{ErrorCode::InvalidResponse, context.operationId};
     const auto base = QDir(sourceDirectory(profile)).filePath(ref.id);
     const auto path = base + QStringLiteral(".jpg");
+    const auto key = profile.toString(QUuid::WithoutBraces) + ref.id;
     QUrl remote;
     {
         QMutexLocker lock(&m_mutex);
-        if (m_removed.contains(profile)) return Error{ErrorCode::Cancelled, context.operationId};
-        if (QFile::exists(path)) {
-            QFile file(path);
-            if (file.open(QIODevice::ReadOnly)) file.setFileTime(QDateTime::currentDateTimeUtc(), QFileDevice::FileModificationTime);
-            return ArtworkRef{ref.id, ref.role, path};
+        while (m_inFlight.contains(key) && !m_removed.contains(profile)) {
+            if (const auto error = context.interruption()) return *error;
+            m_downloadFinished.wait(&m_mutex, 25);
         }
+        if (m_removed.contains(profile)) return Error{ErrorCode::Cancelled, context.operationId};
+        if (const auto error = context.interruption()) return *error;
+        if (const auto local = cachedLocked(profile, ref)) return *local;
         QFile file(base + QStringLiteral(".url"));
         if (!file.open(QIODevice::ReadOnly) || file.size() > 65536) return Error{ErrorCode::ContentUnavailable, context.operationId};
         try { remote = QUrl(Core::unprotectSecret(QString::fromUtf8(file.readAll()))); }
         catch (...) { return Error{ErrorCode::SecretUnavailable, context.operationId}; }
+        m_inFlight.insert(key);
     }
+    const auto finished = qScopeGuard([this, key]() {
+        QMutexLocker lock(&m_mutex);
+        m_inFlight.remove(key);
+        m_downloadFinished.wakeAll();
+    });
     if (!httpUrlAllowed(remote)) return Error{ErrorCode::InvalidResponse, context.operationId};
     auto request = context;
     request.responseByteLimit = qint64(8) * 1024 * 1024;
-    request.deadline = QDeadlineTimer(10000);
+    request.deadline = QDeadlineTimer(context.deadline.isForever() ? qint64(10000)
+        : std::min(context.deadline.remainingTime(), qint64(10000)));
     const auto response = QtHttpTransport{}.get({remote, {}, RedirectPolicy::SameOrigin}, request);
     if (const auto *error = std::get_if<Error>(&response)) return *error;
     const auto &http = std::get<HttpResponse>(response);
@@ -105,6 +147,7 @@ void VodArtworkCache::removeSource(const QUuid &profile)
 {
     QMutexLocker lock(&m_mutex);
     m_removed.insert(profile);
+    m_downloadFinished.wakeAll();
     QDir(sourceDirectory(profile)).removeRecursively();
 }
 }

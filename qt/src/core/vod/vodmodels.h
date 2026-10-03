@@ -6,6 +6,7 @@
 #include <QList>
 #include <QJsonObject>
 #include <QMap>
+#include <QHash>
 #include <QUrl>
 #include <atomic>
 #include <memory>
@@ -162,6 +163,12 @@ struct LocalPageToken {
     QByteArray lastIdentity;
 };
 enum class CatalogSort { TitleAscending, TitleDescending };
+enum class MovieList { None, ToWatch, Favourites };
+struct MovieListState {
+    bool toWatch = false;
+    bool favourite = false;
+    bool operator==(const MovieListState &) const = default;
+};
 struct CatalogQuery {
     CatalogScope scope;
     QString titlePrefix;
@@ -170,6 +177,7 @@ struct CatalogQuery {
     std::optional<LocalPageToken> page;
     QString titleContains;
     bool continueWatchingOnly = false;
+    MovieList movieList = MovieList::None;
 };
 struct CatalogPage {
     CatalogScope scope;
@@ -177,6 +185,7 @@ struct CatalogPage {
     QList<CatalogItem> items;
     std::optional<LocalPageToken> next;
     QDateTime refreshedAtUtc;
+    QHash<QByteArray, MovieListState> movieLists;
 };
 struct ImportToken {
     QUuid id;

@@ -4,6 +4,7 @@
 #include "../core/debuglogger.h"
 #include "../core/trackpreferences.h"
 #include "catchupstreamsession.h"
+#include "vodrangestream.h"
 
 #include <QCoreApplication>
 #include <QFileInfo>
@@ -255,6 +256,21 @@ void catchupStreamCancel(void *cookie)
     if (handle != nullptr && handle->session) {
         handle->session->cancelRead(handle->generation);
     }
+}
+
+int vodStreamOpen(void *, char *uri, mpv_stream_cb_info *info)
+{
+    if (!uri || !info) return -1;
+    auto stream = VodRangeStream::find(QString::fromUtf8(uri));
+    if (!stream || !stream->claimReader()) return -1;
+    using Handle = VodRangeStream::Ptr;
+    info->cookie = new Handle(std::move(stream));
+    info->read_fn = [](void *cookie, char *buffer, quint64 count) { return (*static_cast<Handle *>(cookie))->read(buffer, count); };
+    info->seek_fn = [](void *cookie, qint64 offset) { return (*static_cast<Handle *>(cookie))->seek(offset); };
+    info->size_fn = [](void *cookie) { return (*static_cast<Handle *>(cookie))->size(); };
+    info->cancel_fn = [](void *cookie) { (*static_cast<Handle *>(cookie))->cancel(); };
+    info->close_fn = [](void *cookie) { delete static_cast<Handle *>(cookie); };
+    return 0;
 }
 
 int catchupStreamOpen(void *, char *uri, mpv_stream_cb_info *info)
@@ -947,12 +963,14 @@ void MpvPlayer::releaseRenderContext()
 
 bool MpvPlayer::registerCatchupStreamProtocol()
 {
+    m_vodRangeProtocolAvailable = false;
     if (m_api->streamCbAddRo == nullptr || m_state->handle == nullptr) {
         Core::DebugLogger::instance().log(
             QStringLiteral("mpv"),
             QStringLiteral("libmpv stream_cb unavailable; catch-up owned stream disabled."));
         return false;
     }
+    m_vodRangeProtocolAvailable = m_api->streamCbAddRo(m_state->handle, "okiltv-vod", nullptr, &vodStreamOpen) >= 0;
     const auto result = m_api->streamCbAddRo(m_state->handle, "okiltv-catchup", nullptr, &catchupStreamOpen);
     if (result < 0) {
         Core::DebugLogger::instance().log(
@@ -990,6 +1008,33 @@ int MpvPlayer::loadFileLocked(const QString &url, const QString &options)
 void MpvPlayer::play(const QString &url, const QString &loadfileOptions)
 {
     playWithPolicy(url, loadfileOptions, TransportPolicy::LiveMpegTsNormalized);
+}
+
+QByteArray MpvPlayer::vodUserAgent() const
+{
+    return (m_userAgent.isEmpty() ? Core::defaultPlayerUserAgent() : m_userAgent).toUtf8();
+}
+bool MpvPlayer::vodRangeCacheEligible(const PlaybackRequest &request)
+{
+    const auto &url = request.mediaUri;
+    if (request.transport != TransportPolicy::NativeMedia || request.policy != PlaybackPolicy::OnDemand
+        || (url.scheme() != QStringLiteral("http") && url.scheme() != QStringLiteral("https"))
+        || (!url.path().endsWith(QStringLiteral(".mp4"), Qt::CaseInsensitive)
+            && !url.path().endsWith(QStringLiteral(".mov"), Qt::CaseInsensitive))) return false;
+    // Keep advanced native HTTP/TLS/proxy options on the native transport.
+    for (auto it = m_options.cbegin(); it != m_options.cend(); ++it) {
+        const auto &key = it.key();
+        if (key.startsWith(QStringLiteral("stream-")) || key.startsWith(QStringLiteral("http-"))
+            || key.startsWith(QStringLiteral("tls-")) || key.startsWith(QStringLiteral("cookies"))) return false;
+    }
+    for (auto it = request.allowedHeaders.cbegin(); it != request.allowedHeaders.cend(); ++it) {
+        if (it.key().toLower() != "user-agent"
+            || std::any_of(it.value().cbegin(), it.value().cend(), [](unsigned char c) { return c < 32 || c >= 127; })) return false;
+    }
+    for (auto it = request.validatedEngineOptions.cbegin(); it != request.validatedEngineOptions.cend(); ++it) {
+        if (it.key() != QStringLiteral("keep-open") || it.value() != QStringLiteral("no")) return false;
+    }
+    return ensureInitialized() && m_vodRangeProtocolAvailable;
 }
 
 bool MpvPlayer::play(const PlaybackRequest &request, const QUuid &loadToken)
@@ -1037,7 +1082,8 @@ bool MpvPlayer::play(const PlaybackRequest &request, const QUuid &loadToken)
         QMutexLocker lock(&m_loadMutex);
         if (!m_pendingLoadToken.isNull() || !m_activeLoadToken.isNull()) return false;
         m_pendingLoadToken = loadToken;
-        m_typedRemoteMedia = request.mediaUri.scheme() == QStringLiteral("http") || request.mediaUri.scheme() == QStringLiteral("https");
+        m_typedRemoteMedia = request.mediaUri.scheme() == QStringLiteral("http") || request.mediaUri.scheme() == QStringLiteral("https")
+            || request.mediaUri.scheme() == QStringLiteral("okiltv-vod");
     }
     const auto ok = playWithPolicy(request.mediaUri.isLocalFile() ? request.mediaUri.toLocalFile() : request.mediaUri.toString(QUrl::FullyEncoded), options, request.transport);
     if (!ok) { QMutexLocker lock(&m_loadMutex); m_pendingLoadToken = QUuid{}; }
@@ -1543,6 +1589,7 @@ QVariantList MpvPlayer::queryTrackList() const
         const auto codecKey = QStringLiteral("track-list/%1/codec").arg(i).toUtf8();
         const auto selectedKey = QStringLiteral("track-list/%1/selected").arg(i).toUtf8();
         const auto defaultKey = QStringLiteral("track-list/%1/default").arg(i).toUtf8();
+        const auto forcedKey = QStringLiteral("track-list/%1/forced").arg(i).toUtf8();
         const auto type = propertyString(typeKey.constData());
         const auto id = propertyInt(idKey.constData());
         if (!type.has_value() || !id.has_value()) {
@@ -1557,6 +1604,7 @@ QVariantList MpvPlayer::queryTrackList() const
         track[QStringLiteral("codec")] = propertyString(codecKey.constData()).value_or(QString {});
         track[QStringLiteral("selected")] = propertyFlag(selectedKey.constData()).value_or(false);
         track[QStringLiteral("default")] = propertyFlag(defaultKey.constData()).value_or(false);
+        track[QStringLiteral("forced")] = propertyFlag(forcedKey.constData()).value_or(false);
         result.append(track);
     }
 
@@ -2317,6 +2365,7 @@ void MpvPlayer::processEvents()
             }
             break;
         case kMpvEventFileLoaded:
+            m_tracksLoadedGeneration.store(m_trackGeneration.load());
             {
                 QUuid token;
                 { QMutexLocker lock(&m_loadMutex); token = m_activeLoadToken; }
@@ -2325,10 +2374,12 @@ void MpvPlayer::processEvents()
                     // A GUI timer cannot guarantee that periodic telemetry has
                     // caught up with FILE_LOADED under CPU/render contention.
                     refreshCachedTelemetryFast();
+                    // Native load-tagged consumers also need this file's dimensions/tracks,
+                    // rather than slow telemetry retained from the previous load.
+                    refreshCachedTelemetrySlow(true);
                     queueOnOwnerThread([this, token]() { emit mediaLoaded(token); });
                 }
             }
-            m_tracksLoadedGeneration.store(m_trackGeneration.load());
             Core::DebugLogger::instance().log(QStringLiteral("mpv"), QStringLiteral("Received MPV_EVENT_FILE_LOADED."));
             m_trackListRefreshPending.store(true);
             m_slowTelemetryRefreshPending.store(true);

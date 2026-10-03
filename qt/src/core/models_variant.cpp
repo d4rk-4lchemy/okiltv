@@ -70,6 +70,7 @@ QVariantMap toVariantMap(const Channel &channel)
         { QStringLiteral("iconUrl"), channel.iconUrl },
         { QStringLiteral("cachedIconPath"), channel.cachedIconPath },
         { QStringLiteral("sortOrder"), channel.sortOrder },
+        { QStringLiteral("channelNumber"), channel.channelNumber },
         { QStringLiteral("profileId"), guidToString(channel.profileId) },
         { QStringLiteral("source"), channelSourceToString(channel.source) },
         { QStringLiteral("streamUrl"), channel.streamUrl },

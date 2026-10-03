@@ -4,6 +4,7 @@
 #include <QSqlQuery>
 #include <QTemporaryDir>
 #include <QtTest>
+#include <algorithm>
 
 using namespace OKILTV::Vod;
 namespace {
@@ -40,6 +41,18 @@ struct Fixture {
         return store->publishIfCurrent(token, true);
     }
 };
+QVariant sqlValue(const QString &path, const QString &statement)
+{
+    const auto name = QUuid::createUuid().toString();
+    QVariant value;
+    {
+        auto db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), name);
+        db.setDatabaseName(path);
+        if (db.open()) { QSqlQuery query(db); if (query.exec(statement) && query.next()) value = query.value(0); }
+    }
+    QSqlDatabase::removeDatabase(name);
+    return value;
+}
 void sql(const QString &path, const QString &statement)
 {
     const auto name = QUuid::createUuid().toString();
@@ -55,6 +68,228 @@ void sql(const QString &path, const QString &statement)
 class VodStorageTests : public QObject {
     Q_OBJECT
 private slots:
+    void movieListsDurabilityAndMigration()
+    {
+        Fixture fixture;
+        const auto ref = fixture.movie().ref;
+        QVERIFY(std::holds_alternative<quint64>(fixture.publish(fixture.scope(), {fixture.movie()})));
+        QVERIFY(std::holds_alternative<MovieListState>(fixture.store->setMovieList(ref, MovieList::ToWatch, true, fixture.request())));
+        QVERIFY(std::holds_alternative<MovieListState>(fixture.store->setMovieList(ref, MovieList::Favourites, true, fixture.request())));
+        fixture.reopen();
+        QCOMPARE(std::get<MovieListState>(fixture.store->readMovieLists(ref, fixture.request())), (MovieListState{true, true}));
+        QVERIFY(std::holds_alternative<Success>(fixture.store->evictCache(fixture.scope(), fixture.request())));
+        QVERIFY(std::holds_alternative<quint64>(fixture.publish(fixture.scope(), {})));
+        QCOMPARE(std::get<MovieListState>(fixture.store->readMovieLists(ref, fixture.request())), (MovieListState{true, true}));
+        QVERIFY(std::holds_alternative<quint64>(fixture.publish(fixture.scope(), {fixture.movie()})));
+        ++fixture.config.revision.credentialRevision;
+        QVERIFY(std::holds_alternative<Success>(fixture.store->advanceCredentialRevision(ref.profileId, fixture.config.revision.credentialRevision)));
+        QVERIFY(std::holds_alternative<Success>(fixture.store->finishCredentialChange(ref.profileId)));
+        fixture.reopen();
+        QCOMPARE(fixture.source.revision.catalogNamespace, ref.catalogNamespace);
+        QCOMPARE(std::get<MovieListState>(fixture.store->readMovieLists(ref, fixture.request())), (MovieListState{true, true}));
+        QVERIFY(std::holds_alternative<Success>(fixture.store->prepareRemoval(ref.profileId)));
+        QVERIFY(std::holds_alternative<Success>(fixture.store->removeSourceState(ref.profileId)));
+        QCOMPARE(sqlValue(fixture.path, QStringLiteral("SELECT COUNT(*) FROM vod_movie_lists")).toInt(), 0);
+
+        Fixture legacy;
+        const auto legacyRef = legacy.movie().ref;
+        VodProgress progress; progress.sessionToken = QUuid::createUuid(); progress.sequence = 1; progress.positionMs = 42000;
+        QVERIFY(std::holds_alternative<Success>(legacy.store->beginSession(legacyRef, progress.sessionToken, legacy.request())));
+        QVERIFY(std::holds_alternative<Success>(legacy.store->checkpoint(legacyRef, progress, legacy.request())));
+        sql(legacy.path, QStringLiteral("DROP TABLE vod_movie_lists"));
+        sql(legacy.path, QStringLiteral("DELETE FROM vod_schema_migrations WHERE version=8"));
+        sql(legacy.path, QStringLiteral("INSERT OR IGNORE INTO vod_schema_migrations VALUES(7)"));
+        legacy.reopen();
+        QCOMPARE(std::get<MovieListState>(legacy.store->readMovieLists(legacyRef, legacy.request())), MovieListState{});
+        QCOMPARE(std::get<std::optional<VodProgress>>(legacy.store->read(legacyRef, legacy.request()))->positionMs, qint64(42000));
+        QCOMPARE(sqlValue(legacy.path, QStringLiteral("SELECT MAX(version) FROM vod_schema_migrations")).toInt(), 8);
+    }
+    void movieListQueriesFilterBeforePagination()
+    {
+        Fixture fixture;
+        QList<CatalogItem> items;
+        for (int i = 0; i < 12; ++i) {
+            auto movie = fixture.movie(QString::number(i)); movie.title = QStringLiteral("Film %1").arg(i, 2, 10, QChar(u'0'));
+            items.append(movie);
+            if (i % 2 == 0) QVERIFY(std::holds_alternative<MovieListState>(fixture.store->setMovieList(movie.ref, MovieList::ToWatch, true, fixture.request())));
+            if (i % 3 == 0) QVERIFY(std::holds_alternative<MovieListState>(fixture.store->setMovieList(movie.ref, MovieList::Favourites, true, fixture.request())));
+        }
+        QVERIFY(std::holds_alternative<quint64>(fixture.publish(fixture.scope(), items)));
+        CatalogQuery query; query.scope = fixture.scope(); query.movieList = MovieList::ToWatch; query.pageSize = 2;
+        QStringList ids;
+        do {
+            const auto result = fixture.store->query(query, fixture.request()); QVERIFY(std::holds_alternative<CatalogPage>(result));
+            const auto page = std::get<CatalogPage>(result); QVERIFY(page.items.size() <= 2);
+            for (const auto &item : page.items) { const auto ref = std::get<MovieSummary>(item).ref; ids.append(ref.providerItemId); QVERIFY(page.movieLists.value(ref.key()).toWatch); }
+            query.page = page.next;
+        } while (query.page);
+        QCOMPARE(ids, (QStringList{QStringLiteral("0"), QStringLiteral("2"), QStringLiteral("4"), QStringLiteral("6"), QStringLiteral("8"), QStringLiteral("10")}));
+        query.movieList = MovieList::Favourites; query.sort = CatalogSort::TitleDescending; query.titleContains = QStringLiteral("09");
+        const auto page = std::get<CatalogPage>(fixture.store->query(query, fixture.request()));
+        QCOMPARE(page.items.size(), 1); QCOMPARE(std::get<MovieSummary>(page.items.first()).ref.providerItemId, QStringLiteral("9"));
+        auto cancelled = fixture.request(); cancelled.cancelled->store(true);
+        QVERIFY(std::holds_alternative<Error>(fixture.store->setMovieList(fixture.movie(QStringLiteral("0")).ref, MovieList::ToWatch, false, cancelled)));
+        QVERIFY(std::get<MovieListState>(fixture.store->readMovieLists(fixture.movie(QStringLiteral("0")).ref, fixture.request())).toWatch);
+        auto wrongSource = fixture.movie().ref; wrongSource.profileId = QUuid::createUuid();
+        QVERIFY(std::holds_alternative<Error>(fixture.store->setMovieList(wrongSource, MovieList::ToWatch, true, fixture.request())));
+    }
+    void movieListsIsolateSourcesAndRejectOldRequests()
+    {
+        Fixture fixture;
+        const auto firstRef = fixture.movie().ref;
+        QVERIFY(std::holds_alternative<MovieListState>(fixture.store->setMovieList(firstRef, MovieList::ToWatch, true, fixture.request())));
+        auto config = fixture.config; config.revision.profileId = QUuid::createUuid();
+        SqliteVodStore other(fixture.path, [config](const QUuid &) -> Result<SourceContext> { return config; });
+        const auto source = std::get<SourceContext>(other.snapshot(config.revision.profileId));
+        auto otherRef = firstRef; otherRef.profileId = source.revision.profileId; otherRef.catalogNamespace = source.revision.catalogNamespace;
+        RequestContext otherRequest; otherRequest.source = source.revision;
+        QCOMPARE(std::get<MovieListState>(other.readMovieLists(otherRef, otherRequest)), MovieListState{});
+        QVERIFY(std::holds_alternative<MovieListState>(other.setMovieList(otherRef, MovieList::Favourites, true, otherRequest)));
+        QCOMPARE(std::get<MovieListState>(other.readMovieLists(otherRef, otherRequest)), (MovieListState{false, true}));
+        QCOMPARE(std::get<MovieListState>(fixture.store->readMovieLists(firstRef, fixture.request())), (MovieListState{true, false}));
+        const auto oldRequest = fixture.request();
+        ++fixture.config.revision.credentialRevision;
+        QVERIFY(std::holds_alternative<Success>(fixture.store->advanceCredentialRevision(firstRef.profileId, fixture.config.revision.credentialRevision)));
+        QVERIFY(std::holds_alternative<Error>(fixture.store->setMovieList(firstRef, MovieList::ToWatch, false, oldRequest)));
+        QVERIFY(std::holds_alternative<Success>(fixture.store->finishCredentialChange(firstRef.profileId)));
+        fixture.reopen();
+        QCOMPARE(std::get<MovieListState>(fixture.store->readMovieLists(firstRef, fixture.request())), (MovieListState{true, false}));
+    }
+    void movieListCompletionIsAtomic()
+    {
+        Fixture fixture;
+        const auto ref = fixture.movie().ref;
+        QVERIFY(std::holds_alternative<MovieListState>(fixture.store->setMovieList(ref, MovieList::ToWatch, true, fixture.request())));
+        QVERIFY(std::holds_alternative<MovieListState>(fixture.store->setMovieList(ref, MovieList::Favourites, true, fixture.request())));
+        VodProgress progress; progress.sessionToken = QUuid::createUuid(); progress.sequence = 1; progress.positionMs = 95000; progress.durationMs = 100000;
+        QVERIFY(std::holds_alternative<Success>(fixture.store->beginSession(ref, progress.sessionToken, fixture.request())));
+        QVERIFY(std::holds_alternative<Success>(fixture.store->checkpoint(ref, progress, fixture.request(), true)));
+        QVERIFY(std::get<MovieListState>(fixture.store->readMovieLists(ref, fixture.request())).toWatch);
+        progress.positionMs = 95001; progress.status = WatchStatus::Watched;
+        QVERIFY(std::holds_alternative<Error>(fixture.store->checkpoint(ref, progress, fixture.request(), true))); // Old sequence rolls back both writes.
+        QVERIFY(std::get<MovieListState>(fixture.store->readMovieLists(ref, fixture.request())).toWatch);
+        ++progress.sequence;
+        sql(fixture.path, QStringLiteral("CREATE TRIGGER reject_list_update BEFORE UPDATE ON vod_movie_lists BEGIN SELECT RAISE(ABORT,'synthetic failure'); END"));
+        QVERIFY(std::holds_alternative<Error>(fixture.store->checkpoint(ref, progress, fixture.request(), true)));
+        QVERIFY(std::get<MovieListState>(fixture.store->readMovieLists(ref, fixture.request())).toWatch);
+        QCOMPARE(std::get<std::optional<VodProgress>>(fixture.store->read(ref, fixture.request()))->positionMs, qint64(95000));
+        sql(fixture.path, QStringLiteral("DROP TRIGGER reject_list_update"));
+        QVERIFY(std::holds_alternative<Success>(fixture.store->checkpoint(ref, progress, fixture.request(), true)));
+        QCOMPARE(std::get<MovieListState>(fixture.store->readMovieLists(ref, fixture.request())), (MovieListState{false, true}));
+        QVERIFY(std::holds_alternative<MovieListState>(fixture.store->setMovieList(ref, MovieList::ToWatch, true, fixture.request())));
+        ++progress.sequence;
+        QVERIFY(std::holds_alternative<Success>(fixture.store->checkpoint(ref, progress, fixture.request())));
+        QVERIFY(std::get<MovieListState>(fixture.store->readMovieLists(ref, fixture.request())).toWatch);
+    }
+    void baseLetterTitleSearchAndPaging()
+    {
+        Fixture fixture;
+        const QStringList titles{QStringLiteral("À demain"), QStringLiteral("Æon"), QStringLiteral("Ａlpha"),
+            QStringLiteral("𝐀lpine"), QStringLiteral("Äpfel"), QStringLiteral("Čas"), QStringLiteral("Ðelta"),
+            QStringLiteral("Đorđe"), QStringLiteral("Éclair"), QStringLiteral("E\u0301clair"), QStringLiteral("Ħero"),
+            QStringLiteral("Işık"), QStringLiteral("Lato"), QStringLiteral("Łotr 1"), QStringLiteral("Lumina"),
+            QStringLiteral("Œuvre"), QStringLiteral("Öland"), QStringLiteral("Øresund"), QStringLiteral("Straße"),
+            QStringLiteral("Þor"), QStringLiteral("Tiếng Việt"), QStringLiteral("Zebra"),
+            QStringLiteral("Ελλάδα"), QStringLiteral("Москва"), QStringLiteral("東京"), QStringLiteral("😀")};
+        QList<CatalogItem> items;
+        for (int i = 0; i < titles.size(); ++i) {
+            auto movie = fixture.movie(QStringLiteral("%1").arg(i, 3, 10, QChar(u'0')));
+            movie.title = titles[i]; items.append(movie);
+        }
+        QVERIFY(std::holds_alternative<quint64>(fixture.publish(fixture.scope(), items)));
+        fixture.reopen();
+        for (const auto sort : {CatalogSort::TitleAscending, CatalogSort::TitleDescending}) {
+            CatalogQuery query; query.scope = fixture.scope(); query.sort = sort; query.pageSize = 2;
+            QStringList actual;
+            do {
+                const auto result = fixture.store->query(query, fixture.request());
+                QVERIFY(std::holds_alternative<CatalogPage>(result));
+                const auto page = std::get<CatalogPage>(result);
+                for (const auto &item : page.items) actual.append(std::get<MovieSummary>(item).title);
+                query.page = page.next;
+            } while (query.page);
+            auto expected = titles;
+            if (sort == CatalogSort::TitleDescending) std::reverse(expected.begin(), expected.end());
+            QCOMPARE(actual, expected);
+        }
+        const QList<QPair<QString, QString>> searches{{QStringLiteral("LOTR"), QStringLiteral("Łotr 1")},
+            {QStringLiteral("łotr"), QStringLiteral("Łotr 1")}, {QStringLiteral("apfel"), QStringLiteral("Äpfel")},
+            {QStringLiteral("AEON"), QStringLiteral("Æon")}, {QStringLiteral("CAS"), QStringLiteral("Čas")},
+            {QStringLiteral("alpha"), QStringLiteral("Ａlpha")}, {QStringLiteral("ALPINE"), QStringLiteral("𝐀lpine")},
+            {QStringLiteral("DELTA"), QStringLiteral("Ðelta")}, {QStringLiteral("hero"), QStringLiteral("Ħero")},
+            {QStringLiteral("isik"), QStringLiteral("Işık")}, {QStringLiteral("oeuvre"), QStringLiteral("Œuvre")},
+            {QStringLiteral("thor"), QStringLiteral("Þor")},
+            {QStringLiteral("dorde"), QStringLiteral("Đorđe")}, {QStringLiteral("oland"), QStringLiteral("Öland")},
+            {QStringLiteral("oresund"), QStringLiteral("Øresund")}, {QStringLiteral("STRASSE"), QStringLiteral("Straße")},
+            {QStringLiteral("TIENG VIET"), QStringLiteral("Tiếng Việt")}, {QStringLiteral("Москва"), QStringLiteral("Москва")},
+            {QStringLiteral("東京"), QStringLiteral("東京")}, {QStringLiteral("😀"), QStringLiteral("😀")}};
+        for (const auto &[search, title] : searches) {
+            for (const bool prefix : {false, true}) {
+                CatalogQuery query; query.scope = fixture.scope();
+                if (prefix) query.titlePrefix = search; else query.titleContains = search;
+                const auto result = fixture.store->query(query, fixture.request());
+                QVERIFY(std::holds_alternative<CatalogPage>(result));
+                const auto page = std::get<CatalogPage>(result);
+                QCOMPARE(page.items.size(), 1);
+                QCOMPARE(std::get<MovieSummary>(page.items.first()).title, title);
+            }
+        }
+        CatalogQuery query; query.scope = fixture.scope(); query.titleContains = QStringLiteral("éCLAIR");
+        QCOMPARE(std::get<CatalogPage>(fixture.store->query(query, fixture.request())).items.size(), 2);
+        query.titleContains = QStringLiteral("E\u0301clair");
+        QCOMPARE(std::get<CatalogPage>(fixture.store->query(query, fixture.request())).items.size(), 2);
+    }
+    void titleKeyMigrationRollbackAndRetainedStaging()
+    {
+        Fixture fixture;
+        QList<CatalogItem> items;
+        for (int i = 0; i < 300; ++i) {
+            auto movie = fixture.movie(QString::number(i)); movie.title = QStringLiteral("Łotr %1").arg(i);
+            items.append(movie);
+        }
+        QVERIFY(std::holds_alternative<quint64>(fixture.publish(fixture.scope(), items)));
+        const auto ref = std::get<MovieSummary>(items.first()).ref;
+        VodProgress progress; progress.sessionToken = QUuid::createUuid(); progress.sequence = 1;
+        progress.positionMs = 60000; progress.durationMs = 120000;
+        progress.trackPreferences = {{QStringLiteral("subtitle"), QJsonObject{{QStringLiteral("mode"), QStringLiteral("off")}}}};
+        QVERIFY(std::holds_alternative<Success>(fixture.store->beginSession(ref, progress.sessionToken, fixture.request())));
+        QVERIFY(std::holds_alternative<Success>(fixture.store->checkpoint(ref, progress, fixture.request())));
+        CatalogQuery query; query.scope = fixture.scope(); query.pageSize = 1;
+        const auto before = std::get<CatalogPage>(fixture.store->query(query, fixture.request()));
+        QVERIFY(before.next);
+        const auto token = std::get<ImportToken>(fixture.store->beginRefresh(fixture.scope(), fixture.request()));
+        auto staged = fixture.movie(QStringLiteral("staged")); staged.title = QStringLiteral("Öland");
+        QVERIFY(std::holds_alternative<Success>(fixture.store->stageBatch(token, {fixture.scope(), {staged}, true, {}})));
+        sql(fixture.path, QStringLiteral("DELETE FROM vod_schema_migrations WHERE version>=7"));
+        sql(fixture.path, QStringLiteral("INSERT OR IGNORE INTO vod_schema_migrations VALUES(6)"));
+        sql(fixture.path, QStringLiteral("UPDATE vod_items SET sort_key='legacy'"));
+        sql(fixture.path, QStringLiteral("UPDATE vod_staging SET sort_key='legacy'"));
+        sql(fixture.path, QStringLiteral("CREATE TRIGGER fail_title_migration BEFORE UPDATE OF sort_key ON vod_items "
+            "WHEN OLD.provider_id='299' BEGIN SELECT RAISE(ABORT,'synthetic migration failure'); END"));
+        fixture.store = std::make_shared<SqliteVodStore>(fixture.path, [&fixture](const QUuid &) -> Result<SourceContext> { return fixture.config; });
+        const auto failed = fixture.store->prepare(fixture.request());
+        QVERIFY(std::holds_alternative<Error>(failed));
+        QCOMPARE(std::get<Error>(failed).code, ErrorCode::StorageUnavailable);
+        const auto rolledBack = std::get<CatalogPage>(fixture.store->query(query, fixture.request()));
+        QCOMPARE(rolledBack.generation, before.generation);
+        QVERIFY(rolledBack.next); QCOMPARE(rolledBack.next->lastSortKey, QStringLiteral("legacy"));
+        QVERIFY(QFile::exists(fixture.store->backupPath()));
+        sql(fixture.path, QStringLiteral("DROP TRIGGER fail_title_migration"));
+        QVERIFY(std::holds_alternative<Success>(fixture.store->prepare(fixture.request())));
+        query.titleContains = QStringLiteral("lotr"); query.pageSize = 1000;
+        const auto migrated = std::get<CatalogPage>(fixture.store->query(query, fixture.request()));
+        QCOMPARE(migrated.items.size(), 300); QCOMPARE(migrated.generation, before.generation + 1);
+        const auto saved = std::get<std::optional<VodProgress>>(fixture.store->read(ref, fixture.request()));
+        QVERIFY(saved); QCOMPARE(saved->positionMs, progress.positionMs); QCOMPARE(saved->trackPreferences, progress.trackPreferences);
+        query.page = before.next;
+        QCOMPARE(std::get<Error>(fixture.store->query(query, fixture.request())).code, ErrorCode::Cancelled);
+        QVERIFY(std::holds_alternative<quint64>(fixture.store->publishIfCurrent(token, true)));
+        query.page.reset(); query.titleContains = QStringLiteral("oland");
+        const auto published = std::get<CatalogPage>(fixture.store->query(query, fixture.request()));
+        QCOMPARE(published.items.size(), 1); QCOMPARE(std::get<MovieSummary>(published.items.first()).ref, staged.ref);
+        fixture.reopen();
+        QCOMPARE(std::get<CatalogPage>(fixture.store->query(query, fixture.request())).generation, published.generation);
+    }
     void continueWatchingThresholdAndPaging()
     {
         Fixture fixture;
@@ -64,6 +299,7 @@ private slots:
             const auto movie = fixture.movie(QString::number(i)); items.append(movie);
             VodProgress progress; progress.sessionToken = QUuid::createUuid(); progress.sequence = 1;
             progress.positionMs = positions[i]; progress.durationMs = 100000;
+            progress.updatedAtUtc = QDateTime::fromMSecsSinceEpoch(1000 + i, QTimeZone::UTC);
             if (i == 5) progress.status = WatchStatus::Watched;
             if (i == 6) progress.durationMs.reset();
             QVERIFY(std::holds_alternative<Success>(fixture.store->beginSession(movie.ref, progress.sessionToken, fixture.request())));
@@ -74,14 +310,54 @@ private slots:
         CatalogQuery query; query.scope = fixture.scope(); query.continueWatchingOnly = true; query.pageSize = 2;
         const auto first = std::get<CatalogPage>(fixture.store->query(query, fixture.request()));
         QCOMPARE(first.items.size(), 2); QVERIFY(first.next);
-        QCOMPARE(std::get<MovieSummary>(first.items[0]).ref.providerItemId, QStringLiteral("1"));
+        QCOMPARE(std::get<MovieSummary>(first.items[0]).ref.providerItemId, QStringLiteral("6"));
         QCOMPARE(std::get<MovieSummary>(first.items[1]).ref.providerItemId, QStringLiteral("2"));
         query.page = first.next;
         const auto second = std::get<CatalogPage>(fixture.store->query(query, fixture.request()));
         QCOMPARE(second.items.size(), 1); QVERIFY(!second.next);
-        QCOMPARE(std::get<MovieSummary>(second.items[0]).ref.providerItemId, QStringLiteral("6"));
+        QCOMPARE(std::get<MovieSummary>(second.items[0]).ref.providerItemId, QStringLiteral("1"));
         QVERIFY(!watchedByPosition(95000, 100000)); QVERIFY(watchedByPosition(95001, 100000));
         QVERIFY(!watchedByPosition(100000, std::nullopt));
+    }
+    void continueWatchingRecencyOverridesTitleSort()
+    {
+        Fixture fixture;
+        QList<CatalogItem> items;
+        const QStringList titles{QStringLiteral("Alpha"), QStringLiteral("Zulu"), QStringLiteral("Middle")};
+        const QList<qint64> timestamps{100, 10000, 10000};
+        QList<VodProgress> progress;
+        for (int i = 0; i < titles.size(); ++i) {
+            auto movie = fixture.movie(QString::number(i)); movie.title = titles[i]; items.append(movie);
+            VodProgress saved; saved.sessionToken = QUuid::createUuid(); saved.sequence = 1;
+            saved.positionMs = 60000; saved.durationMs = 120000;
+            saved.updatedAtUtc = QDateTime::fromMSecsSinceEpoch(timestamps[i], QTimeZone::UTC);
+            progress.append(saved);
+            QVERIFY(std::holds_alternative<Success>(fixture.store->beginSession(movie.ref, saved.sessionToken, fixture.request())));
+            QVERIFY(std::holds_alternative<Success>(fixture.store->checkpoint(movie.ref, saved, fixture.request())));
+        }
+        QVERIFY(std::holds_alternative<quint64>(fixture.publish(fixture.scope(), items)));
+        fixture.reopen();
+        for (const auto sort : {CatalogSort::TitleAscending, CatalogSort::TitleDescending}) {
+            CatalogQuery query; query.scope = fixture.scope(); query.continueWatchingOnly = true;
+            query.sort = sort; query.pageSize = 1;
+            // Equal timestamps use descending content identity, even across page boundaries.
+            for (const auto &id : {QStringLiteral("2"), QStringLiteral("1"), QStringLiteral("0")}) {
+                const auto result = fixture.store->query(query, fixture.request());
+                QVERIFY(std::holds_alternative<CatalogPage>(result));
+                const auto page = std::get<CatalogPage>(result);
+                QCOMPARE(page.items.size(), 1);
+                QCOMPARE(std::get<MovieSummary>(page.items.first()).ref.providerItemId, id);
+                QCOMPARE(page.next.has_value(), id != QStringLiteral("0"));
+                query.page = page.next;
+            }
+        }
+        // Watching an older movie again moves it to the front after a durable checkpoint.
+        progress[0].sequence = 2;
+        progress[0].updatedAtUtc = QDateTime::fromMSecsSinceEpoch(10001, QTimeZone::UTC);
+        QVERIFY(std::holds_alternative<Success>(fixture.store->checkpoint(fixture.movie(QStringLiteral("0")).ref, progress[0], fixture.request())));
+        CatalogQuery query; query.scope = fixture.scope(); query.continueWatchingOnly = true;
+        const auto page = std::get<CatalogPage>(fixture.store->query(query, fixture.request()));
+        QCOMPARE(std::get<MovieSummary>(page.items.first()).ref.providerItemId, QStringLiteral("0"));
     }
     void trackPreferencesPersistAndMigrate()
     {

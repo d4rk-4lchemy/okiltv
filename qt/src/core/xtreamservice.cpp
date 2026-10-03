@@ -1,4 +1,5 @@
 #include "xtreamservice.h"
+#include "channelnumber.h"
 #include "redaction.h"
 
 #include <QJsonArray>
@@ -183,7 +184,7 @@ QList<Channel> XtreamService::getLiveStreams(const std::optional<QString> &categ
             channel.id,
             normalizedStreamExtension(object.value(QStringLiteral("container_extension")).toString()));
         channel.source = ChannelSource::Xtream;
-        channel.sortOrder = jsonInt(object.value(QStringLiteral("num")));
+        channel.channelNumber = channelNumberFromJson(object.value(QStringLiteral("num")));
         channel.profileId = profile.id;
         channel.catchupSupported = jsonInt(object.value(QStringLiteral("tv_archive"))) == 1;
         channel.catchupWindowHours = std::max(0, jsonInt(object.value(QStringLiteral("tv_archive_duration"))) * 24);
@@ -193,6 +194,20 @@ QList<Channel> XtreamService::getLiveStreams(const std::optional<QString> &categ
         channels.push_back(channel);
     }
 
+    // Preserve provider numbering order, including fractional numbers, independently
+    // of the display number. Invalid/missing numbers retain the legacy first position.
+    QList<qsizetype> order;
+    order.reserve(channels.size());
+    for (qsizetype i = 0; i < channels.size(); ++i) order.push_back(i);
+    std::sort(order.begin(), order.end(), [&channels](qsizetype leftIndex, qsizetype rightIndex) {
+        const auto &left = channels.at(leftIndex);
+        const auto &right = channels.at(rightIndex);
+        const auto numberOrder = compareChannelNumbers(left.channelNumber, right.channelNumber);
+        if (numberOrder != 0) return numberOrder < 0;
+        const auto nameOrder = QString::localeAwareCompare(left.name, right.name);
+        return nameOrder != 0 ? nameOrder < 0 : left.id < right.id;
+    });
+    for (qsizetype i = 0; i < order.size(); ++i) channels[order.at(i)].sortOrder = static_cast<int>(i + 1);
     return channels;
 }
 

@@ -9,6 +9,108 @@ using namespace OKILTV::Player;
 class VodContractTests : public QObject {
     Q_OBJECT
 private slots:
+    void movieListsCompletionAndRewatch()
+    {
+        Fixture fixture;
+        VodProgressService service(fixture.dependencies());
+        const auto ref = refFor(fixture.source);
+        const auto request = requestFor(fixture.source);
+        auto setList = [&](MovieList list) {
+            bool done = false;
+            service.setMovieList(ref, list, true, [&](Result<MovieListState> result) { QVERIFY(std::holds_alternative<MovieListState>(result)); done = true; });
+            QTRY_VERIFY(done);
+        };
+        setList(MovieList::ToWatch); setList(MovieList::Favourites);
+        SessionSnapshot snapshot; snapshot.ref = ref; snapshot.sessionToken = QUuid::createUuid(); snapshot.positionValid = true;
+        snapshot.positionMs = 95000; snapshot.durationMs = 100000;
+        service.observe(snapshot, true); QTRY_COMPARE(fixture.store->checkpoints.load(), 1);
+        QVERIFY(std::get<MovieListState>(fixture.store->readMovieLists(ref, request)).toWatch);
+        snapshot.positionMs = 95001;
+        service.observe(snapshot, false); QTRY_COMPARE(fixture.store->checkpoints.load(), 2);
+        QCOMPARE(std::get<MovieListState>(fixture.store->readMovieLists(ref, request)), (MovieListState{false, true}));
+        setList(MovieList::ToWatch);
+        snapshot.positionMs = 96000; service.observe(snapshot, true); QTRY_COMPARE(fixture.store->checkpoints.load(), 3);
+        QVERIFY(std::get<MovieListState>(fixture.store->readMovieLists(ref, request)).toWatch);
+        snapshot.sessionToken = QUuid::createUuid(); snapshot.positionMs = 0;
+        service.observe(snapshot, true); QTRY_COMPARE(fixture.store->checkpoints.load(), 4);
+        snapshot.positionMs = 99000; service.observe(snapshot, false); QTRY_COMPARE(fixture.store->checkpoints.load(), 5);
+        QCOMPARE(std::get<MovieListState>(fixture.store->readMovieLists(ref, request)), (MovieListState{false, true}));
+        setList(MovieList::ToWatch);
+        bool marked = false;
+        service.setWatched(ref, true, [&](Result<VodProgress> result) { QVERIFY(std::holds_alternative<VodProgress>(result)); marked = true; });
+        QTRY_VERIFY(marked);
+        QCOMPARE(std::get<MovieListState>(fixture.store->readMovieLists(ref, request)), (MovieListState{false, true}));
+        setList(MovieList::ToWatch);
+        marked = false;
+        service.setWatched(ref, false, [&](Result<VodProgress> result) { QVERIFY(std::holds_alternative<VodProgress>(result)); marked = true; });
+        QTRY_VERIFY(marked);
+        snapshot.positionMs = 99999; service.observe(snapshot, true); service.flush();
+        QVERIFY(service.movieListWritePending(ref) == false);
+        service.shutdown();
+        QCOMPARE(std::get<MovieListState>(fixture.store->readMovieLists(ref, request)), (MovieListState{true, true}));
+    }
+    void playbackWaitsForProbeTeardown_data()
+    {
+        QTest::addColumn<int>("action");
+        QTest::newRow("play") << 0;
+        QTest::newRow("cancel-during-teardown") << 1;
+        QTest::newRow("cancel-during-cooldown") << 2;
+        QTest::newRow("replace-during-cooldown") << 3;
+        QTest::newRow("source-change-during-cooldown") << 4;
+        QTest::newRow("shutdown-during-cooldown") << 5;
+    }
+    void playbackWaitsForProbeTeardown()
+    {
+        QFETCH(int, action);
+        Fixture fixture;
+        struct ProbeState {
+            std::atomic_bool entered = false;
+            std::atomic_bool cancelled = false;
+            QSemaphore finish;
+        };
+        const auto probe = std::make_shared<ProbeState>();
+        VodModule module({true}, [&]() {
+            auto composition = fixture.composition();
+            composition.dependencies.mediaProbe = [probe](const PlaybackDescriptor &, const RequestContext &context) -> Result<VodMediaProbe> {
+                probe->entered = true;
+                while (!context.interruption()) QThread::msleep(5);
+                probe->cancelled = true;
+                probe->finish.acquire(); // Simulate slow process teardown after cancellation.
+                return Error{ErrorCode::Cancelled, context.operationId};
+            };
+            return composition;
+        });
+        const auto unblock = qScopeGuard([&]() { probe->finish.release(); });
+        const auto ref = refFor(fixture.source);
+        const auto probeId = module.controller()->probe(ref);
+        QTRY_VERIFY(probe->entered.load());
+        QElapsedTimer reaped;
+        connect(module.controller(), &VodController::eventCompleted, module.controller(), [&](const VodEvent &event) {
+            if (event.operationId == probeId) reaped.start();
+        });
+        module.controller()->play(ref);
+        QTRY_VERIFY(probe->cancelled.load());
+        if (action == 1) module.controller()->cancelPendingPlayback();
+        if (action == 0) QTest::qWait(2100);
+        QVERIFY(!fixture.engine); // A two-second timer from Play is insufficient.
+        probe->finish.release();
+        QTRY_VERIFY(reaped.isValid());
+        if (action == 2) module.controller()->cancelPendingPlayback();
+        if (action == 3) module.controller()->play(refFor(fixture.source, QStringLiteral("replacement")));
+        if (action == 4) module.controller()->sourceChanged(ref.profileId);
+        if (action == 5) module.controller()->shutdown();
+        QTest::qWait(1700);
+        QVERIFY(!fixture.engine);
+        if (action == 0 || action == 3) {
+            QTRY_VERIFY(fixture.engine);
+            QVERIFY(reaped.elapsed() >= 2000);
+            QCOMPARE(fixture.engine->loads, 1);
+            if (action == 3) QCOMPARE(module.session()->snapshot().ref.providerItemId, QStringLiteral("replacement"));
+        } else {
+            QTest::qWait(500);
+            QVERIFY(!fixture.engine);
+        }
+    }
     void pausedTelemetryCheckpointsOnlyOnTransition()
     {
         const auto source = makeSource();
@@ -228,11 +330,13 @@ private slots:
         session.pause();
         backend->emitState(EngineState::Paused, 50000);
         for (int index = 0; index < 2; ++index) {
+            QElapsedTimer retryWait; retryWait.start();
             const auto retired = backend->token;
             backend->listener({retired, EngineState::Stopped, -1, {}, false, false, EndReason::Error, true});
             QCOMPARE(session.snapshot().state, SessionState::Recovering);
             backend->emitEnd(retired, EndReason::Error); // duplicate old event
-            QTRY_COMPARE(backend->loads, index + 2);
+            QTRY_COMPARE_WITH_TIMEOUT(backend->loads, index + 2, 7000);
+            QVERIFY(retryWait.elapsed() >= (index == 0 ? 1800 : 4500));
             QVERIFY(backend->request.startPaused);
             QCOMPARE(backend->request.trackPreferences, preferences);
             backend->emitState(EngineState::Loaded);
@@ -631,6 +735,8 @@ private slots:
         QCOMPARE(backend->seekPosition, 60000);
         backend->emitState(EngineState::Loaded);
         QCOMPARE(backend->seeks, 1);
+        QTest::qWait(3200); // A remote seek must not fail at the former 3s limit.
+        QCOMPARE(session.snapshot().state, SessionState::SeekingResume);
         backend->emitSeekCompleted(60000);
         backend->emitState(EngineState::Playing, 46000);
         backend->emitEnd(backend->token, EndReason::Error);

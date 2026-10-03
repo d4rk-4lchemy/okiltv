@@ -102,6 +102,11 @@ void VodPlaybackSession::event(const Player::PlaybackEvent &value)
     if (m_finished || m_recovering || value.loadToken != m_snapshot.loadToken) return;
     bool checkpoint = false;
     if (!value.end) {
+        if (value.videoWidth && value.videoHeight && *value.videoWidth > 0 && *value.videoHeight > 0) {
+            m_snapshot.videoWidth = value.videoWidth;
+            m_snapshot.videoHeight = value.videoHeight;
+        }
+        if (!value.tracks.isEmpty()) m_snapshot.tracks = value.tracks;
         if (const auto preferences = value.trackPreferences; preferences && *preferences != m_snapshot.trackPreferences) {
             m_snapshot.trackPreferences = *preferences;
             checkpoint = true;
@@ -139,7 +144,9 @@ void VodPlaybackSession::event(const Player::PlaybackEvent &value)
             m_snapshot.state = SessionState::SeekingResume;
             m_resumeAwaiting = true;
             const auto token = m_snapshot.loadToken;
-            QTimer::singleShot(3000, this, [this, token]() {
+            // Remote exact seeks may need new video/audio ranges and decoder
+            // preroll. Keep the spinner and wait for the matching backend event.
+            QTimer::singleShot(60000, this, [this, token]() {
                 if (!m_finished && m_snapshot.loadToken == token && m_resumeAwaiting)
                     stop(Player::EndReason::Error);
             });
@@ -169,7 +176,10 @@ void VodPlaybackSession::recoverAfterFailure()
     m_recoveryToken = token;
     if (changed) changed(m_snapshot, true);
     QPointer<VodPlaybackSession> self(this);
-    QTimer::singleShot(200, this, [self, token]() {
+    // A provider may still be releasing the previous media connection after
+    // returning 503. Immediate retries exhaust the budget without giving it time.
+    const int retryDelayMs = m_retries == 1 ? 2000 : 5000;
+    QTimer::singleShot(retryDelayMs, this, [self, token]() {
         if (!self || !self->m_recovering || self->m_recoveryToken != token) return;
         self->recover(self->m_snapshot.ref, [self, token](Result<PlaybackDescriptor> result) {
             if (!self || !self->m_recovering || self->m_recoveryToken != token) return;

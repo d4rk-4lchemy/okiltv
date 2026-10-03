@@ -15,6 +15,7 @@ class VodRuntime final : public QObject {
     Q_PROPERTY(bool ready READ ready NOTIFY stateChanged)
     Q_PROPERTY(bool isPlaying READ isPlaying NOTIFY stateChanged)
     Q_PROPERTY(bool isPaused READ isPaused NOTIFY stateChanged)
+    Q_PROPERTY(bool isLoading READ isLoading NOTIFY stateChanged)
     Q_PROPERTY(QObject *playerObject READ playerObject NOTIFY stateChanged)
     Q_PROPERTY(double volume READ volume WRITE setVolume NOTIFY stateChanged)
     Q_PROPERTY(double positionSeconds READ positionSeconds NOTIFY stateChanged)
@@ -30,13 +31,16 @@ public:
     bool ready() const { return m_ready; }
     bool isPlaying() const;
     bool isPaused() const;
+    bool isLoading() const;
     QObject *playerObject() const;
     double volume() const;
     double positionSeconds() const;
     double durationSeconds() const;
     bool seekable() const;
     QString title() const;
-    void setPlaybackTitle(const ContentRef &, const QString &);
+    QString playbackYear() const;
+    void setPlaybackTitle(const ContentRef &, const QString &, const QString &year = {});
+    std::optional<VodMediaProbe> playbackMetadata(const ContentRef &ref) const;
     Q_INVOKABLE QVariantMap debugOverlaySnapshot() const;
     Q_INVOKABLE QVariantList audioTracks() const;
     Q_INVOKABLE QVariantList subtitleTracks() const;
@@ -61,12 +65,18 @@ signals:
     void notification(const QString &message);
     void sourceInvalidated(const QUuid &profile);
     void sourceUpdated(const QUuid &profile);
+    void playbackMetadataChanged(const OKILTV::Vod::ContentRef &ref);
 private:
     void initialize(EngineFactory factory = {});
+    void updatePlaybackMetadata(const SessionSnapshot &);
+    QUuid m_metadataLoad;
+    ContentRef m_metadataRef;
+    std::optional<VodMediaProbe> m_metadata;
     void reconcileSources();
     EngineFactory m_deferredFactory;
     ContentRef m_titleRef;
     QString m_title;
+    QString m_year;
     struct SessionSources { QMutex mutex; QSet<QUuid> enabled; };
     std::shared_ptr<SessionSources> m_sessionSources = std::make_shared<SessionSources>();
     std::shared_ptr<VodArtworkCache> m_artwork;

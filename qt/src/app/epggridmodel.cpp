@@ -135,10 +135,12 @@ QVariantMap buildProgramMap(
 EpgGridModel::EpgGridModel(EpgService *epg, QObject *parent)
     : QAbstractListModel(parent)
     , m_epg(epg)
-    , m_windowStart(defaultWindowStart(m_guidePastHours))
-    , m_timeSlots(computeTimeSlots())
-    , m_visibleTimeSlots(computeVisibleTimeSlots())
 {
+    // These calculations depend on defaults declared after the derived fields.
+    // Run them only once all members (including the viewport) are initialized.
+    m_windowStart = defaultWindowStart(m_guidePastHours);
+    m_timeSlots = computeTimeSlots();
+    m_visibleTimeSlots = computeVisibleTimeSlots();
 }
 
 void EpgGridModel::setDateTimeFormat(const Core::DateTimeFormatOptions options)

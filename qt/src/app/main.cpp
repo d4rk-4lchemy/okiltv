@@ -46,6 +46,7 @@
 #include <QTimer>
 
 #include <clocale>
+#include <QLocale>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -438,6 +439,8 @@ void registerQmlContextProperties(
     engine.rootContext()->setContextProperty(QStringLiteral("catchupDownloadController"), appController->downloadController());
     engine.rootContext()->setContextProperty(QStringLiteral("profilesModel"), services.profilesModel.get());
     engine.rootContext()->setContextProperty(QStringLiteral("channelListModel"), services.channelListModel.get());
+    engine.rootContext()->setContextProperty(QStringLiteral("channelDecimalSeparator"),
+        QCoreApplication::instance()->property("channelDecimalSeparator"));
     engine.rootContext()->setContextProperty(QStringLiteral("nowNextModel"), services.nowNextModel.get());
     engine.rootContext()->setContextProperty(QStringLiteral("playbackNowNextModel"), services.playbackNowNextModel.get());
     engine.rootContext()->setContextProperty(QStringLiteral("epgGridModel"), services.epgGridModel.get());
@@ -518,6 +521,7 @@ int main(int argc, char *argv[])
     auto resolvedStartupOptions = startupOptions;
     resolvePortableRuntimeContext(&resolvedStartupOptions);
     OKILTV::Core::AppDataPaths::initializeRuntime(resolvedStartupOptions.runtimeContext);
+    application.setProperty("channelDecimalSeparator", QLocale::system().decimalPoint());
     std::setlocale(LC_NUMERIC, "C");
     application.setOrganizationName(QStringLiteral("OKILTV"));
     application.setApplicationName(QStringLiteral("OKILTV"));
@@ -584,6 +588,8 @@ int main(int argc, char *argv[])
             appServices.profilesModel.get(), &OKILTV::App::ProfilesModel::reload);
 
         OKILTV::Vod::VodCatalogModel vodCatalog(&vodRuntime, coreServices.settings.get());
+        OKILTV::Vod::VodCatalogModel vodPlaybackCatalog(&vodRuntime, coreServices.settings.get(), nullptr,
+            OKILTV::Vod::VodCatalogModel::Purpose::PlaybackSidebar);
         QObject::connect(appServices.settingsController.get(), &OKILTV::App::SettingsController::saved,
             &vodCatalog, &OKILTV::Vod::VodCatalogModel::reloadSources);
         startupStep(QStringLiteral("Creating QQmlApplicationEngine."));
@@ -596,6 +602,7 @@ int main(int argc, char *argv[])
         registerQmlContextProperties(engine, appController.get(), appServices);
         engine.rootContext()->setContextProperty(QStringLiteral("vodRuntime"), &vodRuntime);
         engine.rootContext()->setContextProperty(QStringLiteral("vodCatalog"), &vodCatalog);
+        engine.rootContext()->setContextProperty(QStringLiteral("vodPlaybackCatalog"), &vodPlaybackCatalog);
         startupStep(QStringLiteral("QML context properties registered."));
 
         startupStep(QStringLiteral("Loading main QML."));
