@@ -1,4 +1,5 @@
 #include "../src/core/secretprotection.h"
+#include "../src/core/channelnumber.h"
 #include "../src/core/appdatapaths.h"
 #include "../src/core/catchupurlresolver.h"
 #include "../src/core/database_service.h"
@@ -139,8 +140,11 @@ class CoreTests final : public QObject
     Q_OBJECT
 
 private slots:
+    void decimalChannelNumbers();
+    void decimalChannelImportAndStorage();
     void channelPublicationRejectsObsoleteImports();
     void sourceEditInvalidatesChannelImport();
+    void vodSourceMutationGuardPreservesCredentialsOnFailure();
     void initTestCase() { OKILTV::Core::useIsolatedSecretKeyForTests(); }
     void channelTrackPreferencesRoundTrip();
     void trackPreferencesMatchIdentity();
@@ -218,6 +222,90 @@ private slots:
     void settingsReloadCommitsExistingFile();
     void channelGroupIdsDoNotDecryptChannels();
 };
+
+void CoreTests::decimalChannelNumbers()
+{
+    QCOMPARE(normalizeChannelNumber(QStringLiteral("002.500")), QStringLiteral("2.5"));
+    QCOMPARE(normalizeChannelNumber(QStringLiteral("2.10")), QStringLiteral("2.1"));
+    QCOMPARE(normalizeChannelNumber(QStringLiteral("2.0")), QStringLiteral("2"));
+    QCOMPARE(normalizeChannelNumber(QStringLiteral("0.00000100")), QStringLiteral("0.000001"));
+    for (const auto &bad : {"0", "00.00", "-2", "+2", "2,5", "2.", ".5", "1e2", "2..5", "nan", "1 000"})
+        QVERIFY2(normalizeChannelNumber(QString::fromLatin1(bad)).isEmpty(), bad);
+    QVERIFY(compareChannelNumbers(QStringLiteral("2.05"), QStringLiteral("2.5")) < 0);
+    QVERIFY(compareChannelNumbers(QStringLiteral("2.9"), QStringLiteral("10")) < 0);
+    QVERIFY(compareChannelNumbers(QStringLiteral("2.0000000000000000001"), QStringLiteral("2")) > 0);
+    QCOMPARE(channelNumberFromJson(QJsonValue(2.1)), QStringLiteral("2.1"));
+    QCOMPARE(channelNumberFromJson(QJsonValue(1e-7)), QStringLiteral("0.0000001"));
+    QCOMPARE(channelNumberFromJson(QJsonValue(1e20)), QStringLiteral("100000000000000000000"));
+    QVERIFY(channelNumberFromJson(QJsonValue(true)).isEmpty());
+}
+
+void CoreTests::decimalChannelImportAndStorage()
+{
+    const auto profileId = QUuid::createUuid();
+    M3UService m3u;
+    auto channels = m3u.parse(QByteArrayLiteral(
+        "#EXTM3U\n#EXTINF:-1 tvg-chno=\"4\",Four\nhttp://test/4\n"
+        "#EXTINF:-1 tvg-chno=\"002.500\",Fraction\nhttp://test/25\n"
+        "#EXTINF:-1 tvg-chno=\"bad\",Fallback\nhttp://test/3\n"), profileId);
+    QCOMPARE(channels.size(), 3);
+    QCOMPARE(channels[0].channelNumber, QStringLiteral("4"));
+    QCOMPARE(channels[1].channelNumber, QStringLiteral("2.5"));
+    QCOMPARE(channels[1].sortOrder, 2);
+    QVERIFY(channels[2].channelNumber.isEmpty());
+    QCOMPARE(effectiveChannelNumber(channels[2]), QStringLiteral("3"));
+    QCOMPARE(toVariantMap(channels[1]).value(QStringLiteral("channelNumber")).toString(), QStringLiteral("2.5"));
+
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    const auto path = temp.filePath(QStringLiteral("channels.db"));
+    {
+        DatabaseService database(path);
+        database.upsertChannels(channels);
+        QCOMPARE(database.loadChannels(profileId)[1].channelNumber, QStringLiteral("2.5"));
+        auto refreshed = channels;
+        refreshed[1].channelNumber = QStringLiteral("2.1000000000000000001");
+        qint64 nextId = 3;
+        M3UService::retainChannelIds(refreshed, channels, nextId);
+        QCOMPARE(refreshed[1].id, channels[1].id);
+        database.replaceChannelsForProfile(profileId, refreshed);
+        QCOMPARE(database.loadChannels(profileId)[1].channelNumber, refreshed[1].channelNumber);
+    }
+    // Simulate a pre-feature database, then reopen it through the real migration.
+    const auto connectionName = QStringLiteral("channel-number-migration");
+    {
+        auto connection = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        connection.setDatabaseName(path);
+        QVERIFY(connection.open());
+        QSqlQuery query(connection);
+        QVERIFY(query.exec(QStringLiteral("ALTER TABLE channels DROP COLUMN channel_number")));
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+    DatabaseService migrated(path);
+    const auto legacy = migrated.loadChannels(profileId);
+    QCOMPARE(legacy.size(), 3);
+    QVERIFY(legacy[1].channelNumber.isEmpty());
+    QCOMPARE(effectiveChannelNumber(legacy[1]), QStringLiteral("2"));
+    migrated.upsertChannels(channels);
+    QCOMPARE(migrated.loadChannels(profileId)[1].channelNumber, QStringLiteral("2.5"));
+
+    auto network = std::make_shared<MockNetworkAccess>();
+    ServerProfile profile;
+    profile.xtreamBaseUrl = QStringLiteral("https://xtream.example");
+    profile.xtreamUsername = QStringLiteral("alice");
+    profile.xtreamPassword = QStringLiteral("secret");
+    network->setResponse(QUrl(QStringLiteral("https://xtream.example/player_api.php?username=alice&password=secret&action=get_live_streams")),
+        QByteArrayLiteral(R"([{"stream_id":3,"name":"Three","num":3},{"stream_id":25,"name":"Fraction","num":"2.50"},{"stream_id":21,"name":"Decimal","num":2.1}])"));
+    XtreamService xtream(network);
+    xtream.setProfile(profile);
+    const auto imported = xtream.getLiveStreams();
+    QCOMPARE(imported.size(), 3);
+    QCOMPARE(imported[2].channelNumber, QStringLiteral("2.1"));
+    QCOMPARE(imported[1].channelNumber, QStringLiteral("2.5"));
+    QCOMPARE(imported[0].id, 3);
+    QCOMPARE(imported[0].sortOrder, 3);
+    QCOMPARE(imported[1].sortOrder, 2);
+}
 
 void CoreTests::dateTimeFormatDetection_data()
 {
@@ -414,6 +502,37 @@ void CoreTests::trackPreferencesMatchIdentity()
     const auto unnamed = makeTrackPreference(anonymous, audio, 2);
     QCOMPARE(matchTrackPreference(anonymous, audio, unnamed), 2);
     QCOMPARE(matchTrackPreference({ track(2, {}, {}) }, audio, unnamed), -1);
+    const QVariantList probedActual {
+        QVariantMap{{QStringLiteral("type"), audio}, {QStringLiteral("id"), 5}, {QStringLiteral("title"), QStringLiteral("Main")},
+            {QStringLiteral("lang"), QStringLiteral("pol")}, {QStringLiteral("codec"), QStringLiteral("aac")}},
+        QVariantMap{{QStringLiteral("type"), audio}, {QStringLiteral("id"), 8}, {QStringLiteral("title"), QStringLiteral("Original")},
+            {QStringLiteral("lang"), QStringLiteral("eng")}, {QStringLiteral("codec"), QStringLiteral("ac3")}}
+    };
+    const QJsonObject probedPreference{{QStringLiteral("mode"), QStringLiteral("track")},
+        {QStringLiteral("ordinal"), 1}, {QStringLiteral("title"), QStringLiteral("original")},
+        {QStringLiteral("lang"), QStringLiteral("eng")}, {QStringLiteral("codec"), QStringLiteral("ac3")}};
+    QCOMPARE(matchTrackPreference(probedActual, audio, probedPreference), 8);
+    auto modernMpvTracks = probedActual;
+    auto english = modernMpvTracks[1].toMap();
+    english[QStringLiteral("lang")] = QStringLiteral("en");
+    modernMpvTracks[1] = english;
+    QCOMPARE(matchTrackPreference(modernMpvTracks, audio, probedPreference), 8);
+    QCOMPARE(matchTrackPreference(probedActual, audio,
+        makeTrackPreference(modernMpvTracks, audio, 8)), 8);
+    const QVariantList polishSubtitles {
+        QVariantMap{{QStringLiteral("type"), QStringLiteral("sub")}, {QStringLiteral("id"), 1},
+            {QStringLiteral("lang"), QStringLiteral("pl")}, {QStringLiteral("codec"), QStringLiteral("subrip")}},
+        QVariantMap{{QStringLiteral("type"), QStringLiteral("sub")}, {QStringLiteral("id"), 2},
+            {QStringLiteral("lang"), QStringLiteral("pl")}, {QStringLiteral("codec"), QStringLiteral("subrip")},
+            {QStringLiteral("forced"), true}, {QStringLiteral("default"), true}}
+    };
+    const QJsonObject polishChoice{{QStringLiteral("mode"), QStringLiteral("track")},
+        {QStringLiteral("ordinal"), 0}, {QStringLiteral("lang"), QStringLiteral("pol")},
+        {QStringLiteral("codec"), QStringLiteral("subrip")}};
+    QCOMPARE(matchTrackPreference(polishSubtitles, QStringLiteral("sub"), polishChoice), 1);
+    QCOMPARE(normalizedTrackLanguage(QStringLiteral(" ger ")), normalizedTrackLanguage(QStringLiteral("deu")));
+    QCOMPARE(normalizedTrackLanguage(QStringLiteral("unknown-a")), QStringLiteral("unknown-a"));
+    QVERIFY(normalizedTrackLanguage(QString{}).isEmpty());
     QCOMPARE(matchTrackPreference({}, QStringLiteral("sub"), makeTrackPreference({}, QStringLiteral("sub"), 0)), 0);
     QVERIFY(makeTrackPreference(original, audio, 99).isEmpty());
     QCOMPARE(matchTrackPreference(original, audio, QJsonObject {}), -1);
@@ -2590,6 +2709,50 @@ void CoreTests::channelPublicationRejectsObsoleteImports()
     DatabaseService(dir.filePath(QStringLiteral("iptv.db"))).removeProfileData(profile);
     QVERIFY(!db.publishChannels(profile, removedToken, older, true));
     QVERIFY(db.loadChannels(profile).isEmpty());
+}
+
+void CoreTests::vodSourceMutationGuardPreservesCredentialsOnFailure()
+{
+    QTemporaryDir directory;
+    SettingsManager settings(directory.filePath(QStringLiteral("settings.json")));
+    ServerProfile profile;
+    profile.xtreamBaseUrl = QStringLiteral("https://fixture.invalid");
+    profile.xtreamUsername = QStringLiteral("synthetic");
+    profile.xtreamPassword = QStringLiteral("before");
+    profile.vodEnabled = true;
+    QVERIFY(settings.addProfile(profile));
+    bool allow = false;
+    int preparations = 0;
+    int completions = 0;
+    bool validPreparation = true;
+    settings.prepareProfileMutation = [&](const QUuid &id, const ServerProfile *replacement, QString *) {
+        ++preparations;
+        validPreparation = validPreparation && id == profile.id
+            && (!replacement || replacement->vodCredentialRevision == 2);
+        return allow;
+    };
+    settings.profileMutationFinished = [&](const QUuid &, bool success) { ++completions; QCOMPARE(success, allow); };
+    auto edited = profile;
+    edited.xtreamPassword = QStringLiteral("after");
+    QVERIFY(!settings.replaceProfile(profile.id, edited));
+    QCOMPARE(settings.profileById(profile.id)->xtreamPassword, profile.xtreamPassword);
+    QCOMPARE(settings.profileById(profile.id)->vodCredentialRevision, quint64(1));
+    allow = true;
+    QVERIFY(settings.replaceProfile(profile.id, edited));
+    QCOMPARE(settings.profileById(profile.id)->vodCredentialRevision, quint64(2));
+    edited = *settings.profileById(profile.id);
+    edited.name = QStringLiteral("Only a label");
+    QVERIFY(settings.replaceProfile(profile.id, edited));
+    QCOMPARE(preparations, 2); // descriptive metadata never stops playback
+    allow = false;
+    QVERIFY(!settings.removeProfile(profile.id));
+    QVERIFY(settings.profileById(profile.id));
+    QCOMPARE(completions, 3);
+    QVERIFY(validPreparation);
+    SettingsManager restarted(settings.settingsFilePath());
+    restarted.load();
+    QVERIFY(restarted.profileById(profile.id)->vodEnabled);
+    QCOMPARE(restarted.profileById(profile.id)->vodCredentialRevision, quint64(2));
 }
 
 void CoreTests::sourceEditInvalidatesChannelImport()

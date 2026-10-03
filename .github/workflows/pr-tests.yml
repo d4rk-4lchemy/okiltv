@@ -22,11 +22,11 @@ jobs:
       matrix:
         include:
           - group: core
-            targets: OKILTVQtCoreTests OKILTVQtDatabaseStartupTests
+            targets: OKILTVQtCoreTests OKILTVQtDatabaseStartupTests OKILTVQtVodDomainTests OKILTVQtVodProviderTests OKILTVQtVodStorageTests
           - group: app
-            targets: OKILTVQtAppTests OKILTVQtDownloadTests
+            targets: OKILTVQtAppTests OKILTVQtDownloadTests OKILTVQtVodContractTests
           - group: playback
-            targets: OKILTVQtPlaybackTests OKILTVQtCatchupTests
+            targets: OKILTVQtPlaybackTests OKILTVQtCatchupTests OKILTVQtVodMpvTests OKILTVQtVodRangeTests
           - group: qml
             targets: ''
           - group: ui
@@ -94,6 +94,7 @@ jobs:
             qt/out/build/qt-linux-debug/ui-artifacts/**/failure.json
             qt/out/build/qt-linux-debug/ui-artifacts/**/before-settings-click.json
             qt/out/build/qt-linux-debug/ui-artifacts/**/*.png
+            qt/out/build/qt-linux-debug/qml-artifacts/**/*.png
 
   windows-tests:
     name: Tests / windows

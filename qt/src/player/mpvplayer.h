@@ -1,4 +1,6 @@
 #pragma once
+#include "playbackrequest.h"
+#include <QMutex>
 
 #include <QTemporaryDir>
 
@@ -67,13 +69,23 @@ public:
     QString diagnostics() const;
     bool isAvailable() const;
     bool catchupStreamProtocolAvailable() const;
+    bool vodRangeCacheEligible(const PlaybackRequest &request);
+    QByteArray vodUserAgent() const;
+    bool usesLiveMpegTsTransport() const { return m_liveStream != nullptr; }
 
     void setRenderUpdateTarget(QObject *target);
 
     bool ensureInitialized();
 
     void play(const QString &url, const QString &loadfileOptions = {});
+    bool play(const PlaybackRequest &request, const QUuid &loadToken);
     void stop();
+    void stopForHandoff(const QUuid &request);
+    void requireNativeRenderSurface() { m_nativeRenderSurface = true; }
+    bool nativeRenderSurface() const { return m_nativeRenderSurface; }
+    bool renderContextAvailable() const { return m_renderContextAvailable.load(); }
+    // Render thread only, with its GL context current.
+    void releaseRenderContext();
     void setHwdec(const QString &mode);
     void togglePause();
     void setPaused(bool paused);
@@ -86,6 +98,7 @@ public:
     void seekAbsoluteFast(double seconds);
     void seekAbsoluteExact(double seconds);
     double position() const;
+    std::optional<double> duration() const;
     std::optional<bool> seekable() const;
     std::optional<bool> pauseState() const;
     std::optional<bool> bufferingState() const;
@@ -113,7 +126,7 @@ public:
     void selectAudioTrack(int id, bool remember = false);
     void selectSubtitleTrack(int id, bool remember = false);
     void configureTrackPreferences(const QString &profileId, const QString &channelKey,
-                                   const QJsonObject &preferences, bool discardMissing = true);
+                                   const QJsonObject &preferences, bool discardMissing = true, bool rememberDefault = false);
     bool managesTrackPreferences() const;
 
     void detectAndApplyDeinterlace();
@@ -128,6 +141,11 @@ public:
     qint64 lastRenderUpdateTimestampMs() const;
 
 signals:
+    void renderContextReady();
+    void handoffStopped(const QUuid &request, bool success);
+    void mediaLoaded(const QUuid &loadToken);
+    void mediaEnded(const QUuid &loadToken, OKILTV::Player::EndReason reason, bool retryable = false);
+    void mediaSeekCompleted(const QUuid &loadToken);
     void trackListReady(quint64 generation, const QVariantList &tracks);
     void trackPreferenceChanged(const QString &profileId, const QString &channelKey,
                                 const QString &type, const QJsonObject &preference);
@@ -142,6 +160,18 @@ signals:
     void errorOccurred(const QString &message);
 
 private:
+    bool playWithPolicy(const QString &url, const QString &options, TransportPolicy policy);
+    QMutex m_loadMutex;
+    bool m_nativeRenderSurface = false;
+    std::atomic_bool m_renderContextAvailable{false};
+    QUuid m_pendingLoadToken;
+    QUuid m_activeLoadToken;
+    qint64 m_activePlaylistId = -1;
+    bool m_typedSeekInProgress = false;
+    quint64 m_nextTypedStopRequest = 1000;
+    QHash<quint64, QUuid> m_typedStopTokens;
+    QHash<quint64, QUuid> m_handoffStopTokens;
+    bool m_typedRemoteMedia = false;
     void beginTrackLoad(const QString &url);
     QString trackLoadOptions(const QString &options) const;
     int loadFileLocked(const QString &url, const QString &options);
@@ -156,6 +186,7 @@ private:
     QString m_trackChannelKey;
     QJsonObject m_trackPreferences;
     bool m_discardMissingTrackPreferences { true };
+    bool m_rememberDefaultTrack { false };
     QVariantList m_readyTracks;
     QMap<QString, int> m_defaultTrackIds;
     QSet<QString> m_restoredTrackTypes;
@@ -169,6 +200,7 @@ private:
     struct CachedTelemetry
     {
         double positionSeconds { -1.0 };
+        std::optional<double> durationSeconds;
         std::optional<bool> seekable;
         std::optional<bool> pauseState;
         std::optional<bool> bufferingState;
@@ -260,6 +292,7 @@ private:
     QPointer<QObject> m_updateTarget;
     std::atomic_bool m_frameUpdateQueued { false };
     CachedTelemetry m_cachedTelemetry;
+    bool m_vodRangeProtocolAvailable = false;
     std::atomic_bool m_eventThreadRunning { false };
     std::unique_ptr<std::thread> m_eventThread;
     std::atomic_bool m_trackListRefreshPending { false };

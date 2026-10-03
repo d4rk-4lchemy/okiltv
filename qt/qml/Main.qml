@@ -42,8 +42,16 @@ ApplicationWindow {
     readonly property var downloads: catchupDownloadController
     readonly property var updates: updateCheckController
     readonly property var multiView: multiViewController
+    readonly property var vod: typeof vodRuntime !== "undefined" ? vodRuntime : null
     // qmllint enable unqualified
-    readonly property bool overlayShortcutsEnabled: window.shell.activeOverlay !== "settings" && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
+    readonly property bool vodOpen: window.shell.activeOverlay === "vod"
+    property bool vodMounted: false
+    property bool vodClosing: false
+    property real vodSlideProgress: 0
+    readonly property bool vodTransitioning: vodMounted
+        && (vodClosing || vodSlideProgress < 1 || vodSlideAnimation.running)
+    readonly property bool textEditorFocused: activeFocusItem instanceof TextInput || activeFocusItem instanceof TextEdit
+    readonly property bool overlayShortcutsEnabled: window.shell.activeOverlay !== "settings" && !window.vodOpen && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
     readonly property bool liveShortcutsEnabled: window.overlayShortcutsEnabled && !livePage.searchFieldActive
     readonly property var forwardedShortcuts: {
         const shortcuts = [
@@ -89,6 +97,10 @@ ApplicationWindow {
             })
         }
 
+        const separator = livePage.decimalSeparator
+        if (separator !== "." && separator !== ",") {
+            shortcuts.push({ sequence: separator, key: 0, text: separator, scope: "live" })
+        }
         return shortcuts
     }
 
@@ -176,11 +188,58 @@ ApplicationWindow {
         window.requestAppClose("window")
     }
 
-    function dispatchShortcut(key, modifiers) {
+    function toggleVod() {
+        if (window.vodTransitioning) return true
+        if (window.textEditorFocused || window.shell.activeOverlay === "settings"
+            || downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
+            return false
+        if (window.vodOpen) closeVod()
+        else window.shell.openOverlay("vod")
+        return true
+    }
+    onVodOpenChanged: {
+        if (window.vodOpen) {
+            vodSlideAnimation.stop()
+            window.vodClosing = false
+            window.vodSlideProgress = 0
+            window.vodMounted = true
+            vodPage.prepareForOpen()
+            Qt.callLater(function() {
+                if (!window.vodOpen || !window.vodMounted || window.vodClosing) return
+                vodSlideAnimation.to = 1
+                vodSlideAnimation.start()
+            })
+        } else if (window.vodMounted) window.finishVodClose(false)
+    }
+    function closeVod() {
+        if (!window.vodMounted || window.vodClosing) return
+        window.vodClosing = true
+        vodPage.closePopups()
+        vodSlideAnimation.stop()
+        vodSlideAnimation.to = 0
+        vodSlideAnimation.start()
+    }
+    function finishVodClose(clearOverlay) {
+        vodSlideAnimation.stop()
+        window.vodMounted = false
+        window.vodClosing = false
+        window.vodSlideProgress = 0
+        if (clearOverlay && window.vodOpen) {
+            window.shell.clearOverlay()
+            window.shell.overlaysVisible = false
+            livePage.forceActiveFocus()
+        }
+    }
+    function dispatchShortcut(key, modifiers, text) {
         if (downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
             return false
+        if (window.vodOpen) {
+            if (window.vodTransitioning) return key === Qt.Key_Escape
+            return key === Qt.Key_Escape ? vodPage.handleEscape() : false
+        }
         return livePage.handleWindowKey({
             key: key,
+            text: text || "",
             modifiers: modifiers !== undefined ? modifiers : Qt.NoModifier
         })
     }
@@ -188,6 +247,7 @@ ApplicationWindow {
     function shortcutEnabled(scope) {
         if (downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
             return false
+        if (window.vodOpen) return false
         if (scope === "grid" || scope === "guideOrGrid") {
             return livePage.multiviewSelectionAvailable
                 || (scope === "guideOrGrid" && window.shell.activeOverlay === "guide")
@@ -196,13 +256,13 @@ ApplicationWindow {
             return true
         }
         if (scope === "download") {
-            return window.overlayShortcutsEnabled && !livePage.searchFieldActive && !livePage.leftPickerOpen
+            return window.overlayShortcutsEnabled && !(window.vod && window.vod.active) && !livePage.searchFieldActive && !livePage.leftPickerOpen
         }
         if (scope === "live") {
             return window.liveShortcutsEnabled
         }
         if (scope === "overlay") {
-            return window.overlayShortcutsEnabled
+            return window.overlayShortcutsEnabled && !window.textEditorFocused
         }
         if (scope === "nonGuideOverlay") {
             return window.overlayShortcutsEnabled && window.shell.activeOverlay !== "guide"
@@ -222,8 +282,17 @@ ApplicationWindow {
             enabled: window.shortcutEnabled(modelData.scope)
             onActivated: window.dispatchShortcut(
                 modelData.key,
-                modelData.modifiers !== undefined ? modelData.modifiers : Qt.NoModifier)
+                modelData.modifiers !== undefined ? modelData.modifiers : Qt.NoModifier,
+                modelData.text || "")
         }
+    }
+
+    Shortcut {
+        sequence: "V"
+        autoRepeat: false
+        enabled: !window.textEditorFocused && window.shell.activeOverlay !== "settings"
+            && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
+        onActivated: window.toggleVod()
     }
 
     Shortcut {
@@ -258,6 +327,55 @@ ApplicationWindow {
         topBarExternalHideLock: windowChromeBar.interactionActive || windowResizeHandles.interactionActive || downloadUi.interactionActive
     }
 
+    NumberAnimation {
+        id: vodSlideAnimation
+        target: window
+        property: "vodSlideProgress"
+        duration: Theme.transitionMs + 60
+        easing.type: Easing.OutCubic
+        onFinished: {
+            if (window.vodClosing) window.finishVodClose(true)
+        }
+    }
+
+    Item {
+        id: vodOverlayFrame
+        objectName: "ui.region.vod_overlay"
+        anchors.fill: parent
+        anchors.topMargin: window.topBarReservedHeight
+        visible: window.vodMounted
+        clip: true
+        z: 30
+
+        // Keep uncovered video non-interactive until the overlay is fully hidden.
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.AllButtons
+            onWheel: wheel => { wheel.accepted = true }
+        }
+
+        VodMoviesPage {
+            id: vodPage
+            objectName: "ui.vod.page"
+            anchors.fill: parent
+            enabled: window.vodOpen && !window.vodTransitioning
+                && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible
+            transform: Translate { y: (1 - window.vodSlideProgress) * vodOverlayFrame.height }
+            // qmllint disable unqualified
+            catalog: vodCatalog
+            // qmllint enable unqualified
+            uiTransparency: window.settings.uiTransparency
+            windowWidth: window.width
+            preferredSidebarWidth: window.shell.vodLibrarySidebarWidth
+            onSidebarWidthCommitted: newWidth => window.shell.setVodLibrarySidebarWidth(newWidth)
+            onCloseRequested: window.closeVod()
+            Connections {
+                target: vodPage.catalog
+                function onPlaybackStarted() { window.closeVod() }
+            }
+        }
+    }
+
     CatchupDownloads {
         dateTimePattern: window.dateTime.dateTimePattern
         id: downloadUi
@@ -283,7 +401,8 @@ ApplicationWindow {
         anchors.fill: parent
         window: window
         livePage: livePage
-        z: 15
+        // Keep window edges reachable above VOD and title-bar input surfaces.
+        z: 35
     }
 
     WindowChromeBar {
@@ -305,6 +424,43 @@ ApplicationWindow {
         running: window.app.isBusy
         visible: running
         z: 20
+    }
+
+    Rectangle {
+        id: vodNotice
+        objectName: "ui.vod.notice"
+        parent: window.Overlay.overlay
+        property string message: ""
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.top: parent.top
+        anchors.topMargin: window.topBarReservedHeight + Theme.spacingL
+        width: Math.min(520, parent.width - 32)
+        height: vodNoticeText.implicitHeight + 24
+        visible: message.length > 0
+        color: Theme.surface
+        radius: Theme.radiusM
+        z: 100
+        Text {
+            id: vodNoticeText
+            anchors.centerIn: parent
+            width: parent.width - 24
+            text: vodNotice.message
+            color: Theme.textPrimary
+            font.pixelSize: 14
+            wrapMode: Text.Wrap
+        }
+        Timer {
+            id: vodNoticeTimer
+            interval: 8000
+            onTriggered: vodNotice.message = ""
+        }
+        Connections {
+            target: window.vod
+            function onNotification(message) {
+                vodNotice.message = message
+                vodNoticeTimer.restart()
+            }
+        }
     }
 
     UpdateAvailableDialog {

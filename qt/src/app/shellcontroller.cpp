@@ -1,4 +1,5 @@
 #include "shellcontroller.h"
+#include "../core/debuglogger.h"
 
 #include <QCoreApplication>
 #include <QEvent>
@@ -42,6 +43,29 @@ bool ShellController::eventFilter(QObject *watched, QEvent *event)
         }
     }
     return QObject::eventFilter(watched, event);
+}
+
+int ShellController::vodLibrarySidebarWidth() const
+{
+    return m_settings->current().vodLibrarySidebarWidth;
+}
+
+bool ShellController::setVodLibrarySidebarWidth(const int width)
+{
+    if (width != 0 && width < 208) return false;
+    auto &stored = m_settings->current().vodLibrarySidebarWidth;
+    const auto previous = stored;
+    if (previous == width) return true;
+    stored = width;
+    m_settings->save();
+    if (!m_settings->lastSaveError().isEmpty()) {
+        stored = previous;
+        Core::DebugLogger::instance().log(QStringLiteral("Settings"),
+            QStringLiteral("Cannot save VOD library sidebar width: %1").arg(m_settings->lastSaveError()));
+        return false;
+    }
+    emit vodLibrarySidebarWidthChanged();
+    return true;
 }
 
 bool ShellController::overlaysVisible() const
@@ -212,7 +236,7 @@ QString ShellController::computeLayoutBand(const int width, const bool fullscree
 QString ShellController::normalizeOverlayName(const QString &value)
 {
     auto normalized = value.trimmed().toLower();
-    if (normalized == QStringLiteral("guide") || normalized == QStringLiteral("settings")) {
+    if (normalized == QStringLiteral("guide") || normalized == QStringLiteral("settings") || normalized == QStringLiteral("vod")) {
         return normalized;
     }
     return QStringLiteral("none");

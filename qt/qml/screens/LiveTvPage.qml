@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import QtQuick.Window
 import OKILTV
 import "../theme/Theme.js" as Theme
+import "../components/ChannelNumber.js" as ChannelNumber
 
 Item {
     id: root
@@ -37,21 +38,33 @@ Item {
     readonly property var liveGroups: liveSourceGroupsModel
     readonly property var multiView: multiViewController
     readonly property var dvr: dvrController
+    readonly property var vod: typeof vodRuntime !== "undefined" ? vodRuntime : null
+    readonly property var vodSidebar: typeof vodPlaybackCatalog !== "undefined" ? vodPlaybackCatalog : null
     // qmllint enable unqualified
     property date currentClockTime: new Date()
     readonly property string currentClockText: Qt.locale("en_US").toString(root.currentClockTime, root.dateTime.clockPattern)
     property bool hasPlaybackChannel: root.player.currentChannel.id !== undefined
+    readonly property bool vodActive: root.vod !== null && root.vod.active
+    property bool vodInfoOpen: false
+    property string vodSidebarError: ""
+    onVodActiveChanged: {
+        if (root.groupPickerOpen) root.closeGroupPicker(false)
+        if (root.vodActive) root.vodInfoOpen = false
+    }
+    readonly property bool vodPanelsFit: root.width >= root.leftPanelWidth + root.rightPanelWidth + 240
+    readonly property bool transportPlaying: root.vodActive ? root.vod.isPlaying : root.player.isPlaying
     property int transportAudioTrackCount: 0
     property int transportSubtitleTrackCount: 0
-    readonly property bool transportTracksReady: root.hasPlaybackChannel
+    readonly property var transportPlayer: root.vodActive ? root.vod : root.player
+    readonly property bool transportTracksReady: root.vodActive ? root.vod.playerObject !== null : root.hasPlaybackChannel
         && !root.player.channelSwitchInProgress && !root.player.channelLoadFailed
-    property bool showPlaybackSpinner: (root.player.isLoading
+    property bool showPlaybackSpinner: root.vodActive ? root.vod.isLoading : (root.player.isLoading
             || root.player.isBuffering
             || (root.player.timeshiftPreparing && !root.player.isPlaying))
         && root.hasPlaybackChannel
     property bool showChannelSwitchBlackout: root.primaryPlayer.channelSwitchInProgress
         && root.primaryPlayer.currentChannel.id !== undefined
-    property bool showChannelLoadError: root.player.channelLoadFailed
+    property bool showChannelLoadError: !root.vodActive && root.player.channelLoadFailed
         && root.hasPlaybackChannel
         && !root.showPlaybackSpinner
     property bool hasSelectedChannel: root.guideState.selectedChannel.id !== undefined
@@ -60,7 +73,7 @@ Item {
     property bool hasActiveProfile: root.app.activeProfileId.length > 0
     readonly property bool multiviewActive: root.multiView.layoutMode !== "off"
     readonly property bool multiviewGridActive: root.multiviewActive && root.multiView.layoutMode !== "pip"
-    readonly property bool showVideoCanvas: root.hasPlaybackChannel || root.multiviewActive
+    readonly property bool showVideoCanvas: root.vodActive || root.hasPlaybackChannel || root.multiviewActive
     readonly property int multiviewVisibleSlots: {
         const tiles = root.multiView.tiles || []
         if (tiles.length > 0) {
@@ -80,6 +93,7 @@ Item {
         return root.multiviewTileData(Number(root.multiView.focusedTileIndex || 0))
     }
     readonly property bool canStopPlaybackAction: {
+        if (root.vodActive) return true
         if (root.multiviewGridActive) {
             const focusedTile = root.focusedMultiviewTileData
             return !!focusedTile && !Boolean(focusedTile.isEmpty)
@@ -88,11 +102,11 @@ Item {
     }
     readonly property bool leftPickerOpen: root.groupPickerOpen || root.sourcePickerOpen || root.audioPickerOpen || root.subtitlePickerOpen
     property bool groupPickerOpen: false
+    property bool groupPickerForVod: false
     property string groupPickerSearchText: ""
     property string groupPickerHighlightedId: ""
     property bool groupPickerKeyboardNavigation: false
     property point groupKeyboardPointerPosition: Qt.point(-1, -1)
-    readonly property int leftPaneViewSwitchWidth: 78
     property bool sourcePickerOpen: false
     property string sourcePickerSearchText: ""
     property string sourcePickerHighlightedId: ""
@@ -128,10 +142,15 @@ Item {
     property int groupPickerModelRevision: 0
     readonly property var groupPickerVisibleRows: {
         const modelRevision = root.groupPickerModelRevision
+        const query = root.groupPickerSearchText.trim().toLowerCase()
+        if (root.groupPickerForVod) {
+            const categories = root.vodSidebar ? root.vodSidebar.categories : []
+            return [{id: "", name: "All movies", isAll: true}].concat(categories)
+                .filter(function(group) { return group.name.toLowerCase().indexOf(query) >= 0 })
+        }
         const total = root.liveGroups.totalCount
         const selectedCount = root.liveGroups.selectedCount
         const rows = []
-        const query = root.groupPickerSearchText.trim().toLowerCase()
         const favouritesGroupId = "__favourites__"
         let selectedChannelCount = 0
 
@@ -189,8 +208,8 @@ Item {
 
         return rows
     }
-    property bool searchFieldActive: searchField.activeFocus
-        || groupPickerSearchField.activeFocus
+    property bool searchFieldActive: channelSearchHeader.field.activeFocus || vodListPanel.searchActive
+        || groupSearchHeader.field.activeFocus
         || sourcePickerSearchField.activeFocus
     property bool showHoverUi: root.shell.overlaysVisible || root.shell.activeOverlay !== "none" || root.leftPickerOpen
     readonly property bool topBarVisible: !root.shell.fullscreen && root.showHoverUi
@@ -202,7 +221,8 @@ Item {
     property bool showShellChrome: root.shell.overlaysVisible
         && root.shell.activeOverlay === "none"
         && !root.leftPickerOpen
-    readonly property bool chromeAnimationsRunning: leftChromeSlideAnimation.running
+    readonly property bool chromeAnimationsRunning: vodListPanel.animating || vodInfoPanel.animating
+        || leftChromeSlideAnimation.running
         || leftChromeOpacityAnimation.running
         || guideButtonSlideAnimation.running
         || guideButtonOpacityAnimation.running
@@ -320,11 +340,14 @@ Item {
         return Number.isFinite(startMs) && Number.isFinite(stopMs)
             && stopMs > startMs && startMs <= Date.now() && Date.now() < stopMs
     }
-    readonly property string transportTimelineMode: root.player.catchupTimelineActive
+    readonly property string transportTimelineMode: root.vodActive ? "vod" : root.player.catchupTimelineActive
         ? "catchup"
         : (root.player.timeshiftActive ? "timeshift"
             : (root.liveProgramTimelineActive ? "liveProgram"
                 : (root.liveProgramProgressActive ? "liveProgress" : "none")))
+    readonly property real vodPositionFraction: root.vodActive && root.vod.durationSeconds > 0
+        ? Math.max(0, Math.min(1, root.vod.positionSeconds / root.vod.durationSeconds)) : 0
+    readonly property bool vodSeekEnabled: root.vodActive && root.vod.seekable && root.vod.durationSeconds > 0
     readonly property bool transportTimelineActive: root.transportTimelineMode !== "none"
     readonly property bool transportSeekActive: root.player.catchupTimelineActive
         || root.player.timeshiftActive
@@ -349,7 +372,10 @@ Item {
             : nowMs - Math.max(0, Number(root.liveCatchupState.safetySeconds ?? 180)) * 1000
         positionMs: root.transportTimelineUsingCatchup
             ? startMs + Number(root.player.catchupTimelinePositionSeconds || 0) * 1000
-            : Math.min(nowMs, endMs) - Number(root.player.liveBufferBehindLiveSeconds || 0) * 1000
+            // LIVE shares the current-time marker; buffer latency is only shown after rewinding.
+            : (root.timeshiftBadgeShowBehindLive
+                ? Math.min(nowMs, endMs) - Number(root.player.liveBufferBehindLiveSeconds || 0) * 1000
+                : nowMs)
     }
     readonly property real transportBehindLiveSeconds: root.player.catchupTimelineActive
         ? Math.max(0, (Date.now() - Number(root.player.catchupTimelineStartEpochMs || 0)) / 1000
@@ -389,14 +415,29 @@ Item {
     readonly property bool debugBubbleVisible: root.debugBubbleEnabled && !root.debugBubbleBlocked
     readonly property string debugBubbleCurrentResolution: Math.max(0, Math.round(root.width))
         + "x" + Math.max(0, Math.round(root.height))
+    // qmllint disable unqualified
+    readonly property string decimalSeparator: typeof channelDecimalSeparator !== "undefined"
+        ? channelDecimalSeparator : Qt.locale().decimalPoint
+    // qmllint enable unqualified
+    FontMetrics {
+        id: channelNumberMetrics
+        font.pixelSize: 12
+        font.bold: true
+    }
+    readonly property real channelNumberColumnWidth: {
+        let width = 22
+        for (const number of root.channelList.displayNumbers)
+            width = Math.max(width, channelNumberMetrics.advanceWidth(ChannelNumber.localize(number, root.decimalSeparator)))
+        return Math.ceil(width)
+    }
     property string numericInputDigits: ""
     property string numericInputState: "none"
     readonly property string numericHudText: root.numericInputState === "error"
         ? "No channel"
         : root.numericInputDigits
-    readonly property bool numericEntryContextActive: root.shell.activeOverlay === "none"
+    readonly property bool numericEntryContextActive: !root.vodActive && root.shell.activeOverlay === "none"
         && !root.leftPickerOpen
-        && !searchField.activeFocus
+        && !channelSearchHeader.field.activeFocus
         && !root.guideOverlayMounted
         && !root.guideOverlayOpen
     readonly property bool numericHudVisible: root.numericEntryContextActive
@@ -412,8 +453,8 @@ Item {
         && root.hasSelectedChannel
         && (root.previewPinned
             || root.hoverPreviewActive
-            || searchField.activeFocus
-            || searchField.hovered
+            || channelSearchHeader.field.activeFocus
+            || channelSearchHeader.field.hovered
             || channelListHover.hovered
             || previewHoldTimer.running)
     property bool playbackEpgAvailable: (root.playbackNowNext.currentProgram.title || "").length > 0
@@ -546,6 +587,11 @@ Item {
     }
 
     function handleStopPlaybackAction() {
+        if (root.vodActive) {
+            root.vod.stop()
+            root.revealUi("pointer")
+            return
+        }
         const handledByRetainedMultiview = root.multiView.stopRetainedPromotedAndRestoreGrid()
         if (!handledByRetainedMultiview) {
             if (root.multiView.layoutMode === "pip" && root.multiView.focusedTileIndex > 0)
@@ -807,6 +853,10 @@ Item {
     }
 
     function seekTimeshiftRelativeWithBadge(seconds) {
+        if (root.vodActive) {
+            if (root.vod.seekable) root.vod.seekRelative(Number(seconds))
+            return true
+        }
         if (!root.transportSeekActive) {
             return false
         }
@@ -836,6 +886,10 @@ Item {
         if (!Number.isFinite(Number(fraction)))
             return false
         const clamped = Math.max(0, Math.min(1, Number(fraction)))
+        if (root.vodActive) {
+            if (root.vodSeekEnabled) root.vod.seekTo(clamped * root.vod.durationSeconds)
+            return root.vodSeekEnabled
+        }
         // Future programme time is an explicit request to resume the live channel.
         if (root.programmeTimelineActive && programmeTimeline.isFuture(clamped, Date.now())) {
             if (root.transportTimelineUsingCatchup) {
@@ -906,6 +960,10 @@ Item {
     }
 
     function togglePauseWithBadge() {
+        if (root.vodActive) {
+            root.vod.togglePause()
+            return
+        }
         if (!root.hasPlaybackChannel)
             return
         if (!root.transportTimelineUsingLiveProgram
@@ -924,7 +982,18 @@ Item {
         liveTimelineNoticeTimer.restart()
     }
 
+    function formatVodTime(seconds) {
+        if (!Number.isFinite(seconds) || seconds < 0) return "--:--"
+        const total = Math.floor(seconds)
+        const hours = Math.floor(total / 3600)
+        const minutes = Math.floor(total / 60) % 60
+        return (hours > 0 ? hours + ":" : "")
+            + String(minutes).padStart(2, "0") + ":" + String(total % 60).padStart(2, "0")
+    }
+
     function timeshiftHoverClockText(fraction) {
+        if (root.vodActive)
+            return root.formatVodTime(Math.max(0, Math.min(1, fraction)) * root.vod.durationSeconds)
         let startMs = 0
         let endMs = 0
         if (root.transportTimelineUsingCatchup) {
@@ -1041,13 +1110,9 @@ Item {
             return ""
         }
 
-        const sortOrder = Number(channelData.sortOrder || 0)
-        const rawValue = sortOrder > 0 ? sortOrder : Number(channelData.id || 0)
-        if (!Number.isFinite(rawValue) || rawValue <= 0) {
-            return ""
-        }
-
-        return String(Math.floor(rawValue)).padStart(3, "0") + "."
+        // Depend on source changes even when the current playback map is unchanged.
+        const numbers = root.channelList.displayNumbers
+        return ChannelNumber.badge(root.channelList.displayNumberForChannel(channelData), root.decimalSeparator)
     }
 
     function programEpisodeTitle(programData) {
@@ -1216,15 +1281,15 @@ Item {
             return
         }
 
-        const channelNumber = Number(root.numericInputDigits)
-        if (Number.isNaN(channelNumber) || channelNumber <= 0) {
+        const channelNumber = ChannelNumber.canonicalInput(root.numericInputDigits, root.decimalSeparator)
+        if (channelNumber.length === 0) {
             root.numericInputDigits = ""
             root.numericInputState = "error"
             numericFailureTimer.restart()
             return
         }
 
-        if (root.channelList.activateByDisplayNumber(Math.floor(channelNumber))) {
+        if (root.channelList.activateByDisplayNumber(channelNumber)) {
             root.clearNumericEntry()
             return
         }
@@ -1238,8 +1303,9 @@ Item {
         const hoverLocksEnabled = root.overlayInteractionSource !== "keyboard" || root.keyboardModeLocked
         return root.mouseSelectionPinned
             || root.keyboardModeLocked
-            || searchField.activeFocus
-            || groupPickerSearchField.activeFocus
+            || channelSearchHeader.field.activeFocus
+            || vodListPanel.searchActive
+            || groupSearchHeader.field.activeFocus
             || sourcePickerSearchField.activeFocus
             || root.topBarExternalHideLock
             || (hoverLocksEnabled
@@ -1247,6 +1313,9 @@ Item {
                     || rightChromeHover.hovered
                     || bottomChromeHover.hovered
                     || guideButtonHover.hovered
+                    || vodListPanel.hovered
+                    || vodInfoPanel.hovered
+                    || vodBackButton.hovered
                     || volumeControl.hoverActive
                     || root.hoverBubbleActive))
     }
@@ -1792,7 +1861,7 @@ Item {
     }
 
     function refreshDebugBubbleData() {
-        const snapshot = root.player.debugOverlaySnapshot()
+        const snapshot = root.transportPlayer.debugOverlaySnapshot()
         root.debugBubbleData = snapshot ? snapshot : ({})
         root.appendDebugBufferSample(
             Number(root.debugBubbleData.bufferDurationSeconds),
@@ -1895,7 +1964,7 @@ Item {
             forceCloseGuideOverlay()
         }
         setPlayerKeyboardFocusArea("none")
-        if (searchField.activeFocus) {
+        if (channelSearchHeader.field.activeFocus) {
             interactionFocusTarget.forceActiveFocus()
         }
         revealUi(revealSource)
@@ -1953,6 +2022,13 @@ Item {
     }
 
     function focusSearchField() {
+        if (root.vodActive) {
+            root.closeGroupPicker(false)
+            root.vodInfoOpen = false
+            root.revealUi("keyboard")
+            vodListPanel.focusSearch()
+            return
+        }
         if (!root.hasAnyChannels) {
             openSettingsOverlay("sources", "keyboard")
             return
@@ -1973,12 +2049,12 @@ Item {
 
     function focusSearchWhenReady() {
         if (!root.searchFocusPending || root.chromeAnimationsRunning
-            || !searchField.enabled || !root.showShellChrome
+            || !channelSearchHeader.field.enabled || !root.showShellChrome
             || root.shell.activeOverlay !== "none" || root.leftPickerOpen) {
             return
         }
         root.searchFocusPending = false
-        searchField.forceActiveFocus()
+        channelSearchHeader.field.forceActiveFocus()
     }
 
     function ensureSourcePickerHighlight() {
@@ -2058,6 +2134,7 @@ Item {
         if (!root.groupPickerOpen) {
             root.groupPickerSearchText = ""
             root.groupPickerHighlightedId = ""
+            root.groupPickerForVod = false
         }
         if (!root.audioPickerOpen) {
             root.audioPickerRows = []
@@ -2176,7 +2253,8 @@ Item {
     }
 
     function openGroupPicker(revealSource, focusCurrentGroup) {
-        if (!root.hasActiveProfile) {
+        if (root.vodActive && !root.vodSidebar) return
+        if (!root.vodActive && !root.hasActiveProfile) {
             root.openSettingsOverlay("sources", revealSource)
             return
         }
@@ -2190,10 +2268,15 @@ Item {
         root.sourcePickerOpen = false
         root.sourcePickerSearchText = ""
         root.sourcePickerHighlightedId = ""
-        root.liveGroups.profileId = root.app.activeProfileId
-        root.liveGroups.reload()
+        root.groupPickerForVod = root.vodActive
+        if (root.groupPickerForVod) {
+            root.vodInfoOpen = false
+        } else {
+            root.liveGroups.profileId = root.app.activeProfileId
+            root.liveGroups.reload()
+        }
         root.groupPickerSearchText = ""
-        root.groupPickerHighlightedId = root.channelList.selectedCategoryId
+        root.groupPickerHighlightedId = root.groupPickerForVod ? root.vodSidebar.categoryId : root.channelList.selectedCategoryId
         root.groupKeyboardPointerPosition = playerPointerHover.point.scenePosition
         root.groupPickerKeyboardNavigation = revealSource === "keyboard"
         root.groupPickerOpen = true
@@ -2209,7 +2292,7 @@ Item {
             if (focusCurrentGroup) {
                 root.moveGroupPickerSelection(0, revealSource)
             } else {
-                groupPickerSearchField.forceActiveFocus()
+                groupSearchHeader.field.forceActiveFocus()
             }
             const row = root.groupPickerVisibleRows.findIndex(function(group) {
                 return group.id === root.groupPickerHighlightedId
@@ -2235,7 +2318,7 @@ Item {
             root.groupPickerSearchText = ""
             root.groupPickerHighlightedId = ""
         }
-        if (groupPickerSearchField.activeFocus) {
+        if (groupSearchHeader.field.activeFocus) {
             interactionFocusTarget.forceActiveFocus()
         }
         root.setPlayerKeyboardFocusArea("none")
@@ -2244,7 +2327,12 @@ Item {
             root.shell.overlaysVisible = false
             return
         }
-        root.scheduleSelectedChannelVisible(ListView.Center)
+        if (root.groupPickerForVod) {
+            root.groupPickerForVod = false
+            if (root.vodActive) vodListPanel.focusList()
+        } else {
+            root.scheduleSelectedChannelVisible(ListView.Center)
+        }
         root.updateAutoHide()
     }
 
@@ -2254,9 +2342,9 @@ Item {
             root.transportSubtitleTrackCount = 0
             return
         }
-        root.transportAudioTrackCount = root.player.audioTracks().length
+        root.transportAudioTrackCount = root.transportPlayer.audioTracks().length
         // The subtitle picker includes a synthetic "None" row (id 0).
-        root.transportSubtitleTrackCount = root.player.subtitleTracks().filter(function(track) {
+        root.transportSubtitleTrackCount = root.transportPlayer.subtitleTracks().filter(function(track) {
             return Number(track.id) !== 0
         }).length
     }
@@ -2271,7 +2359,7 @@ Item {
         root.sourcePickerOpen = false
         root.subtitlePickerOpen = false
         root.subtitlePickerRows = []
-        root.audioPickerRows = root.player.audioTracks()
+        root.audioPickerRows = root.transportPlayer.audioTracks()
         root.audioPickerOpen = true
         const selectedAudio = root.audioPickerRows.find(function(track) { return track.selected })
         root.audioPickerHighlightedId = selectedAudio ? selectedAudio.id
@@ -2330,7 +2418,7 @@ Item {
         if (root.audioPickerHighlightedId < 0) {
             return false
         }
-        root.player.selectAudioTrack(root.audioPickerHighlightedId)
+        root.transportPlayer.selectAudioTrack(root.audioPickerHighlightedId)
         root.closeAudioPicker(false)
         return true
     }
@@ -2345,7 +2433,7 @@ Item {
         root.sourcePickerOpen = false
         root.audioPickerOpen = false
         root.audioPickerRows = []
-        root.subtitlePickerRows = root.player.subtitleTracks()
+        root.subtitlePickerRows = root.transportPlayer.subtitleTracks()
         root.subtitlePickerOpen = true
         const selectedSubtitle = root.subtitlePickerRows.find(function(track) { return track.selected })
         root.subtitlePickerHighlightedId = selectedSubtitle ? selectedSubtitle.id
@@ -2404,7 +2492,7 @@ Item {
         if (root.subtitlePickerHighlightedId < 0) {
             return false
         }
-        root.player.selectSubtitleTrack(root.subtitlePickerHighlightedId)
+        root.transportPlayer.selectSubtitleTrack(root.subtitlePickerHighlightedId)
         root.closeSubtitlePicker(false)
         return true
     }
@@ -2469,7 +2557,8 @@ Item {
             selectedId = rows[0].id
         }
 
-        root.applyConfirmedGroupFilter(selectedId)
+        if (root.groupPickerForVod) root.vodSidebar.selectCategory(selectedId)
+        else root.applyConfirmedGroupFilter(selectedId)
         root.closeGroupPicker(false)
         root.keyboardModeLocked = false
         root.keyboardNavigationCandidateCount = 1
@@ -2490,10 +2579,10 @@ Item {
         if (playerKeyboardFocusArea === "rightPane") {
             clearKeyboardProgramBubble()
         }
-        if (resetSearchFocus && searchField.activeFocus) {
+        if (resetSearchFocus && channelSearchHeader.field.activeFocus) {
             interactionFocusTarget.forceActiveFocus()
         }
-        if (resetSearchFocus && groupPickerSearchField.activeFocus) {
+        if (resetSearchFocus && groupSearchHeader.field.activeFocus) {
             interactionFocusTarget.forceActiveFocus()
         }
         if (resetSearchFocus && sourcePickerSearchField.activeFocus) {
@@ -2508,6 +2597,10 @@ Item {
     }
 
     function closeTransientPlayerChrome() {
+        if (root.vodActive) {
+            vodListPanel.focus = false
+            interactionFocusTarget.forceActiveFocus()
+        }
         root.clearMouseSelectionPin()
         root.exitKeyboardNavigation(true)
         if (root.channelList.searchText.length > 0) {
@@ -2521,6 +2614,10 @@ Item {
     }
 
     function handleEscape() {
+        if (root.vodActive && !root.audioPickerOpen && !root.subtitlePickerOpen && root.shell.activeOverlay === "none" && root.showShellChrome) {
+            root.closeTransientPlayerChrome()
+            return true
+        }
         if (root.multiviewSelectionMode) {
             root.cancelMultiviewSelection()
             return true
@@ -2574,7 +2671,7 @@ Item {
 
         const hasTransientChrome = root.keyboardModeLocked
             || root.playerKeyboardFocusArea !== "none"
-            || searchField.activeFocus
+            || channelSearchHeader.field.activeFocus
             || root.channelList.searchText.length > 0
             || root.hoverBubbleVisible
             || root.numericInputState !== "none"
@@ -2592,6 +2689,53 @@ Item {
         return false
     }
 
+    function handleGroupPickerKey(event) {
+        if (root.groupPickerForVod && root.chromeAnimationsRunning) return true
+        if (event.modifiers & (Qt.AltModifier | Qt.MetaModifier)) return false
+        const ctrlPressed = (event.modifiers & Qt.ControlModifier) !== 0
+        if (ctrlPressed) {
+            if (event.key === Qt.Key_G) {
+                return true
+            }
+            if (event.key === Qt.Key_S && !root.groupPickerForVod) {
+                noteKeyboardNavigationKey()
+                openSourcePicker("keyboard")
+                return true
+            }
+            return false
+        }
+
+        if (groupSearchHeader.field.activeFocus) {
+            if (event.key === Qt.Key_Down) {
+                noteKeyboardNavigationKey()
+                return root.focusTopGroupRow("keyboard")
+            }
+            if (event.key === Qt.Key_Tab
+                || event.key === Qt.Key_Return
+                || event.key === Qt.Key_Enter) {
+                noteKeyboardNavigationKey()
+                return root.focusTopGroupRow("keyboard")
+            }
+            return false
+        }
+
+        switch (event.key) {
+        case Qt.Key_Up:
+            noteKeyboardNavigationKey()
+            return root.moveGroupPickerSelection(-1, "keyboard")
+        case Qt.Key_Down:
+            noteKeyboardNavigationKey()
+            return root.moveGroupPickerSelection(1, "keyboard")
+        case Qt.Key_Right:
+        case Qt.Key_Return:
+        case Qt.Key_Enter:
+            noteKeyboardNavigationKey()
+            return root.confirmGroupPickerSelection()
+        default:
+            return false
+        }
+    }
+
     function handleLiveKey(event) {
         if (event.key === Qt.Key_D && event.modifiers === Qt.ControlModifier)
             return root.handleDownloadShortcut()
@@ -2607,6 +2751,17 @@ Item {
         const digit = root.digitForKey(event.key)
         if (!ctrlPressed && digit.length > 0 && root.numericEntryContextActive) {
             return root.appendNumericInputDigit(digit)
+        }
+
+        if (!ctrlPressed && root.numericEntryContextActive
+            && root.numericInputState === "digits"
+            && ChannelNumber.isSeparator(event.key, event.text || "", root.decimalSeparator)) {
+            const updated = ChannelNumber.appendSeparator(root.numericInputDigits, root.decimalSeparator)
+            if (updated !== root.numericInputDigits) {
+                root.numericInputDigits = updated
+                numericCommitTimer.restart()
+            }
+            return true
         }
 
         if (root.numericInputState !== "none"
@@ -2689,51 +2844,9 @@ Item {
             }
         }
 
-        if (root.groupPickerOpen) {
-            if (ctrlPressed) {
-                if (event.key === Qt.Key_G) {
-                    return true
-                }
-                if (event.key === Qt.Key_S) {
-                    noteKeyboardNavigationKey()
-                    openSourcePicker("keyboard")
-                    return true
-                }
-                return false
-            }
+        if (root.groupPickerOpen) return root.handleGroupPickerKey(event)
 
-            if (groupPickerSearchField.activeFocus) {
-                if (event.key === Qt.Key_Down) {
-                    noteKeyboardNavigationKey()
-                    return root.focusTopGroupRow("keyboard")
-                }
-                if (event.key === Qt.Key_Tab
-                    || event.key === Qt.Key_Return
-                    || event.key === Qt.Key_Enter) {
-                    noteKeyboardNavigationKey()
-                    return root.focusTopGroupRow("keyboard")
-                }
-                return false
-            }
-
-            switch (event.key) {
-            case Qt.Key_Up:
-                noteKeyboardNavigationKey()
-                return root.moveGroupPickerSelection(-1, "keyboard")
-            case Qt.Key_Down:
-                noteKeyboardNavigationKey()
-                return root.moveGroupPickerSelection(1, "keyboard")
-            case Qt.Key_Right:
-            case Qt.Key_Return:
-            case Qt.Key_Enter:
-                noteKeyboardNavigationKey()
-                return root.confirmGroupPickerSelection()
-            default:
-                return false
-            }
-        }
-
-        if (searchField.activeFocus) {
+        if (channelSearchHeader.field.activeFocus) {
             if (ctrlPressed && event.key === Qt.Key_G) {
                 noteKeyboardNavigationKey()
                 openGroupPicker("keyboard")
@@ -2929,6 +3042,7 @@ Item {
     }
 
     function handleDownloadShortcut() {
+        if (root.vodActive) return false
         if (root.searchFieldActive || root.leftPickerOpen)
             return false
         if (root.shell.activeOverlay === "guide") {
@@ -2942,7 +3056,63 @@ Item {
         return true
     }
 
+    function handleVodKey(event) {
+        const ctrl = event.modifiers === Qt.ControlModifier
+        if ((ctrl && event.key === Qt.Key_F) || (event.modifiers === Qt.NoModifier && event.key === Qt.Key_Tab)) {
+            root.focusSearchField()
+            return true
+        }
+        if (root.groupPickerOpen) return root.handleGroupPickerKey(event)
+        if (event.modifiers !== Qt.NoModifier) return false
+        if (vodListPanel.searchActive) {
+            if (event.key === Qt.Key_Down || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                root.noteKeyboardNavigationKey(); vodListPanel.focusList(); return true
+            }
+            return false
+        }
+        switch (event.key) {
+        case Qt.Key_Left:
+            if (root.chromeAnimationsRunning) return true
+            if (root.showShellChrome && vodListPanel.listActive) {
+                root.noteKeyboardNavigationKey()
+                root.openGroupPicker("keyboard", true)
+            } else {
+                root.vodInfoOpen = false
+                root.noteKeyboardNavigationKey()
+                vodListPanel.focusList()
+            }
+            return true
+        case Qt.Key_Right:
+            root.vodInfoOpen = true; root.noteKeyboardNavigationKey(); interactionFocusTarget.forceActiveFocus(); return true
+        case Qt.Key_Up:
+        case Qt.Key_Down:
+            root.vodInfoOpen = false; root.noteKeyboardNavigationKey(); vodListPanel.navigate(event.key === Qt.Key_Up ? -1 : 1); return true
+        case Qt.Key_Return:
+        case Qt.Key_Enter:
+            if (vodListPanel.enabled && !root.chromeAnimationsRunning) vodListPanel.activate()
+            return true
+        case Qt.Key_Space:
+            root.togglePauseWithBadge(); return true
+        case Qt.Key_J:
+        case Qt.Key_L:
+            return root.seekTimeshiftRelativeWithBadge(event.key === Qt.Key_J ? -10 : 10)
+        case Qt.Key_F:
+            root.toggleFullscreen(); return true
+        case Qt.Key_M:
+            root.toggleMuteWithKeyboardHud(); return true
+        case Qt.Key_Comma:
+            root.adjustVolume(-5, "volume-below-50.svg"); return true
+        case Qt.Key_Period:
+            root.adjustVolume(5, "volume-over-50.svg"); return true
+        default: return false
+        }
+    }
+
     function handleWindowKey(event) {
+        if (event.key === Qt.Key_V && event.modifiers === Qt.NoModifier && root.mainWindow)
+            return root.mainWindow.toggleVod()
+        if (root.shell.activeOverlay === "vod") return false
+
         if (root.isMultiviewPromotion(event))
             return root.promoteMultiviewSelection()
         if (root.multiviewSelectionMode && !root.isMultiviewArrow(event)) {
@@ -3003,6 +3173,8 @@ Item {
             return guidePage.handleKeyboardEvent(event)
         }
 
+        if (root.vodActive && !root.audioPickerOpen && !root.subtitlePickerOpen)
+            return root.handleVodKey(event)
         return handleLiveKey(event)
     }
 
@@ -3165,6 +3337,22 @@ Item {
 
     onKeyboardModeLockedChanged: root.updateAutoHide()
     onTransportTracksReadyChanged: root.refreshTransportTracks()
+    onTransportPlayerChanged: {
+        root.closeAudioPicker(false)
+        root.closeSubtitlePicker(false)
+        root.refreshTransportTracks()
+        root.resetDebugBufferChart()
+        root.resetDebugBitrateChart()
+        if (root.debugBubbleVisible) root.refreshDebugBubbleData()
+    }
+    Connections {
+        target: root.vodActive ? root.vod.playerObject : null
+        function onTrackListReady() {
+            root.refreshTransportTracks()
+            if (root.audioPickerOpen) root.audioPickerRows = root.transportPlayer.audioTracks()
+            if (root.subtitlePickerOpen) root.subtitlePickerRows = root.transportPlayer.subtitleTracks()
+        }
+    }
     onPlayerChanged: Qt.callLater(root.refreshFocusedPlaybackContext)
 
     function refreshFocusedPlaybackContext() {
@@ -3197,6 +3385,7 @@ Item {
             Qt.callLater(function() { epgTimeline.centerPlayback(true) })
         root.clearLeftPaneHideIfSettled()
         if (!root.showShellChrome) {
+            if (root.vodActive) { vodListPanel.focus = false; interactionFocusTarget.forceActiveFocus() }
             root.searchFocusPending = false
             root.hideProgramHoverBubble()
         }
@@ -3473,7 +3662,7 @@ Item {
                 guideCloseTimer.stop()
                 guideOverlayClosing = false
                 root.setPlayerKeyboardFocusArea("none")
-                if (searchField.activeFocus) {
+                if (channelSearchHeader.field.activeFocus) {
                     interactionFocusTarget.forceActiveFocus()
                 }
                 if (!guideOverlayMounted) {
@@ -3494,7 +3683,7 @@ Item {
             } else if (root.shell.activeOverlay !== "guide") {
                 overlayTimer.stop()
                 root.setPlayerKeyboardFocusArea("none")
-                if (searchField.activeFocus) {
+                if (channelSearchHeader.field.activeFocus) {
                     interactionFocusTarget.forceActiveFocus()
                 }
                 root.hideProgramHoverBubble()
@@ -3552,6 +3741,13 @@ Item {
         anchors.fill: parent
         visible: root.showVideoCanvas
         clip: true
+
+        MpvVideoItem {
+            objectName: "vodVideo"
+            anchors.fill: parent
+            visible: root.vodActive
+            playerObject: root.vodActive ? root.vod.playerObject : null
+        }
 
         Repeater {
             model: root.multiviewVisibleSlots
@@ -4400,6 +4596,7 @@ Item {
     }
 
     BusyIndicator {
+        objectName: "ui.playback.loading"
         anchors.centerIn: parent
         width: 54
         height: 54
@@ -4444,7 +4641,7 @@ Item {
 
     Item {
         anchors.centerIn: parent
-        visible: !root.hasPlaybackChannel
+        visible: !root.vodActive && !root.hasPlaybackChannel
             && !root.multiviewActive
             && !root.multiviewRetainedSelectionVisible
         z: 3
@@ -4546,6 +4743,8 @@ Item {
 
     Item {
         id: leftChrome
+        visible: !root.vodActive || root.groupPickerOpen || root.audioPickerOpen || root.subtitlePickerOpen
+            || (root.leftPaneClosingToHidden && root.leftPaneClosingMode === "group")
         objectName: "ui.region.left_pane"
         readonly property bool leftPaneVisible: root.showShellChrome || root.leftPickerOpen || root.pendingEmptyPipActive
         width: root.leftPanelWidth
@@ -4618,178 +4817,96 @@ Item {
             anchors.bottomMargin: Theme.spacingM
             spacing: Theme.spacingS
 
-            Item {
+            PlaybackSearchHeader {
+                id: channelSearchHeader
                 Layout.fillWidth: true
-                implicitHeight: 42
                 visible: root.leftPaneDisplayMode === "channels" && root.hasAnyChannels
-
-                RowLayout {
-                    anchors.fill: parent
-                    spacing: Theme.spacingS
-
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        radius: 4
-                        color: Theme.uiBackground("#960d1822", root.uiTransparency)
-                        border.width: searchField.activeFocus ? 1 : 0
-                        border.color: Theme.borderStrong
-
-                        TextField {
-                            id: searchField
-                            anchors.fill: parent
-                            anchors.margins: 1
-                            leftPadding: 12
-                            rightPadding: 12
-                            topPadding: 10
-                            bottomPadding: 10
-                            text: root.channelList.searchText
-                            placeholderText: "Search channels"
-                            placeholderTextColor: Theme.textMuted
-                            color: Theme.textPrimary
-                            font.pixelSize: 14
-                            hoverEnabled: true
-                            background: Item {}
-                            onTextEdited: root.channelList.searchText = text
-                            Keys.onPressed: function(event) {
-                                if (event.key === Qt.Key_Down
-                                    || event.key === Qt.Key_Tab
-                                    || event.key === Qt.Key_Return
-                                    || event.key === Qt.Key_Enter) {
-                                    event.accepted = true
-                                    root.noteKeyboardNavigationKey()
-                                    root.focusChannelFromSearch("keyboard")
-                                }
-                            }
-                            onActiveFocusChanged: {
-                                if (activeFocus) {
-                                    root.setPlayerKeyboardFocusArea("search")
-                                    root.noteBrowseInteraction()
-                                } else if (root.playerKeyboardFocusArea === "search") {
-                                    root.playerKeyboardFocusArea = "none"
-                                }
-                                if (!activeFocus && !channelListHover.hovered) {
-                                    previewHoldTimer.stop()
-                                } else if (!channelListHover.hovered) {
-                                    previewHoldTimer.restart()
-                                }
-                            }
-                        }
+                text: root.channelList.searchText
+                placeholderText: "Search channels"
+                switchText: "← Groups"
+                switchActionObjectName: "ui.live.openGroups"
+                uiTransparency: root.uiTransparency
+                neutralPalette: false
+                onTextEdited: function(text) { root.channelList.searchText = text }
+                onSearchKeyPressed: function(event) {
+                    // TextField consumes Ctrl+Up before it can bubble to the window.
+                    // Route only the Live search actions; cursor editing stays native.
+                    if (event.modifiers === Qt.ControlModifier
+                        && (event.key === Qt.Key_Up || event.key === Qt.Key_G
+                            || event.key === Qt.Key_S || event.key === Qt.Key_F)) {
+                        event.accepted = root.handleWindowKey(event)
+                        return
                     }
-
-                    Rectangle {
-                        Layout.preferredWidth: root.leftPaneViewSwitchWidth
-                        Layout.fillHeight: true
-                        radius: 4
-                        color: groupsSwitchArea.containsMouse
-                            ? Theme.uiBackground("#6d111a24", root.uiTransparency) : "transparent"
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "← Groups"
-                            color: groupsSwitchArea.containsMouse ? Theme.textPrimary : Theme.textSecondary
-                            font.pixelSize: 13
-                        }
-
-                        MouseArea {
-                            id: groupsSwitchArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onPositionChanged: root.revealUi("pointer")
-                            onClicked: root.openGroupPicker("pointer", true)
-                        }
+                    if (event.modifiers === Qt.NoModifier && (event.key === Qt.Key_Down
+                        || event.key === Qt.Key_Tab
+                        || event.key === Qt.Key_Return
+                        || event.key === Qt.Key_Enter)) {
+                        event.accepted = true
+                        root.noteKeyboardNavigationKey()
+                        root.focusChannelFromSearch("keyboard")
                     }
                 }
+                onSearchFocusChanged: function(focused) {
+                    if (focused) {
+                        root.setPlayerKeyboardFocusArea("search")
+                        root.noteBrowseInteraction()
+                    } else if (root.playerKeyboardFocusArea === "search") {
+                        root.playerKeyboardFocusArea = "none"
+                    }
+                    if (!focused && !channelListHover.hovered) {
+                        previewHoldTimer.stop()
+                    } else if (!channelListHover.hovered) {
+                        previewHoldTimer.restart()
+                    }
+                }
+                onPointerMoved: root.revealUi("pointer")
+                onSwitchRequested: root.openGroupPicker("pointer", true)
             }
 
-            Item {
+            PlaybackSearchHeader {
+                id: groupSearchHeader
                 Layout.fillWidth: true
-                implicitHeight: 42
                 visible: root.leftPaneDisplayMode === "group"
-
-                RowLayout {
-                    anchors.fill: parent
-                    spacing: Theme.spacingS
-
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        radius: 4
-                        color: Theme.uiBackground("#960d1822", root.uiTransparency)
-                        border.width: groupPickerSearchField.activeFocus ? 1 : 0
-                        border.color: Theme.borderStrong
-
-                        TextField {
-                            id: groupPickerSearchField
-                            anchors.fill: parent
-                            anchors.margins: 1
-                            leftPadding: 12
-                            rightPadding: 12
-                            topPadding: 10
-                            bottomPadding: 10
-                            text: root.groupPickerSearchText
-                            placeholderText: "Search groups"
-                            placeholderTextColor: Theme.textMuted
-                            color: Theme.textPrimary
-                            font.pixelSize: 14
-                            hoverEnabled: true
-                            background: Item {}
-                            onTextEdited: {
-                                root.groupPickerSearchText = text
-                                root.ensureGroupPickerHighlight()
-                            }
-                            Keys.onPressed: function(event) {
-                                if (event.key === Qt.Key_Down
-                                    || event.key === Qt.Key_Tab
-                                    || event.key === Qt.Key_Return
-                                    || event.key === Qt.Key_Enter) {
-                                    event.accepted = true
-                                    root.noteKeyboardNavigationKey()
-                                    root.focusTopGroupRow("keyboard")
-                                }
-                            }
-                            onActiveFocusChanged: {
-                                // A pointer focus restore can arrive after the picker closes.
-                                if (activeFocus && !root.groupPickerOpen) {
-                                    interactionFocusTarget.forceActiveFocus()
-                                    root.updateAutoHide()
-                                    return
-                                }
-                                if (activeFocus) {
-                                    root.setPlayerKeyboardFocusArea("groupSearch")
-                                    root.revealUi("keyboard")
-                                } else if (root.playerKeyboardFocusArea === "groupSearch") {
-                                    root.playerKeyboardFocusArea = "none"
-                                }
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        Layout.preferredWidth: root.leftPaneViewSwitchWidth
-                        Layout.fillHeight: true
-                        radius: 4
-                        color: channelsSwitchArea.containsMouse
-                            ? Theme.uiBackground("#6d111a24", root.uiTransparency) : "transparent"
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "Channels →"
-                            color: channelsSwitchArea.containsMouse ? Theme.textPrimary : Theme.textSecondary
-                            font.pixelSize: 13
-                        }
-
-                        MouseArea {
-                            id: channelsSwitchArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onPositionChanged: root.revealUi("pointer")
-                            onClicked: root.closeGroupPicker(false)
-                        }
+                searchObjectName: "ui.player.groupSearch"
+                switchObjectName: "ui.player.groupReturn"
+                switchActionObjectName: "ui.player.groupReturnAction"
+                text: root.groupPickerSearchText
+                placeholderText: "Search groups"
+                switchText: root.groupPickerForVod ? "Movies →" : "Channels →"
+                uiTransparency: root.uiTransparency
+                neutralPalette: root.groupPickerForVod
+                onTextEdited: function(text) {
+                    root.groupPickerSearchText = text
+                    root.ensureGroupPickerHighlight()
+                }
+                onSearchKeyPressed: function(event) {
+                    if (event.modifiers === Qt.NoModifier && (event.key === Qt.Key_Down
+                        || event.key === Qt.Key_Tab
+                        || event.key === Qt.Key_Return
+                        || event.key === Qt.Key_Enter)) {
+                        event.accepted = true
+                        root.noteKeyboardNavigationKey()
+                        root.focusTopGroupRow("keyboard")
                     }
                 }
+                onSearchFocusChanged: function(focused) {
+                    // A pointer focus restore can arrive after the picker closes.
+                    if (focused && !root.groupPickerOpen) {
+                        interactionFocusTarget.forceActiveFocus()
+                        root.updateAutoHide()
+                        return
+                    }
+                    if (focused) {
+                        root.setPlayerKeyboardFocusArea("groupSearch")
+                        root.revealUi("keyboard")
+                    } else if (root.playerKeyboardFocusArea === "groupSearch") {
+                        root.playerKeyboardFocusArea = "none"
+                    }
+                }
+                onPointerMoved: {
+                    if (root.groupPickerOpen && !root.chromeAnimationsRunning) root.revealUi("pointer")
+                }
+                onSwitchRequested: root.closeGroupPicker(false)
             }
 
             Rectangle {
@@ -4854,6 +4971,7 @@ Item {
 
                 ListView {
                     id: groupPickerView
+                    objectName: "ui.player.groups"
                     anchors.fill: parent
                     clip: true
                     spacing: 2
@@ -4884,6 +5002,7 @@ Item {
 
                     delegate: Rectangle {
                         required property var modelData
+                        objectName: "ui.player.groupRow." + modelData.id
 
                         width: ListView.view.width
                         height: 62
@@ -4902,7 +5021,7 @@ Item {
 
                             ChannelBadge {
                                 badgeSize: 38
-                                imageSource: modelData.id === "__favourites__"
+                                imageSource: root.groupPickerForVod && modelData.iconSource ? modelData.iconSource : modelData.id === "__favourites__"
                                     ? root.iconPath("favourites.svg")
                                     : root.iconPath("group-placeholder.svg")
                                 label: modelData.name
@@ -4914,6 +5033,7 @@ Item {
 
                                 Text {
                                     Layout.fillWidth: true
+                                    objectName: "ui.player.group." + modelData.id
                                     text: modelData.name
                                     color: Theme.textPrimary
                                     font.pixelSize: 14
@@ -4923,7 +5043,8 @@ Item {
 
                                 Text {
                                     Layout.fillWidth: true
-                                    text: modelData.count === 1 ? "1 channel" : modelData.count + " channels"
+                                    visible: !root.groupPickerForVod
+                                    text: root.groupPickerForVod ? "" : (modelData.count === 1 ? "1 channel" : modelData.count + " channels")
                                     color: Theme.textSecondary
                                     font.pixelSize: 11
                                     elide: Text.ElideRight
@@ -4940,6 +5061,7 @@ Item {
                                 }
                             }
                             onPositionChanged: function(mouse) {
+                                if (!root.groupPickerOpen || root.chromeAnimationsRunning) return
                                 const position = mapToItem(null, mouse.x, mouse.y)
                                 if (root.groupPickerKeyboardNavigation
                                     && Math.abs(position.x - root.groupKeyboardPointerPosition.x) < 1
@@ -4970,7 +5092,7 @@ Item {
 
                     Text {
                         Layout.fillWidth: true
-                        text: root.liveGroups.totalCount > 0
+                        text: root.groupPickerForVod || root.liveGroups.totalCount > 0
                             ? "No groups match this search."
                             : "No selected groups are available for this source."
                         color: Theme.textPrimary
@@ -4981,7 +5103,7 @@ Item {
 
                     Text {
                         Layout.fillWidth: true
-                        text: root.liveGroups.totalCount > 0
+                        text: root.groupPickerForVod || root.liveGroups.totalCount > 0
                             ? "Try a different group name or clear the filter."
                             : "Select groups in Source Settings before using the live group picker."
                         color: Theme.textSecondary
@@ -4990,12 +5112,12 @@ Item {
                     }
 
                     AppButton {
-                        text: root.liveGroups.totalCount > 0 ? "Clear Search" : "Open Source Settings"
+                        text: root.groupPickerForVod || root.liveGroups.totalCount > 0 ? "Clear Search" : "Open Source Settings"
                         accent: true
                         onClicked: {
-                            if (root.liveGroups.totalCount > 0) {
+                            if (root.groupPickerForVod || root.liveGroups.totalCount > 0) {
                                 root.groupPickerSearchText = ""
-                                groupPickerSearchField.forceActiveFocus()
+                                groupSearchHeader.field.forceActiveFocus()
                                 root.ensureGroupPickerHighlight()
                             } else {
                                 root.closeGroupPicker(false)
@@ -5278,7 +5400,7 @@ Item {
                     onHoveredChanged: {
                         if (hovered) {
                             root.noteBrowseInteraction()
-                        } else if (!searchField.activeFocus && !searchField.hovered) {
+                        } else if (!channelSearchHeader.field.activeFocus && !channelSearchHeader.field.hovered) {
                             previewHoldTimer.stop()
                         }
                     }
@@ -5358,10 +5480,8 @@ Item {
                             spacing: 8
 
                             Text {
-                                Layout.preferredWidth: 22
-                                text: model.source === "M3U"
-                                    ? Math.max(1, model.sortOrder)
-                                    : (model.sortOrder > 0 ? model.sortOrder : index + 1)
+                                Layout.preferredWidth: root.channelNumberColumnWidth
+                                text: ChannelNumber.localize(model.displayNumber, root.decimalSeparator)
                                 color: channelIsSelected ? Theme.textPrimary : Theme.textSecondary
                                 font.pixelSize: 12
                                 font.bold: channelIsSelected
@@ -5584,7 +5704,7 @@ Item {
                         onClicked: {
                             if (root.channelList.searchText.length > 0) {
                                 root.channelList.searchText = ""
-                                searchField.forceActiveFocus()
+                                channelSearchHeader.field.forceActiveFocus()
                             } else {
                                 root.openSettingsOverlay("sources", "pointer")
                             }
@@ -5638,8 +5758,98 @@ Item {
         }
     }
 
+    VodPlaybackList {
+        id: vodListPanel
+        objectName: "ui.vod.playback.left"
+        visible: root.vodActive && (shown || opacity > 0)
+        width: Math.min(root.leftPanelWidth, root.width)
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.topMargin: root.topBarReservedHeight
+        anchors.bottom: parent.bottom
+        z: 2
+        catalog: root.vodSidebar
+        uiTransparency: root.uiTransparency
+        shown: root.vodActive && root.showShellChrome && (root.vodPanelsFit || !root.vodInfoOpen)
+        inputAllowed: !root.chromeAnimationsRunning
+        onGroupsRequested: root.openGroupPicker("pointer", true)
+        onInteraction: function(source) {
+            if (source === "keyboard") root.noteKeyboardNavigationKey()
+            else if (source === "pointer") root.revealUi("pointer")
+            else root.updateAutoHide()
+        }
+        onHoveredChanged: root.updateAutoHide()
+    }
+
+    IconActionButton {
+        id: vodBackButton
+        objectName: "ui.vod.backToCatalog"
+        readonly property bool groupPanel: root.groupPickerForVod && leftChrome.visible
+            && root.leftPaneDisplayMode === "group"
+        readonly property bool shown: root.vodActive && root.shell.activeOverlay === "none"
+            && (groupPanel ? root.groupPickerOpen : vodListPanel.shown)
+        visible: root.vodActive && root.shell.activeOverlay === "none"
+            && (shown || opacity > 0)
+        width: 40
+        height: 40
+        anchors.left: parent.left
+        anchors.leftMargin: (groupPanel ? leftChrome.width : vodListPanel.width) + Theme.spacingL
+        anchors.top: parent.top
+        anchors.topMargin: root.topOverlayMargin
+        opacity: groupPanel ? leftChrome.opacity : vodListPanel.opacity
+        transform: Translate {
+            x: vodBackButton.groupPanel ? leftChromeShift.x : vodListPanel.slideOffset
+        }
+        enabled: shown && !root.chromeAnimationsRunning
+        z: 3
+        borderless: true
+        iconSource: root.iconPath("left-arrow.svg")
+        caption: "Back to movies"
+        uiTransparency: root.uiTransparency
+        background: Rectangle {
+            radius: 4
+            color: Theme.uiBackground(Theme.overlaySurfaceInteractive, root.uiTransparency)
+        }
+        onClicked: {
+            interactionFocusTarget.forceActiveFocus()
+            if (root.mainWindow && root.mainWindow.toggleVod()) root.vod.stop()
+        }
+        onHoveredChanged: root.updateAutoHide()
+    }
+
+    VodPlaybackInfo {
+        id: vodInfoPanel
+        objectName: "ui.vod.playback.right"
+        visible: root.vodActive && (shown || opacity > 0)
+        width: Math.min(root.rightPanelWidth, root.width)
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.topMargin: root.topBarReservedHeight
+        anchors.bottom: parent.bottom
+        z: 2
+        movie: root.vodSidebar ? root.vodSidebar.playingMovie : ({})
+        uiTransparency: root.uiTransparency
+        shown: root.vodActive && root.showShellChrome && (root.vodPanelsFit || root.vodInfoOpen)
+        inputAllowed: !root.chromeAnimationsRunning
+        onHoveredChanged: root.updateAutoHide()
+    }
+
+    Connections {
+        target: root.vodSidebar
+        function onPlaybackStarted() { root.vodInfoOpen = false; root.closeTransientPlayerChrome() }
+        function onChanged() {
+            if (root.groupPickerOpen && root.groupPickerForVod) root.ensureGroupPickerHighlight()
+            const message = root.vodSidebar.errorText
+            if (message === root.vodSidebarError) return
+            root.vodSidebarError = message
+            if (message.length > 0 && root.vodActive) root.revealUi("keyboard")
+        }
+    }
+
     IconActionButton {
         id: guideButtonChrome
+        objectName: "ui.live.guideButton"
+        visible: !root.vodActive
         width: (root.shell.layoutBand === "compact" ? 52 : 56) * 4
         height: 48
         anchors.top: parent.top
@@ -5683,6 +5893,7 @@ Item {
 
     Item {
         id: rightChrome
+        visible: !root.vodActive
         objectName: "ui.region.right_pane"
         width: root.rightPanelWidth
         anchors.right: parent.right
@@ -5828,7 +6039,7 @@ Item {
     EpgHoverBubble {
         timePattern: root.dateTime.timePattern
         id: epgHoverBubble
-        visible: root.hoverBubbleVisible
+        visible: !root.vodActive && root.hoverBubbleVisible
             && root.showShellChrome
             && root.shell.activeOverlay === "none"
             && root.hoverAnchorItem !== null
@@ -5881,7 +6092,7 @@ Item {
 
     Item {
         id: hoverBubbleBridge
-        visible: root.hoverBubbleVisible
+        visible: !root.vodActive && root.hoverBubbleVisible
             && root.showShellChrome
             && root.shell.activeOverlay === "none"
             && root.hoverAnchorItem !== null
@@ -5962,7 +6173,7 @@ Item {
         readonly property int controlsTopPadding: root.transportTimelineActive ? 8 : 4
         readonly property int controlsBottomPadding: 4
         readonly property int controlsVerticalGap: root.transportTimelineActive ? 3 : 0
-        readonly property bool timeshiftNoticeVisible: (root.transportTimelineUsingCatchup
+        readonly property bool timeshiftNoticeVisible: !root.vodActive && (root.transportTimelineUsingCatchup
                 ? root.player.catchupTimelineNoticeText
                 : (root.transportTimelineUsingLiveProgram
                     ? root.liveTimelineNoticeText
@@ -6034,7 +6245,9 @@ Item {
 
                         Text {
                             Layout.alignment: Qt.AlignVCenter
-                            text: root.formatTimeshiftClock(root.transportTimelineUsingCatchup
+                            objectName: "ui.transport.position"
+                            text: root.vodActive ? root.formatVodTime(root.vod.positionSeconds)
+                                : root.formatTimeshiftClock(root.transportTimelineUsingCatchup
                                 ? root.player.catchupTimelineStartEpochMs
                                 : (root.transportTimelineUsingTimeshift
                                     ? root.player.timeshiftWindowStartEpochMs
@@ -6048,7 +6261,8 @@ Item {
                             Layout.alignment: Qt.AlignVCenter
                             Layout.fillWidth: true
                             visible: root.transportTimelineActive
-                            text: root.transportTimelineUsingCatchup
+                            objectName: "ui.transport.title"
+                            text: root.vodActive ? root.vod.title : root.transportTimelineUsingCatchup
                                 ? (root.player.catchupProgramLabel || "")
                                 : (root.transportTimelineUsingTimeshift
                                     ? root.app.timeshiftProgramTitle
@@ -6100,7 +6314,9 @@ Item {
 
                         Text {
                             Layout.alignment: Qt.AlignVCenter
-                            text: root.formatTimeshiftClock(root.transportTimelineUsingCatchup
+                            objectName: "ui.transport.duration"
+                            text: root.vodActive ? root.formatVodTime(root.vod.durationSeconds)
+                                : root.formatTimeshiftClock(root.transportTimelineUsingCatchup
                                 ? root.player.catchupTimelineEndEpochMs
                                 : (root.transportTimelineUsingTimeshift
                                     ? root.player.timeshiftLiveEdgeEpochMs
@@ -6123,7 +6339,7 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             height: 6
                             radius: 3
-                            color: root.programmeTimelineActive || root.transportTimelineUsingLiveProgress ? "#283542" : "#36454f"
+                            color: root.programmeTimelineActive || root.transportTimelineUsingLiveProgress ? "#283542" : Theme.vodTimelineTrack
 
                             // Published archive, including material ahead of the watched position.
                             Rectangle {
@@ -6172,7 +6388,7 @@ Item {
                             }
 
                             Rectangle {
-                                width: root.transportTimelineUsingLiveProgress
+                                width: root.vodActive ? parent.width * root.vodPositionFraction : root.transportTimelineUsingLiveProgress
                                     ? parent.width * Math.min(100, Math.max(0,
                                         Number((root.playbackNowNext.currentProgram || {}).progressPercent || 0))) / 100
                                     : (root.programmeTimelineActive
@@ -6182,12 +6398,12 @@ Item {
                                             : parent.width))
                                 height: parent.height
                                 radius: parent.radius
-                                color: root.transportTimelineUsingLiveProgress ? Theme.accent : "#a9d8ff"
+                                color: root.transportTimelineUsingLiveProgress ? Theme.accent : Theme.vodTimelineFill
                             }
 
                             Rectangle {
                                 visible: root.programmeTimelineActive && programmeTimeline.hasFuture
-                                x: Math.max(0, Math.min(parent.width - width, parent.width * programmeTimeline.nowFraction - width / 2))
+                                x: parent.width * programmeTimeline.nowFraction - width / 2
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 2
                                 height: parent.height
@@ -6205,6 +6421,8 @@ Item {
                                 border.color: "#26445b"
                                 anchors.verticalCenter: parent.verticalCenter
                                 x: {
+                                    if (root.vodActive)
+                                        return timeshiftTrack.width * root.vodPositionFraction - width / 2
                                     if (root.programmeTimelineActive)
                                         return timeshiftTrack.width * programmeTimeline.positionFraction - width / 2
                                     const available = Math.max(1, timeshiftTrack.width - width)
@@ -6218,7 +6436,7 @@ Item {
 
                             MouseArea {
                                 anchors.fill: parent
-                                enabled: !root.transportTimelineUsingLiveProgress
+                                enabled: root.vodActive ? root.vodSeekEnabled : !root.transportTimelineUsingLiveProgress
                                 hoverEnabled: true
 
                                 onEnabledChanged: {
@@ -6281,6 +6499,23 @@ Item {
                 spacing: 4
 
                 IconActionButton {
+                    objectName: "ui.vod.playback.infoButton"
+                    visible: root.vodActive && !root.vodPanelsFit
+                    compact: true
+                    borderless: true
+                    barMode: true
+                    implicitWidth: bottomChrome.mediaButtonSize
+                    implicitHeight: bottomChrome.mediaButtonSize
+                    iconSource: root.iconPath("movie-info.svg")
+                    caption: root.vodInfoOpen ? "Movie list" : "Movie information"
+                    onClicked: {
+                        root.vodInfoOpen = !root.vodInfoOpen
+                        interactionFocusTarget.forceActiveFocus()
+                        root.revealUi("pointer")
+                    }
+                }
+
+                IconActionButton {
                     compact: true
                     borderless: true
                     barMode: true
@@ -6289,6 +6524,7 @@ Item {
                     iconInset: 1
                     iconSource: root.iconPath("previous-channel.svg")
                     objectName: "ui.live.previousChannel"
+                    visible: !root.vodActive
                     caption: "Previous channel"
                     enabled: root.hasChannelList
                     onClicked: {
@@ -6304,12 +6540,12 @@ Item {
                     implicitWidth: bottomChrome.mediaButtonSize
                     implicitHeight: bottomChrome.mediaButtonSize
                     iconInset: 1
-                    iconSource: root.iconPath(root.hasPlaybackChannel && root.player.isPlaying ? "pause.svg" : "play.svg")
+                    iconSource: root.iconPath((root.vodActive || root.hasPlaybackChannel) && root.transportPlaying ? "pause.svg" : "play.svg")
                     objectName: "ui.live.playPause"
-                    caption: root.hasPlaybackChannel && root.player.isPlaying ? "Pause" : "Play"
-                    enabled: root.hasPlaybackChannel || root.hasSelectedChannel
+                    caption: (root.vodActive || root.hasPlaybackChannel) && root.transportPlaying ? "Pause" : "Play"
+                    enabled: root.vodActive || root.hasPlaybackChannel || root.hasSelectedChannel
                     onClicked: {
-                        if (root.hasPlaybackChannel) {
+                        if (root.vodActive || root.hasPlaybackChannel) {
                             root.togglePauseWithBadge()
                         } else {
                             root.playSelection("pointer")
@@ -6340,6 +6576,7 @@ Item {
                     iconInset: 1
                     iconSource: root.iconPath("next-channel.svg")
                     objectName: "ui.live.nextChannel"
+                    visible: !root.vodActive
                     caption: "Next channel"
                     enabled: root.hasChannelList
                     onClicked: {
@@ -6775,9 +7012,6 @@ Item {
         readonly property real contentWidth: width - channelChangeBubbleContent.anchors.leftMargin - channelChangeBubbleContent.anchors.rightMargin
         readonly property real contentHeight: height - channelChangeBubbleContent.anchors.topMargin - channelChangeBubbleContent.anchors.bottomMargin
         readonly property real contentHalfWidth: (contentWidth - channelChangeBubbleContent.spacing) / 2
-        readonly property int badgeSlotSize: Math.max(
-            44,
-            Math.floor(Math.min(channelChangeBubble.contentHeight * 0.78, channelChangeBubble.contentHalfWidth * 0.32)))
         width: Math.min(
             root.width - Theme.spacingL * 2,
             root.shell.layoutBand === "compact" ? 460 : 540)
@@ -6787,7 +7021,7 @@ Item {
         anchors.bottomMargin: root.showShellChrome
             ? bottomChrome.height + Theme.spacingM + 12
             : Theme.spacingL
-        visible: root.channelChangeBubbleVisible && root.hasPlaybackChannel && !root.leftPickerOpen && !root.multiviewActive
+        visible: !root.vodActive && root.channelChangeBubbleVisible && root.hasPlaybackChannel && !root.leftPickerOpen && !root.multiviewActive
         opacity: visible ? 1 : 0
         z: 7
 
@@ -6811,48 +7045,79 @@ Item {
             anchors.bottomMargin: 10
             spacing: 16
 
-            RowLayout {
-                Layout.fillWidth: true
+            Item {
+                id: channelBubbleIdentity
+                readonly property bool hasLogo: channelBubbleLogo.status === Image.Ready
                 Layout.preferredWidth: channelChangeBubble.contentHalfWidth
-                Layout.alignment: Qt.AlignVCenter
-                spacing: 14
+                Layout.minimumWidth: channelChangeBubble.contentHalfWidth
+                Layout.maximumWidth: channelChangeBubble.contentHalfWidth
+                Layout.fillHeight: true
 
                 Item {
-                    Layout.alignment: Qt.AlignVCenter
-                    Layout.preferredWidth: channelChangeBubble.badgeSlotSize
-                    Layout.preferredHeight: channelChangeBubble.badgeSlotSize
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: channelBubbleCaption.top
+                    anchors.bottomMargin: 6
 
-                    ChannelBadge {
-                        anchors.centerIn: parent
-                        badgeSize: parent.width
-                        showFrame: false
-                        imageMargin: 0
-                        sourcePath: root.player.currentChannel.cachedIconPath || ""
-                        label: root.player.currentChannel.name || "Channel"
+                    Image {
+                        id: channelBubbleLogo
+                        anchors.fill: parent
+                        source: root.player.currentChannel.cachedIconPath
+                            ? "file:///" + root.player.currentChannel.cachedIconPath : ""
+                        asynchronous: true
+                        fillMode: Image.PreserveAspectFit
+                        sourceSize.width: Math.max(1, Math.round(width * Screen.devicePixelRatio))
+                        sourceSize.height: Math.max(1, Math.round(height * Screen.devicePixelRatio))
+                        visible: channelBubbleIdentity.hasLogo
+                    }
+
+                    Text {
+                        anchors.fill: parent
+                        visible: !channelBubbleIdentity.hasLogo
+                        text: root.player.currentChannel.name || "Channel"
+                        textFormat: Text.PlainText
+                        color: Theme.textPrimary
+                        font.pixelSize: root.shell.layoutBand === "compact" ? 24 : 26
+                        font.bold: true
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        wrapMode: Text.Wrap
+                        maximumLineCount: 2
+                        elide: Text.ElideRight
                     }
                 }
 
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    Layout.alignment: Qt.AlignVCenter
-                    spacing: 5
+                RowLayout {
+                    id: channelBubbleCaption
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    height: Math.max(channelBubbleName.implicitHeight, channelBubbleNumber.implicitHeight)
+                    spacing: 6
 
                     Text {
+                        id: channelBubbleName
                         Layout.fillWidth: true
-                        text: root.player.currentChannel.name || "Channel"
+                        Layout.minimumWidth: 0
+                        Layout.alignment: Qt.AlignBaseline
+                        text: channelBubbleIdentity.hasLogo ? (root.player.currentChannel.name || "Channel") : ""
+                        textFormat: Text.PlainText
                         color: Theme.textPrimary
-                        font.pixelSize: root.shell.layoutBand === "compact" ? 20 : 22
+                        font.pixelSize: 14
                         font.bold: true
                         elide: Text.ElideRight
                     }
 
                     Text {
-                        Layout.fillWidth: true
+                        id: channelBubbleNumber
+                        Layout.maximumWidth: channelBubbleIdentity.width
+                        Layout.alignment: Qt.AlignBaseline
                         text: root.channelDisplayNumber(root.player.currentChannel)
                         visible: text.length > 0
+                        textFormat: Text.PlainText
                         color: Theme.textSecondary
                         font.pixelSize: 12
-                        font.bold: false
                         elide: Text.ElideRight
                     }
                 }
@@ -7087,6 +7352,7 @@ Item {
 
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
+            objectName: "ui.live.numericInput"
             text: root.numericHudText
             color: "#ffffff"
             style: Text.Outline

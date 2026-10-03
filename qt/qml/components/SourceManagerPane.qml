@@ -465,7 +465,7 @@ Item {
                 const currentDraft = buildDraftFromForm()
                 const persistedDraft = buildDraftFromProfile(selectedProfile)
                 if (!draftEquals(currentDraft, persistedDraft)) {
-                    root.profiles.replaceProfile(selectedProfile.id, {
+                    if (!root.profiles.replaceProfile(selectedProfile.id, {
                         "name": currentDraft.name,
                         "xtreamBaseUrl": currentDraft.xtreamBaseUrl,
                         "xtreamUsername": currentDraft.xtreamUsername,
@@ -475,7 +475,7 @@ Item {
                         "xmltvUrl": currentDraft.xmltvUrl,
                         "catchupSafetyMinutes": currentDraft.catchupSafetyMinutes,
                         "autoRefreshIntervalHours": currentDraft.autoRefreshIntervalHours
-                    })
+                    })) return
                     if (sourceIdentityOrConnectionChanged(currentDraft, persistedDraft)) {
                         pendingRefreshIds.push(selectedProfile.id)
                     }
@@ -535,7 +535,7 @@ Item {
             }
 
             const persistedDraft = buildDraftFromProfile(profile)
-            root.profiles.replaceProfile(profileId, {
+            if (!root.profiles.replaceProfile(profileId, {
                 "name": draft.name,
                 "xtreamBaseUrl": draft.xtreamBaseUrl,
                 "xtreamUsername": draft.xtreamUsername,
@@ -545,7 +545,7 @@ Item {
                 "xmltvUrl": draft.xmltvUrl,
                 "catchupSafetyMinutes": draft.catchupSafetyMinutes,
                 "autoRefreshIntervalHours": draft.autoRefreshIntervalHours
-            })
+            })) return
 
             if (sourceIdentityOrConnectionChanged(draft, persistedDraft)
                 && pendingRefreshIds.indexOf(profileId) < 0) {
@@ -694,8 +694,8 @@ Item {
             return
         }
 
+        if (!root.profiles.removeProfile(pendingDeleteProfileId)) return
         setPendingProfileDraft(pendingDeleteProfileId, null)
-        root.profiles.removeProfile(pendingDeleteProfileId)
         pendingDeleteProfileId = ""
         pendingDeleteProfileName = ""
         confirmDeleteVisible = false

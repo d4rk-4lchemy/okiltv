@@ -21,6 +21,7 @@ class ChannelListModel final : public QAbstractListModel
     Q_PROPERTY(int selectedChannelId READ selectedChannelId NOTIFY selectedChannelIdChanged)
     Q_PROPERTY(QVariantList categories READ categories NOTIFY categoriesChanged)
     Q_PROPERTY(QString activeProfileId READ activeProfileId NOTIFY activeProfileIdChanged)
+    Q_PROPERTY(QStringList displayNumbers READ displayNumbers NOTIFY channelNumbersChanged)
 
 public:
     enum Roles
@@ -40,7 +41,8 @@ public:
         CurrentProgramTitleRole,
         CurrentProgramTimeRangeRole,
         CatchupSupportedRole,
-        CurrentProgramProgressRole
+        CurrentProgramProgressRole,
+        DisplayNumberRole
     };
     Q_ENUM(Roles)
 
@@ -76,7 +78,9 @@ public:
 
     Q_INVOKABLE QVariantMap currentChannel() const;
     Q_INVOKABLE bool activateById(int channelId);
-    Q_INVOKABLE bool activateByDisplayNumber(int displayNumber);
+    QStringList displayNumbers() const;
+    Q_INVOKABLE QString displayNumberForChannel(const QVariantMap &data) const;
+    Q_INVOKABLE bool activateByDisplayNumber(const QString &displayNumber);
     Q_INVOKABLE bool activateAt(int row);
     Q_INVOKABLE bool activateRelative(int delta);
     Q_INVOKABLE int rowForChannelId(int channelId) const;
@@ -98,6 +102,7 @@ signals:
     void categoriesChanged();
     void activeProfileIdChanged();
     void channelActivated(int channelId);
+    void channelNumbersChanged();
 
 private:
     static constexpr auto kFavouritesCategoryId = "__favourites__";
@@ -122,6 +127,7 @@ private:
     QList<Core::ChannelCategory> m_categories;
     QHash<int, qint64> m_watchSecondsByChannelId;
     QSet<int> m_manualFavouriteChannelIds;
+    QSet<int> m_autoFavouriteExcludedChannelIds;
     QList<int> m_filteredRows;
     QString m_searchText;
     QString m_selectedCategoryId;

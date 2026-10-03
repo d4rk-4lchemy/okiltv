@@ -1,25 +1,11 @@
 #include "channellistmodel.h"
+#include "../core/channelnumber.h"
 
 #include <algorithm>
 
 namespace OKILTV::App {
 
 using namespace Core;
-
-namespace {
-
-int displayNumberForChannel(const Channel &channel, const int sortedIndex)
-{
-    if (channel.source == ChannelSource::M3U) {
-        return std::max(1, channel.sortOrder);
-    }
-    if (channel.sortOrder > 0) {
-        return channel.sortOrder;
-    }
-    return sortedIndex + 1;
-}
-
-} // namespace
 
 ChannelListModel::ChannelListModel(SettingsManager *settings, QObject *parent)
     : QAbstractListModel(parent)
@@ -56,6 +42,8 @@ QVariant ChannelListModel::data(const QModelIndex &index, const int role) const
         return channel.cachedIconPath;
     case SortOrderRole:
         return channel.sortOrder;
+    case DisplayNumberRole:
+        return effectiveChannelNumber(channel, m_filteredRows.at(index.row()));
     case SourceRole:
         return channelSourceToString(channel.source);
     case IsSelectedRole:
@@ -90,6 +78,7 @@ QHash<int, QByteArray> ChannelListModel::roleNames() const
         { IconUrlRole, "iconUrl" },
         { CachedIconPathRole, "cachedIconPath" },
         { SortOrderRole, "sortOrder" },
+        { DisplayNumberRole, "displayNumber" },
         { SourceRole, "source" },
         { IsSelectedRole, "isSelected" },
         { IsFavoriteRole, "isFavorite" },
@@ -215,6 +204,7 @@ void ChannelListModel::setChannels(const QList<Channel> &channels, const QList<C
         emit selectedCategoryIdChanged();
     }
     emit totalCountChanged();
+    emit channelNumbersChanged();
     emit selectedChannelIdChanged();
     emit categoriesChanged();
     emit filteredCountChanged();
@@ -227,6 +217,7 @@ void ChannelListModel::clear()
     m_categories.clear();
     m_watchSecondsByChannelId.clear();
     m_manualFavouriteChannelIds.clear();
+    m_autoFavouriteExcludedChannelIds.clear();
     m_filteredRows.clear();
     m_searchText.clear();
     m_selectedCategoryId.clear();
@@ -236,6 +227,7 @@ void ChannelListModel::clear()
     invalidateCategoriesCache();
     endResetModel();
     emit totalCountChanged();
+    emit channelNumbersChanged();
     emit filteredCountChanged();
     emit categoriesChanged();
     emit searchTextChanged();
@@ -296,8 +288,9 @@ void ChannelListModel::setWatchSeconds(const QHash<int, qint64> &watchSecondsByC
     }
 
     const auto previousWatchSecondsByChannelId = m_watchSecondsByChannelId;
-    const auto isAutoFavouriteEligibleFor = [](const QHash<int, qint64> &watchSecondsMap, const int channelId) {
-        return std::max<qint64>(0, watchSecondsMap.value(channelId, 0)) / 60 >= kFavouritesEligibilityMinutes;
+    const auto isAutoFavouriteEligibleFor = [this](const QHash<int, qint64> &watchSecondsMap, const int channelId) {
+        return !m_autoFavouriteExcludedChannelIds.contains(channelId)
+            && std::max<qint64>(0, watchSecondsMap.value(channelId, 0)) / 60 >= kFavouritesEligibilityMinutes;
     };
 
     auto favouritesEligibilityChanged = false;
@@ -448,15 +441,42 @@ bool ChannelListModel::activateById(const int channelId)
     return true;
 }
 
-bool ChannelListModel::activateByDisplayNumber(const int displayNumber)
+QStringList ChannelListModel::displayNumbers() const
 {
-    if (displayNumber <= 0) {
+    QStringList result;
+    result.reserve(m_allChannels.size());
+    for (qsizetype i = 0; i < m_allChannels.size(); ++i)
+        result.push_back(effectiveChannelNumber(m_allChannels.at(i), static_cast<int>(i)));
+    return result;
+}
+
+QString ChannelListModel::displayNumberForChannel(const QVariantMap &data) const
+{
+    for (qsizetype i = 0; i < m_allChannels.size(); ++i) {
+        const auto &channel = m_allChannels.at(i);
+        if (channel.id == data.value(QStringLiteral("id")).toInt()
+            && guidToString(channel.profileId) == data.value(QStringLiteral("profileId")).toString())
+            return effectiveChannelNumber(channel, static_cast<int>(i));
+    }
+    // The playing source can differ from the source currently being browsed.
+    Channel channel;
+    channel.channelNumber = data.value(QStringLiteral("channelNumber")).toString();
+    channel.sortOrder = data.value(QStringLiteral("sortOrder")).toInt();
+    channel.source = data.value(QStringLiteral("source")).toString() == QStringLiteral("M3U")
+        ? ChannelSource::M3U : ChannelSource::Xtream;
+    return effectiveChannelNumber(channel);
+}
+
+bool ChannelListModel::activateByDisplayNumber(const QString &displayNumber)
+{
+    const auto number = normalizeChannelNumber(displayNumber);
+    if (number.isEmpty()) {
         return false;
     }
 
     for (auto index = 0; index < m_allChannels.size(); ++index) {
         const auto &channel = m_allChannels.at(index);
-        if (displayNumberForChannel(channel, index) != displayNumber) {
+        if (effectiveChannelNumber(channel, static_cast<int>(index)) != number) {
             continue;
         }
         return activateById(channel.id);
@@ -553,13 +573,18 @@ bool ChannelListModel::toggleFavorite(const int channelId)
     const auto favouritesCategorySelected = m_selectedCategoryId == favouritesCategoryId;
 
     auto &favouriteChannelIds = m_settings->current().favoriteChannelIdsByProfile[m_activeProfileId];
-    const auto currentlyFavourite = m_manualFavouriteChannelIds.contains(channelId);
+    auto &excludedChannelIds = m_settings->current().autoFavoriteExcludedChannelIdsByProfile[m_activeProfileId];
+    const auto currentlyFavourite = isFavorite(channelId);
+    excludedChannelIds.removeAll(channelId);
     favouriteChannelIds.removeAll(channelId);
     if (!currentlyFavourite) {
+        m_autoFavouriteExcludedChannelIds.remove(channelId);
         favouriteChannelIds.push_back(channelId);
         m_manualFavouriteChannelIds.insert(channelId);
     } else {
         m_manualFavouriteChannelIds.remove(channelId);
+        excludedChannelIds.push_back(channelId);
+        m_autoFavouriteExcludedChannelIds.insert(channelId);
     }
 
     m_settings->save();
@@ -817,7 +842,8 @@ bool ChannelListModel::isCategoryHidden(const QString &categoryId) const
 
 bool ChannelListModel::isAutoFavouriteEligible(const int channelId) const
 {
-    return watchMinutesForChannel(channelId) >= kFavouritesEligibilityMinutes;
+    return !m_autoFavouriteExcludedChannelIds.contains(channelId)
+        && watchMinutesForChannel(channelId) >= kFavouritesEligibilityMinutes;
 }
 
 bool ChannelListModel::isFavouriteEligible(const int channelId) const
@@ -828,10 +854,13 @@ bool ChannelListModel::isFavouriteEligible(const int channelId) const
 void ChannelListModel::reloadManualFavourites()
 {
     m_manualFavouriteChannelIds.clear();
+    m_autoFavouriteExcludedChannelIds.clear();
     if (m_activeProfileId.isEmpty()) {
         return;
     }
 
+    const auto excludedChannelIds = m_settings->current().autoFavoriteExcludedChannelIdsByProfile.value(m_activeProfileId);
+    m_autoFavouriteExcludedChannelIds = QSet<int>(excludedChannelIds.cbegin(), excludedChannelIds.cend());
     const auto favouriteChannelIds = m_settings->current().favoriteChannelIdsByProfile.value(m_activeProfileId);
     for (const auto channelId : favouriteChannelIds) {
         m_manualFavouriteChannelIds.insert(channelId);

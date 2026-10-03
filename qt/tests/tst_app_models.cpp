@@ -1,5 +1,12 @@
 #include "../src/core/secretprotection.h"
 #include <sstream>
+#include "../src/app/vod/vodruntime.h"
+#include "../src/app/vod/vodcatalogmodel.h"
+#include "../src/app/vod/vodmediaprobe.h"
+#include <QBuffer>
+#include <QDirIterator>
+#include <QUrlQuery>
+#include "vod/fakes/vodfakes.h"
 
 #define private public
 #include "../src/app/appcontroller.h"
@@ -47,6 +54,8 @@
 #include "../src/player/mpvvideoitem.h"
 #undef private
 
+#include "../src/player/mpvplaybackengine.h"
+#include <QQuickWindow>
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -393,6 +402,24 @@ class AppModelTests final : public QObject
 
 private slots:
     void initTestCase() { OKILTV::Core::useIsolatedSecretKeyForTests(); }
+    void vodDvrPriority_data();
+    void vodDvrPriority();
+    void dvrPreparationRevalidatesCancellationAndShutdown();
+    void dvrVodSettingUsesSavedDraft();
+    void vodRuntimeNativePlayback_data();
+    void vodRuntimeNativePlayback();
+    void vodMediaProbeParsesTracks();
+    void vodRuntimeDisabledIsInert();
+    void vodCatalogSessionLibrary();
+    void vodArtworkInvalidAndRemoved();
+    void vodArtworkPersistentConcurrentCache();
+    void vodRuntimeRecoversFailedCredentialWrite();
+    void vodRuntimeRemovesSourceWithHistory();
+    void vodRuntimeMutatesActiveSource_data();
+    void vodRuntimeMutatesActiveSource();
+    void vodRuntimeLiveWaitsForStop();
+    void vodRuntimeReleasesLegacyBackends_data();
+    void vodRuntimeReleasesLegacyBackends();
     void updateCheckResponses_data();
     void updateCheckResponses();
     void updateCheckChoicesPersist();
@@ -403,6 +430,7 @@ private slots:
     void removingProfileClearsTrackPreferences();
     void playerRemembersTracksAcrossRestartAndFallsBack();
     void profilesModelGetTracksActiveSource();
+    void shellControllerSidebarWidthPersistence();
     void shellControllerRestoreLastViewClearsOverlayState();
     void shellControllerOpenOverlayPreservesOverlayStateExclusive();
     void appControllerKeepsSettingsOverlayOpenDuringProfileLoad();
@@ -641,6 +669,7 @@ private slots:
     void channelListModelKeyboardSelectionHelpersWrapAndJump();
     void channelListModelSelectByIdNoOpWhenUnchanged();
     void channelListModelActivatesByDisplayNumber();
+    void channelListModelActivatesDecimalNumbers();
     void channelListModelExposesCurrentProgramRoles();
     void channelListModelExposesDvrRecordingRole();
     void sourceGroupsModelAppliesSelectionThresholdAndPersistsReorder();
@@ -652,6 +681,7 @@ private slots:
     void sourceGroupsModelReorderVisibleGroupsAppendsHiddenInRelativeOrder();
     void sourceGroupsModelClearsStaleRowsForInvalidProfile();
     void epgGridModelRefreshPreservesViewport();
+    void epgGridModelConstructionIgnoresPreviousStorage();
     void epgGridModelInitializesTimeWindow();
     void epgGridModelSelectionUpdatesOnlyAffectedRows();
     void epgGridModelNavigationHelpersFollowTimeAndBounds();
@@ -698,6 +728,749 @@ private slots:
     void invalidPlaylistRefreshKeepsCachedChannels();
     void profileRefreshPrunesRemovedChannelsFromDatabase();
 };
+
+void AppModelTests::vodDvrPriority_data()
+{
+    QTest::addColumn<bool>("stopVod");
+    QTest::newRow("DVR-priority") << true;
+    QTest::newRow("concurrent-background-DVR") << false;
+}
+void AppModelTests::vodDvrPriority()
+{
+    using namespace OKILTV::Vod;
+    QFETCH(bool, stopVod);
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load(); settings.current().vodEnabled = true;
+    settings.current().dvrStopVodBeforeRecording = stopVod;
+    ServerProfile profile; profile.vodEnabled = true;
+    profile.xtreamBaseUrl = QStringLiteral("https://fixture.invalid");
+    QVERIFY(settings.addProfile(profile));
+    PlayerController player;
+    DvrController dvr(&settings, &player);
+    MultiViewController multiview(&settings, nullptr, &player);
+    TimeshiftController timeshift(&settings, &player, &dvr, &multiview);
+    Test::Engine *backend = nullptr;
+    VodRuntime runtime(&settings, &multiview, &dvr, &timeshift, nullptr, [&]() {
+        auto engine = std::make_unique<Test::Engine>(); backend = engine.get(); return engine;
+    });
+    QSignalSpy notices(&runtime, &VodRuntime::notification);
+    QTRY_VERIFY(runtime.ready());
+    const auto source = std::get<SourceContext>(runtime.store()->snapshot(profile.id));
+    const auto ref = Test::refFor(source);
+    std::optional<Outcome> opened;
+    runtime.module()->coordinator()->play(QUuid::createUuid(), Test::descriptorFor(source, ref), QUuid::createUuid(), {},
+        [&](Outcome result) { opened = result; });
+    QTRY_VERIFY(opened.has_value());
+    QVERIFY(std::holds_alternative<Success>(*opened));
+    QVERIFY(backend);
+    backend->emitState(OKILTV::Player::EngineState::Playing, 73000);
+    backend->acknowledgeStop = false;
+    std::optional<bool> prepared;
+    dvr.prepareRecordingStart([&](bool ready) { prepared = ready; });
+    if (stopVod) {
+        QVERIFY(!prepared);
+        QCOMPARE(backend->stops, 1);
+        QCOMPARE(notices.size(), 0);
+        backend->emitEnd(backend->token, OKILTV::Player::EndReason::UserStop);
+        QTRY_VERIFY(prepared.has_value());
+        QVERIFY(*prepared);
+        QVERIFY(!runtime.active());
+        QCOMPARE(notices.size(), 1);
+        QVERIFY(notices.first().first().toString().contains(QStringLiteral("DVR")));
+        RequestContext context; context.source = source.revision;
+        const auto saved = std::get<std::optional<VodProgress>>(runtime.store()->read(ref, context));
+        QVERIFY(saved); QCOMPARE(saved->positionMs, 73000);
+    } else {
+        QVERIFY(prepared); QVERIFY(*prepared);
+        QVERIFY(runtime.active());
+        QCOMPARE(backend->stops, 0);
+        QCOMPARE(notices.size(), 0);
+    }
+    QVERIFY(!dvr.automaticPlaybackHandoffAllowed());
+    // A new VOD session respects the same setting while DVR owns resources.
+    auto recording = std::make_unique<DvrController::Session>();
+    recording->recordingStarted = true;
+    dvr.m_sessions.emplace(QStringLiteral("background"), std::move(recording));
+    backend->acknowledgeStop = true;
+    opened.reset();
+    runtime.module()->coordinator()->play(QUuid::createUuid(), Test::descriptorFor(source, ref), QUuid::createUuid(), {},
+        [&](Outcome result) { opened = result; });
+    QTRY_VERIFY(opened.has_value());
+    QCOMPARE(std::holds_alternative<Success>(*opened), !stopVod);
+    QCOMPARE(dvr.activeRecordingCount(), 1); // recording was never implicitly stopped
+    QCOMPARE(notices.size(), stopVod ? 1 : 0);
+    runtime.shutdown();
+    QVERIFY(!dvr.prepareRecordingStart);
+    QVERIFY(!dvr.automaticPlaybackHandoffAllowed);
+}
+
+void AppModelTests::dvrPreparationRevalidatesCancellationAndShutdown()
+{
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    settings.current().dvrStartOffsetMinutes = 0;
+    settings.current().dvrEndOffsetMinutes = 0;
+    PlayerController player;
+    DvrController dvr(&settings, &player);
+    dvr.m_tickTimer.stop();
+    DvrScheduleEntry schedule;
+    schedule.id = QStringLiteral("fixture"); schedule.profileId = guidToString(QUuid::createUuid());
+    schedule.channelId = 1; schedule.start = QDateTime::currentDateTimeUtc().addSecs(-10);
+    schedule.stop = schedule.start.addSecs(120);
+    schedule.streamUrl = dir.filePath(QStringLiteral("unused.ts"));
+    dvr.m_schedules.append(schedule);
+    std::function<void(bool)> completion;
+    int requests = 0;
+    dvr.prepareRecordingStart = [&](std::function<void(bool)> done) { ++requests; completion = std::move(done); };
+    dvr.tick(); dvr.tick();
+    QCOMPARE(requests, 1);
+    QVERIFY(dvr.hasRecordingDemand());
+    QVERIFY(dvr.m_sessions.empty());
+    dvr.m_schedules.clear();
+    completion(true);
+    QTRY_VERIFY(dvr.m_pendingStarts.isEmpty());
+    QVERIFY(dvr.m_sessions.empty());
+    QVERIFY(!dvr.hasRecordingDemand());
+    dvr.m_schedules.append(schedule);
+    dvr.tick();
+    QCOMPARE(requests, 2);
+    dvr.shutdownForApplicationExit();
+    completion(true);
+    QCoreApplication::processEvents();
+    QVERIFY(dvr.m_sessions.empty());
+    QVERIFY(dvr.m_pendingStarts.isEmpty());
+}
+
+void AppModelTests::dvrVodSettingUsesSavedDraft()
+{
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    PlayerController player;
+    ProfilesModel profiles(&settings);
+    MultiViewController multiview(&settings, nullptr, &player);
+    SettingsController draft(&settings, &player, &multiview, &profiles);
+    QVERIFY(draft.dvrStopVodBeforeRecording());
+    draft.setDvrStopVodBeforeRecording(false);
+    QVERIFY(draft.dirty());
+    QVERIFY(settings.current().dvrStopVodBeforeRecording);
+    draft.reload();
+    QVERIFY(draft.dvrStopVodBeforeRecording());
+    draft.setDvrStopVodBeforeRecording(false);
+    QVERIFY(draft.save());
+    QVERIFY(!draft.dirty());
+    QVERIFY(!settings.current().dvrStopVodBeforeRecording);
+    SettingsManager restarted(settings.settingsFilePath()); restarted.load();
+    QVERIFY(!restarted.current().dvrStopVodBeforeRecording);
+    QVERIFY(appSettingsFromJson(QJsonObject{}).dvrStopVodBeforeRecording);
+}
+
+void AppModelTests::vodRuntimeNativePlayback_data()
+{
+    QTest::addColumn<bool>("episode");
+    QTest::newRow("movie") << false;
+    QTest::newRow("episode") << true;
+}
+
+void AppModelTests::vodMediaProbeParsesTracks()
+{
+    using namespace OKILTV::Vod;
+    const auto result = parseVodMediaProbe(R"({"streams":[
+        {"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080},
+        {"index":1,"codec_type":"audio","codec_name":"aac","tags":{"language":"pol","title":"Main"},"disposition":{"default":1}},
+        {"index":3,"codec_type":"audio","codec_name":"ac3","tags":{"language":"eng"},"disposition":{"default":0}},
+        {"index":4,"codec_type":"subtitle","codec_name":"subrip","tags":{"language":"eng"},"disposition":{"forced":1}}
+    ]})");
+    QVERIFY(std::holds_alternative<VodMediaProbe>(result));
+    const auto probe = std::get<VodMediaProbe>(result);
+    QCOMPARE(probe.videoWidth, std::optional<int>(1920));
+    QCOMPARE(probe.videoHeight, std::optional<int>(1080));
+    QCOMPARE(probe.audioTracks.size(), 2);
+    QCOMPARE(probe.audioTracks.at(1).ordinal, 1);
+    QCOMPARE(probe.audioTracks.at(1).codec, QStringLiteral("ac3"));
+    QCOMPARE(probe.subtitleTracks.size(), 1);
+    QVERIFY(probe.subtitleTracks.first().forced);
+    QVERIFY(probe.observedAtUtc.isValid());
+    QVERIFY(std::holds_alternative<Error>(parseVodMediaProbe(R"({"streams":"invalid"})")));
+}
+
+void AppModelTests::vodRuntimeNativePlayback()
+{
+    using namespace OKILTV::Vod;
+    QFETCH(bool, episode);
+    const bool render = qEnvironmentVariableIntValue("OKILTV_VOD_RENDER_TEST") == 1;
+    const auto headless = qgetenv("OKILTV_HEADLESS_TEST");
+    const auto restoreEnvironment = qScopeGuard([&]() { qputenv("OKILTV_HEADLESS_TEST", headless); });
+    qunsetenv("OKILTV_HEADLESS_TEST");
+    QTemporaryDir dir;
+    const auto mediaPath = dir.filePath(QStringLiteral("vod.mkv"));
+    QFile subtitles(dir.filePath(QStringLiteral("subtitles.srt")));
+    QVERIFY(subtitles.open(QIODevice::WriteOnly));
+    subtitles.write("1\n00:00:00,000 --> 00:00:59,000\nLocal subtitle\n");
+    subtitles.close();
+    QProcess generator;
+    generator.start(QStringLiteral("ffmpeg"), {QStringLiteral("-v"), QStringLiteral("error"),
+        QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"), QStringLiteral("color=c=red:s=160x120:r=10:d=60"),
+        QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"), QStringLiteral("sine=frequency=440:duration=60"),
+        QStringLiteral("-i"), subtitles.fileName(),
+        QStringLiteral("-map"), QStringLiteral("0:v"), QStringLiteral("-map"), QStringLiteral("1:a"),
+        QStringLiteral("-map"), QStringLiteral("1:a"), QStringLiteral("-map"), QStringLiteral("2:s"),
+        QStringLiteral("-map"), QStringLiteral("2:s"),
+        QStringLiteral("-metadata:s:a:0"), QStringLiteral("language=pol"),
+        QStringLiteral("-metadata:s:a:1"), QStringLiteral("language=eng"),
+        QStringLiteral("-metadata:s:s:0"), QStringLiteral("language=pol"),
+        QStringLiteral("-metadata:s:s:1"), QStringLiteral("language=pol"),
+        QStringLiteral("-disposition:s:0"), QStringLiteral("0"),
+        QStringLiteral("-disposition:s:1"), QStringLiteral("default+forced"),
+        QStringLiteral("-c:a"), QStringLiteral("ac3"),
+        QStringLiteral("-c:v"), QStringLiteral("mpeg2video"), mediaPath});
+    QVERIFY(generator.waitForFinished(30000)); QCOMPARE(generator.exitCode(), 0);
+    QFile media(mediaPath); QVERIFY(media.open(QIODevice::ReadOnly)); const auto bytes = media.readAll();
+    QTcpServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost));
+    int resolutions = 0;
+    QStringList mediaPaths;
+    connect(&server, &QTcpServer::newConnection, &server, [&]() {
+        while (server.hasPendingConnections()) {
+            auto *socket = server.nextPendingConnection();
+            auto request = std::make_shared<QByteArray>();
+            connect(socket, &QTcpSocket::readyRead, socket, [&, socket, request]() {
+                request->append(socket->readAll());
+                if (!request->contains("\r\n\r\n")) return;
+                const auto target = QUrl::fromEncoded(request->split(' ').value(1));
+                QByteArray body;
+                QByteArray headers = "HTTP/1.1 200 OK\r\n";
+                if (target.path() == QStringLiteral("/player_api.php")) {
+                    ++resolutions;
+                    body = episode
+                        ? R"({"info":{},"episodes":{"1":[{"id":"007","title":"Episode","season":1,"container_extension":"mkv"}]}})"
+                        : R"({"info":{},"movie_data":{"stream_id":"007","container_extension":"mkv"}})";
+                    const auto action = QUrlQuery(target).queryItemValue(QStringLiteral("action"));
+                    if (action == QLatin1String("get_vod_categories")) body = "[]";
+                    else if (action == QLatin1String("get_vod_streams"))
+                        body = R"([{"stream_id":"007","name":"Local movie","container_extension":"mkv"}])";
+                    headers += "Content-Type: application/json\r\n";
+                } else {
+                    mediaPaths.append(target.path());
+                    const auto offset = request->toLower().indexOf("range: bytes=");
+                    const auto start = offset < 0 ? 0 : request->mid(offset + 13).split('-').first().toLongLong();
+                    if (start < 0 || start >= bytes.size()) { socket->disconnectFromHost(); return; }
+                    body = bytes.mid(start);
+                    if (offset >= 0) {
+                        headers = "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes " + QByteArray::number(start)
+                            + '-' + QByteArray::number(bytes.size() - 1) + '/' + QByteArray::number(bytes.size()) + "\r\n";
+                    }
+                    headers += "Accept-Ranges: bytes\r\nContent-Type: video/x-matroska\r\n";
+                }
+                headers += "Content-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n";
+                socket->write(headers + body); socket->disconnectFromHost();
+            });
+            connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+        }
+    });
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load(); settings.current().vodEnabled = true; settings.current().vodSeriesEnabled = true;
+    ServerProfile profile; profile.vodEnabled = true;
+    profile.xtreamBaseUrl = QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort());
+    profile.xtreamUsername = QStringLiteral("synthetic-user"); profile.xtreamPassword = QStringLiteral("synthetic-password");
+    QVERIFY(settings.addProfile(profile));
+    PlayerController player;
+    DvrController dvr(&settings, &player);
+    MultiViewController multiview(&settings, nullptr, &player);
+    TimeshiftController timeshift(&settings, &player, &dvr, &multiview);
+    VodRuntime::EngineFactory factory;
+    if (!render) factory = []() {
+        auto backend = std::make_unique<OKILTV::Player::MpvPlayer>();
+        backend->configureOptions({{QStringLiteral("vo"), QStringLiteral("null")},
+            {QStringLiteral("ao"), QStringLiteral("null")}, {QStringLiteral("hwdec"), QStringLiteral("no")}});
+        return std::make_unique<OKILTV::Player::MpvPlaybackEngine>(std::move(backend));
+    };
+    settings.current().mpvOptions[QStringLiteral("ao")] = QStringLiteral("null");
+    settings.current().mpvOptions[QStringLiteral("hwdec")] = QStringLiteral("no");
+    VodRuntime runtime(&settings, &multiview, &dvr, &timeshift, nullptr, std::move(factory));
+    std::unique_ptr<QQuickWindow> window;
+    if (render) {
+        window = std::make_unique<QQuickWindow>();
+        window->resize(320, 240);
+        auto *surface = new OKILTV::Player::MpvVideoItem(window->contentItem());
+        surface->setSize(QSizeF(320, 240));
+        connect(&runtime, &VodRuntime::stateChanged, surface, [&runtime, surface]() { surface->setPlayerObject(runtime.playerObject()); });
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window.get()));
+    }
+    QTRY_VERIFY(runtime.ready());
+    const auto source = std::get<SourceContext>(runtime.store()->snapshot(profile.id));
+    ContentRef ref{profile.id, source.revision.catalogNamespace, episode ? ContentKind::Episode : ContentKind::Movie, QStringLiteral("007"), {}};
+    if (episode) ref.parentNamespace = QStringLiteral("show");
+    QList<VodEvent> events;
+    runtime.module()->controller()->completed = [&](const VodEvent &event) {
+        const auto *value = std::get_if<PublicValue>(&event.result);
+        if (!value || !std::holds_alternative<Success>(*value)) return;
+        events.append(event);
+    };
+    VodCatalogModel catalog(&runtime, &settings);
+    int browseResolutions = 0;
+    if (episode) runtime.module()->controller()->play(ref);
+    else {
+        catalog.open();
+        QTRY_COMPARE(catalog.count(), 1);
+        catalog.selectMovie(0);
+        QTRY_VERIFY_WITH_TIMEOUT(catalog.movie().value(QStringLiteral("mediaProbeReady")).toBool(), 15000);
+        QTRY_VERIFY(catalog.movie().value(QStringLiteral("progressLoaded")).toBool());
+        catalog.selectAudioOption(2);
+        catalog.selectSubtitleOption(2);
+        QCOMPARE(catalog.movie().value(QStringLiteral("audioTrackIndex")).toInt(), 2);
+        QCOMPARE(catalog.movie().value(QStringLiteral("subtitleTrackIndex")).toInt(), 2);
+        browseResolutions = resolutions;
+        events.clear();
+        catalog.play(true);
+    }
+    QTRY_VERIFY_WITH_TIMEOUT(runtime.isPlaying(), 10000);
+    QVERIFY(runtime.playerObject()); QVERIFY(runtime.seekable()); QVERIFY(runtime.durationSeconds() > 59);
+    QTRY_VERIFY(runtime.positionSeconds() > 0.2);
+    QTRY_VERIFY(runtime.playbackMetadata(ref));
+    QCOMPARE(runtime.playbackMetadata(ref)->videoWidth, std::optional<int>(160));
+    QCOMPARE(runtime.playbackMetadata(ref)->videoHeight, std::optional<int>(120));
+    QCOMPARE(runtime.playbackMetadata(ref)->audioTracks.size(), 2);
+    QCOMPARE(runtime.playbackMetadata(ref)->subtitleTracks.size(), 2);
+    if (render) {
+        auto redFrame = [&]() {
+            const auto frame = window->grabWindow();
+            if (frame.isNull()) return false;
+            const auto color = frame.pixelColor(frame.width() / 2, frame.height() / 2);
+            return color.red() > 180 && color.green() < 70 && color.blue() < 70;
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(redFrame(), 5000);
+    }
+    QTRY_COMPARE(runtime.audioTracks().size(), 2);
+    QTRY_COMPARE(runtime.subtitleTracks().size(), 3);
+    if (!episode) {
+        QTRY_VERIFY(runtime.audioTracks().at(1).toMap().value(QStringLiteral("selected")).toBool());
+        QTRY_VERIFY(runtime.subtitleTracks().at(1).toMap().value(QStringLiteral("selected")).toBool());
+    }
+    QTRY_COMPARE(runtime.debugOverlaySnapshot().value(QStringLiteral("streamsText")).toString(), QStringLiteral("v(1) a(2) s(2)"));
+    QTRY_COMPARE(runtime.debugOverlaySnapshot().value(QStringLiteral("scanningText")).toString(), QStringLiteral("Progressive"));
+    const auto debug = runtime.debugOverlaySnapshot();
+    QCOMPARE(debug.value(QStringLiteral("sourceResolution")).toString(), QStringLiteral("160x120"));
+    QCOMPARE(debug.value(QStringLiteral("streamHost")).toString(), QStringLiteral("127.0.0.1"));
+    QCOMPARE(debug.value(QStringLiteral("streamId")).toString(), QStringLiteral("007"));
+    QVERIFY(!debug.value(QStringLiteral("videoCodec")).toString().isEmpty());
+    QVERIFY(debug.value(QStringLiteral("videoCodec")).toString() != QStringLiteral("N/A"));
+    QVERIFY(!QJsonDocument::fromVariant(debug).toJson().contains("synthetic-"));
+    const auto secondAudio = runtime.audioTracks().at(1).toMap().value(QStringLiteral("id")).toInt();
+    runtime.selectAudioTrack(secondAudio);
+    QTRY_VERIFY(runtime.audioTracks().at(1).toMap().value(QStringLiteral("selected")).toBool());
+    const auto secondSubtitle = runtime.subtitleTracks().at(2).toMap().value(QStringLiteral("id")).toInt();
+    runtime.selectSubtitleTrack(secondSubtitle);
+    QTRY_VERIFY(runtime.subtitleTracks().at(2).toMap().value(QStringLiteral("selected")).toBool());
+    runtime.selectSubtitleTrack(0);
+    QTRY_VERIFY(runtime.subtitleTracks().at(0).toMap().value(QStringLiteral("selected")).toBool());
+    QVERIFY(player.currentChannel().isEmpty());
+    runtime.togglePause();
+    QTRY_COMPARE(runtime.module()->session()->snapshot().state, SessionState::Paused);
+    runtime.seekRelative(35);
+    QTRY_VERIFY(runtime.positionSeconds() >= 35);
+    QVERIFY(runtime.isPaused());
+    auto *retainedBackend = qobject_cast<OKILTV::Player::MpvPlayer *>(runtime.playerObject());
+    QVERIFY(retainedBackend);
+    runtime.stop();
+    QTRY_VERIFY(!runtime.active());
+    QVERIFY(!runtime.playerObject());
+    settings.current().playerPicturePreset = QStringLiteral("warm");
+    settings.current().playerImageSmoothingEnabled = true;
+    settings.save();
+    runtime.applyPictureSettings();
+    QCOMPARE(retainedBackend->m_picturePreset, QStringLiteral("warm"));
+    QVERIFY(retainedBackend->m_imageSmoothingEnabled);
+    QVERIFY(runtime.audioTracks().isEmpty());
+    QCOMPARE(runtime.subtitleTracks().size(), 1); // Only the synthetic None row.
+    QVERIFY(runtime.debugOverlaySnapshot().isEmpty());
+    RequestContext context; context.source = source.revision;
+    std::optional<VodProgress> saved;
+    QTRY_VERIFY((saved = std::get<std::optional<VodProgress>>(runtime.store()->read(ref, context))) && saved->positionMs >= 35000);
+    QCOMPARE(saved->trackPreferences.value(QStringLiteral("audio")).toObject().value(QStringLiteral("id")).toInt(), secondAudio);
+    QCOMPARE(saved->trackPreferences.value(QStringLiteral("sub")).toObject().value(QStringLiteral("mode")).toString(), QStringLiteral("off"));
+    QVERIFY(settings.current().channelTrackPreferences.isEmpty());
+    runtime.module()->controller()->play(ref);
+    QTRY_VERIFY(runtime.isPlaying());
+    QCOMPARE(runtime.playerObject(), retainedBackend);
+    QCOMPARE(retainedBackend->m_picturePreset, QStringLiteral("warm"));
+    QVERIFY(retainedBackend->m_imageSmoothingEnabled);
+    QTRY_VERIFY(runtime.audioTracks().size() == 2 && runtime.audioTracks().at(1).toMap().value(QStringLiteral("selected")).toBool());
+    QTRY_VERIFY(runtime.subtitleTracks().at(0).toMap().value(QStringLiteral("selected")).toBool());
+    QTRY_VERIFY_WITH_TIMEOUT(runtime.positionSeconds() >= 30, 35000);
+    QVERIFY(runtime.positionSeconds() < 40);
+    auto changed = profile; changed.xtreamPassword = QStringLiteral("synthetic-after");
+    QVERIFY(settings.replaceProfile(profile.id, changed));
+    QVERIFY(!runtime.active());
+    QCOMPARE(resolutions - browseResolutions, 2);
+    QVERIFY(!mediaPaths.isEmpty());
+    const auto expected = episode ? QStringLiteral("/series/synthetic-user/synthetic-password/007.mkv")
+                                  : QStringLiteral("/movie/synthetic-user/synthetic-password/007.mkv");
+    for (const auto &path : mediaPaths) QCOMPARE(path, expected);
+    QCOMPARE(events.size(), 2);
+    for (const auto &event : events) QVERIFY(std::holds_alternative<PublicValue>(event.result));
+    runtime.shutdown();
+}
+
+void AppModelTests::vodRuntimeDisabledIsInert()
+{
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    PlayerController player;
+    DvrController dvr(&settings, &player);
+    MultiViewController multiview(&settings, nullptr, &player);
+    TimeshiftController timeshift(&settings, &player, &dvr, &multiview);
+    OKILTV::Vod::VodRuntime runtime(&settings, &multiview, &dvr, &timeshift);
+    QVERIFY(!runtime.module()->enabled());
+    runtime.applyPictureSettings();
+    QVERIFY(!runtime.active());
+    QVERIFY(!runtime.store());
+    QVERIFY(!settings.prepareProfileMutation);
+    QVERIFY(!player.playbackStartGate);
+    QVERIFY(!multiview.playbackStartGate);
+    QVERIFY(!QFile::exists(dir.filePath(QStringLiteral("iptv.db"))));
+}
+
+void AppModelTests::vodRuntimeRecoversFailedCredentialWrite()
+{
+    using namespace OKILTV::Vod;
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load();
+    settings.current().vodEnabled = true;
+    ServerProfile profile;
+    profile.vodEnabled = true;
+    profile.xtreamBaseUrl = QStringLiteral("https://fixture.invalid");
+    profile.xtreamUsername = QStringLiteral("synthetic-user");
+    profile.xtreamPassword = QStringLiteral("synthetic-before");
+    QVERIFY(settings.addProfile(profile));
+    PlayerController player;
+    DvrController dvr(&settings, &player);
+    MultiViewController multiview(&settings, nullptr, &player);
+    TimeshiftController timeshift(&settings, &player, &dvr, &multiview);
+    VodRuntime runtime(&settings, &multiview, &dvr, &timeshift);
+    QTRY_VERIFY(runtime.ready());
+    const auto original = runtime.store()->snapshot(profile.id);
+    QVERIFY(std::holds_alternative<SourceContext>(original));
+    const auto source = std::get<SourceContext>(original);
+    ContentRef ref{profile.id, source.revision.catalogNamespace, ContentKind::Movie, QStringLiteral("007"), {}};
+    RequestContext request; request.source = source.revision;
+    VodProgress progress; progress.sessionToken = QUuid::createUuid(); progress.sequence = 1; progress.positionMs = 73000;
+    QVERIFY(std::holds_alternative<Success>(runtime.store()->beginSession(ref, progress.sessionToken, request)));
+    QVERIFY(std::holds_alternative<Success>(runtime.store()->checkpoint(ref, progress, request)));
+    const auto sources = dir.filePath(QStringLiteral("sources"));
+    const auto permissions = QFile::permissions(sources);
+    const auto restorePermissions = qScopeGuard([&]() { QFile::setPermissions(sources, permissions); });
+    QVERIFY(QFile::setPermissions(sources, QFileDevice::ReadOwner | QFileDevice::ExeOwner));
+    auto edited = profile; edited.xtreamPassword = QStringLiteral("synthetic-after");
+    QVERIFY(!settings.replaceProfile(profile.id, edited));
+    QCOMPARE(settings.profileById(profile.id)->xtreamPassword, profile.xtreamPassword);
+    Result<SourceContext> recovered = Error{ErrorCode::Cancelled, {}};
+    QTRY_VERIFY(std::holds_alternative<SourceContext>(recovered = runtime.store()->snapshot(profile.id)));
+    const auto restored = std::get<SourceContext>(recovered);
+    QCOMPARE(restored.password, profile.xtreamPassword);
+    QCOMPARE(restored.revision.catalogNamespace, source.revision.catalogNamespace);
+    QVERIFY(restored.revision.credentialRevision > source.revision.credentialRevision);
+    QVERIFY(!runtime.active()); // no automatic resume after recovery
+    ++progress.sequence;
+    QVERIFY(std::holds_alternative<Error>(runtime.store()->checkpoint(ref, progress, request)));
+    request.source = restored.revision;
+    const auto saved = std::get<std::optional<VodProgress>>(runtime.store()->read(ref, request));
+    QVERIFY(saved); QCOMPARE(saved->positionMs, 73000);
+    QVERIFY(QFile::setPermissions(sources, permissions));
+    // Allow the completion signal to unblock the facade before the next edit.
+    QCoreApplication::processEvents();
+    QVERIFY(settings.replaceProfile(profile.id, edited));
+    QTRY_VERIFY(std::holds_alternative<SourceContext>(recovered = runtime.store()->snapshot(profile.id)));
+    const auto updated = std::get<SourceContext>(recovered);
+    QCOMPARE(updated.password, edited.xtreamPassword);
+    QVERIFY(updated.revision.credentialRevision > restored.revision.credentialRevision);
+    QCOMPARE(updated.revision.catalogNamespace, source.revision.catalogNamespace);
+    runtime.shutdown();
+    QVERIFY(!settings.prepareProfileMutation);
+    QVERIFY(!player.playbackStartGate);
+}
+
+void AppModelTests::vodRuntimeRemovesSourceWithHistory()
+{
+    using namespace OKILTV::Vod;
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load(); settings.current().vodEnabled = true;
+    ServerProfile profile; profile.vodEnabled = true;
+    profile.xtreamBaseUrl = QStringLiteral("https://fixture.invalid");
+    QVERIFY(settings.addProfile(profile));
+    PlayerController player;
+    DvrController dvr(&settings, &player);
+    MultiViewController multiview(&settings, nullptr, &player);
+    TimeshiftController timeshift(&settings, &player, &dvr, &multiview);
+    VodRuntime runtime(&settings, &multiview, &dvr, &timeshift);
+    QTRY_VERIFY(runtime.ready());
+    const auto source = std::get<SourceContext>(runtime.store()->snapshot(profile.id));
+    ContentRef ref{profile.id, source.revision.catalogNamespace, ContentKind::Movie, QStringLiteral("007"), {}};
+    RequestContext request; request.source = source.revision;
+    VodProgress progress; progress.sessionToken = QUuid::createUuid(); progress.sequence = 1; progress.positionMs = 45000;
+    QVERIFY(std::holds_alternative<Success>(runtime.store()->beginSession(ref, progress.sessionToken, request)));
+    QVERIFY(std::holds_alternative<Success>(runtime.store()->checkpoint(ref, progress, request)));
+    QVERIFY(settings.removeProfile(profile.id));
+    QVERIFY(!settings.profileById(profile.id));
+    QVERIFY(std::holds_alternative<Error>(runtime.store()->snapshot(profile.id)));
+    QVERIFY(std::holds_alternative<Error>(runtime.store()->checkpoint(ref, progress, request)));
+}
+
+void AppModelTests::vodRuntimeMutatesActiveSource_data()
+{
+    QTest::addColumn<bool>("remove");
+    QTest::addColumn<bool>("writeFails");
+    QTest::addColumn<bool>("stopTimesOut");
+    QTest::newRow("edit-active-source") << false << false << false;
+    QTest::newRow("remove-active-source") << true << false << false;
+    QTest::newRow("failed-edit-active-source") << false << true << false;
+    QTest::newRow("stop-timeout-keeps-credentials") << false << false << true;
+}
+
+void AppModelTests::vodRuntimeMutatesActiveSource()
+{
+    using namespace OKILTV::Vod;
+    QFETCH(bool, remove);
+    QFETCH(bool, writeFails);
+    QFETCH(bool, stopTimesOut);
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load(); settings.current().vodEnabled = true;
+    ServerProfile profile; profile.vodEnabled = true;
+    profile.xtreamBaseUrl = QStringLiteral("https://fixture.invalid");
+    profile.xtreamPassword = QStringLiteral("synthetic-before");
+    QVERIFY(settings.addProfile(profile));
+    PlayerController player;
+    DvrController dvr(&settings, &player);
+    MultiViewController multiview(&settings, nullptr, &player);
+    TimeshiftController timeshift(&settings, &player, &dvr, &multiview);
+    Test::Engine *backend = nullptr;
+    VodRuntime runtime(&settings, &multiview, &dvr, &timeshift, nullptr, [&]() {
+        auto engine = std::make_unique<Test::Engine>(); backend = engine.get(); return engine;
+    });
+    QTRY_VERIFY(runtime.ready());
+    const auto source = std::get<SourceContext>(runtime.store()->snapshot(profile.id));
+    const auto ref = Test::refFor(source);
+    std::optional<Outcome> opened;
+    runtime.module()->coordinator()->play(QUuid::createUuid(), Test::descriptorFor(source, ref), QUuid::createUuid(), {},
+        [&](Outcome result) { opened = result; });
+    QTRY_VERIFY(opened.has_value());
+    QVERIFY(std::holds_alternative<Success>(*opened));
+    QVERIFY(backend);
+    backend->emitState(OKILTV::Player::EngineState::Playing, 73000);
+    backend->acknowledgeStop = false;
+    bool checkedBeforeAck = false;
+    QTimer::singleShot(50, &runtime, [&]() {
+        QCOMPARE(backend->stops, 1);
+        QVERIFY(runtime.active());
+        const auto persisted = settings.profileById(profile.id);
+        QVERIFY(persisted);
+        QCOMPARE(persisted->xtreamPassword, profile.xtreamPassword);
+        checkedBeforeAck = true;
+        if (!stopTimesOut) backend->emitEnd(backend->token, OKILTV::Player::EndReason::UserStop);
+    });
+    auto replacement = profile;
+    replacement.xtreamPassword = QStringLiteral("synthetic-after");
+    const auto sources = dir.filePath(QStringLiteral("sources"));
+    const auto permissions = QFile::permissions(sources);
+    const auto restorePermissions = qScopeGuard([&]() { QFile::setPermissions(sources, permissions); });
+    if (writeFails) QVERIFY(QFile::setPermissions(sources, QFileDevice::ReadOwner | QFileDevice::ExeOwner));
+    QCOMPARE(remove ? settings.removeProfile(profile.id) : settings.replaceProfile(profile.id, replacement), !writeFails && !stopTimesOut);
+    QVERIFY(checkedBeforeAck);
+    if (stopTimesOut) {
+        QVERIFY(runtime.active());
+        QCOMPARE(settings.profileById(profile.id)->xtreamPassword, profile.xtreamPassword);
+        backend->emitEnd(backend->token, OKILTV::Player::EndReason::UserStop);
+    }
+    QVERIFY(!runtime.active());
+    QCOMPARE(backend->loads, 1); // no automatic resume
+    if (!stopTimesOut) QVERIFY(!runtime.store()->isCurrent(source.revision));
+    if (remove) {
+        QVERIFY(!settings.profileById(profile.id));
+        QVERIFY(std::holds_alternative<Error>(runtime.store()->snapshot(profile.id)));
+    } else {
+        Result<SourceContext> updated = Error{ErrorCode::Cancelled, {}};
+        QTRY_VERIFY(std::holds_alternative<SourceContext>(updated = runtime.store()->snapshot(profile.id)));
+        const auto current = std::get<SourceContext>(updated);
+        QCOMPARE(current.password, writeFails || stopTimesOut ? profile.xtreamPassword : replacement.xtreamPassword);
+        QCOMPARE(current.revision.catalogNamespace, source.revision.catalogNamespace);
+        if (stopTimesOut) QCOMPARE(current.revision.credentialRevision, source.revision.credentialRevision);
+        else QVERIFY(current.revision.credentialRevision > source.revision.credentialRevision);
+        RequestContext request; request.source = current.revision;
+        const auto saved = std::get<std::optional<VodProgress>>(runtime.store()->read(ref, request));
+        QVERIFY(saved);
+        QCOMPARE(saved->positionMs, 73000);
+    }
+}
+
+void AppModelTests::vodRuntimeLiveWaitsForStop()
+{
+    using namespace OKILTV::Vod;
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load(); settings.current().vodEnabled = true;
+    ServerProfile profile; profile.vodEnabled = true;
+    profile.xtreamBaseUrl = QStringLiteral("https://fixture.invalid");
+    QVERIFY(settings.addProfile(profile));
+    PlayerController player;
+    DvrController dvr(&settings, &player);
+    MultiViewController multiview(&settings, nullptr, &player);
+    TimeshiftController timeshift(&settings, &player, &dvr, &multiview);
+    Test::Engine *backend = nullptr;
+    VodRuntime runtime(&settings, &multiview, &dvr, &timeshift, nullptr, [&]() {
+        auto engine = std::make_unique<Test::Engine>(); backend = engine.get(); return engine;
+    });
+    QTRY_VERIFY(runtime.ready());
+    const auto source = std::get<SourceContext>(runtime.store()->snapshot(profile.id));
+    const auto ref = Test::refFor(source);
+    std::optional<Outcome> opened;
+    runtime.module()->coordinator()->play(QUuid::createUuid(), Test::descriptorFor(source, ref), QUuid::createUuid(), {},
+        [&](Outcome result) { opened = result; });
+    QTRY_VERIFY(opened.has_value());
+    QVERIFY(std::holds_alternative<Success>(*opened));
+    QVERIFY(backend);
+    backend->emitState(OKILTV::Player::EngineState::Playing, 47000);
+    backend->acknowledgeStop = false;
+    Channel channel; channel.id = 42; channel.profileId = profile.id;
+    channel.name = QStringLiteral("Local fixture");
+    channel.streamUrl = QStringLiteral("http://127.0.0.1/unused.ts");
+    player.playChannel(channel);
+    QCOMPARE(backend->stops, 1);
+    QVERIFY(!player.currentChannelValue());
+    QVERIFY(runtime.active());
+    backend->emitEnd(backend->token, OKILTV::Player::EndReason::UserStop);
+    QTRY_VERIFY(player.currentChannelValue().has_value());
+    QCOMPARE(player.currentChannelValue()->id, channel.id);
+    QVERIFY(!runtime.active());
+    QCOMPARE(runtime.module()->coordinator()->owner(), PlaybackOwner::Legacy);
+    RequestContext request; request.source = source.revision;
+    std::optional<VodProgress> saved;
+    QTRY_VERIFY((saved = std::get<std::optional<VodProgress>>(runtime.store()->read(ref, request))).has_value());
+    QCOMPARE(saved->positionMs, 47000);
+}
+
+void AppModelTests::vodRuntimeReleasesLegacyBackends_data()
+{
+    QTest::addColumn<QString>("layout");
+    QTest::newRow("live-and-standby") << QStringLiteral("off");
+    QTest::newRow("pip") << QStringLiteral("pip");
+    QTest::newRow("promoted-pip") << QStringLiteral("promoted");
+    QTest::newRow("retained-grid") << QStringLiteral("retained");
+}
+
+void AppModelTests::vodRuntimeReleasesLegacyBackends()
+{
+    using namespace OKILTV::Vod;
+    QFETCH(QString, layout);
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load(); settings.current().vodEnabled = true;
+    ServerProfile profile; profile.vodEnabled = true;
+    profile.xtreamBaseUrl = QStringLiteral("https://fixture.invalid");
+    QVERIFY(settings.addProfile(profile));
+    Channel first; first.id = 1; first.profileId = profile.id;
+    first.name = QStringLiteral("First"); first.streamUrl = QStringLiteral("http://127.0.0.1/first.ts");
+    auto second = first; second.id = 2; second.name = QStringLiteral("Second");
+    second.streamUrl = QStringLiteral("http://127.0.0.1/second.ts");
+    ChannelListModel channels(&settings); channels.setChannels({first, second}, {});
+    PlayerController player;
+    DvrController dvr(&settings, &player);
+    MultiViewController multiview(&settings, &channels, &player);
+    TimeshiftController timeshift(&settings, &player, &dvr, &multiview);
+    QList<QPointer<OKILTV::Player::MpvPlayer>> backends;
+    QSet<QObject *> acknowledged;
+    bool releasedBeforeOpen = false;
+    VodRuntime runtime(&settings, &multiview, &dvr, &timeshift, nullptr, [&]() {
+        releasedBeforeOpen = std::all_of(backends.cbegin(), backends.cend(), [&](const auto &backend) {
+            return !backend || acknowledged.contains(backend.data());
+        });
+        return std::make_unique<Test::Engine>();
+    });
+    QTRY_VERIFY(runtime.ready());
+    player.playChannel(first);
+    if (layout == QStringLiteral("pip") || layout == QStringLiteral("promoted")) {
+        QVERIFY(multiview.togglePictureInPicture(second.id));
+        if (layout == QStringLiteral("promoted")) QVERIFY(multiview.swapPrimaryWithPictureInPicture());
+    } else if (layout == QStringLiteral("retained")) {
+        multiview.setLayoutMode(QStringLiteral("grid2x2"));
+        multiview.focusTile(1);
+        QVERIFY(multiview.assignResolvedChannel(second));
+        QVERIFY(multiview.promoteFocusedAndExit());
+    }
+    QSet<PlayerController *> controllers{&player, multiview.primaryController()};
+    if (multiview.m_pipController) controllers.insert(multiview.m_pipController.get());
+    QSet<OKILTV::Player::MpvPlayer *> unique;
+    for (const auto &slot : multiview.m_secondarySlots) {
+        if (slot.controller) controllers.insert(slot.controller);
+        if (slot.controls) controllers.insert(slot.controls.get());
+        if (slot.playbackPlayer()) unique.insert(slot.playbackPlayer());
+    }
+    for (auto *controller : controllers)
+        for (auto *backend : controller->playbackBackendsForHandoff()) unique.insert(backend);
+    for (auto *backend : unique) {
+        backends.append(backend);
+        connect(backend, &OKILTV::Player::MpvPlayer::handoffStopped, &runtime, [&, backend](const QUuid &, bool success) {
+            if (success) acknowledged.insert(backend);
+        });
+    }
+    QVERIFY(backends.size() >= 2); // includes the lazy catch-up standby
+    const auto source = std::get<SourceContext>(runtime.store()->snapshot(profile.id));
+    std::optional<Outcome> opened;
+    runtime.module()->coordinator()->play(QUuid::createUuid(), Test::descriptorFor(source, Test::refFor(source)),
+        QUuid::createUuid(), {}, [&](Outcome result) { opened = result; });
+    QTRY_VERIFY(opened.has_value());
+    QVERIFY(std::holds_alternative<Success>(*opened));
+    QVERIFY(releasedBeforeOpen);
+    QVERIFY(runtime.active());
+    QCOMPARE(multiview.layoutMode(), QStringLiteral("off"));
+    QVERIFY(!multiview.primaryController()->currentChannelValue());
+    QVERIFY(!player.currentChannelValue());
+}
+
+void AppModelTests::shellControllerSidebarWidthPersistence()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    auto &shell = *harness.shellController;
+    auto &draft = *harness.settingsController;
+    const auto original = harness.settings->current().preventDisplaySleep;
+    draft.setPreventDisplaySleep(!original);
+    QSignalSpy changed(&shell, &ShellController::vodLibrarySidebarWidthChanged);
+    QCOMPARE(shell.vodLibrarySidebarWidth(), 0);
+    QVERIFY(!shell.setVodLibrarySidebarWidth(207));
+    QVERIFY(shell.setVodLibrarySidebarWidth(360));
+    QCOMPARE(changed.count(), 1);
+    QVERIFY(draft.dirty());
+    SettingsManager restored(harness.settingsPath);
+    restored.load();
+    QCOMPARE(restored.current().vodLibrarySidebarWidth, 360);
+    QCOMPARE(restored.current().preventDisplaySleep, original);
+    QVERIFY(draft.save());
+    restored.load();
+    QCOMPARE(restored.current().vodLibrarySidebarWidth, 360);
+    QCOMPARE(restored.current().preventDisplaySleep, !original);
+    const auto backup = harness.settingsPath + QStringLiteral(".backup");
+    QVERIFY(QFile::rename(harness.settingsPath, backup));
+    QVERIFY(QDir().mkdir(harness.settingsPath));
+    QVERIFY(!shell.setVodLibrarySidebarWidth(400));
+    QCOMPARE(shell.vodLibrarySidebarWidth(), 360);
+    QCOMPARE(changed.count(), 1);
+    QVERIFY(QDir().rmdir(harness.settingsPath));
+    QVERIFY(QFile::rename(backup, harness.settingsPath));
+    QVERIFY(shell.setVodLibrarySidebarWidth(400));
+    restored.load();
+    QCOMPARE(restored.current().vodLibrarySidebarWidth, 400);
+    QCOMPARE(appSettingsFromJson({}).vodLibrarySidebarWidth, 0);
+    for (const auto &invalid : {QJsonValue(-1), QJsonValue(207), QJsonValue(250.5), QJsonValue("wide")}) {
+        QCOMPARE(appSettingsFromJson({{QStringLiteral("vodLibrarySidebarWidth"), invalid}}).vodLibrarySidebarWidth, 0);
+    }
+}
 
 void AppModelTests::shellControllerRestoreLastViewClearsOverlayState()
 {
@@ -6904,6 +7677,7 @@ void AppModelTests::settingsSaveFailureRetainsDraft()
     auto &controller = *harness.settingsController;
     const auto original = harness.settings->current().preventDisplaySleep;
     controller.setPreventDisplaySleep(!original);
+    controller.setDvrStopVodBeforeRecording(false);
     QSignalSpy saved(&controller, &SettingsController::saved);
     const auto backup = harness.settingsPath + QStringLiteral(".backup");
     QVERIFY(QFile::rename(harness.settingsPath, backup));
@@ -6914,6 +7688,8 @@ void AppModelTests::settingsSaveFailureRetainsDraft()
     QCOMPARE(controller.preventDisplaySleep(), !original);
     QCOMPARE(harness.settings->current().preventDisplaySleep, original);
     QCOMPARE(saved.count(), 0);
+    QVERIFY(harness.settings->current().dvrStopVodBeforeRecording);
+    QVERIFY(!controller.dvrStopVodBeforeRecording());
     QVERIFY(QDir().rmdir(harness.settingsPath));
     QVERIFY(QFile::rename(backup, harness.settingsPath));
     QVERIFY(controller.save());
@@ -6922,6 +7698,7 @@ void AppModelTests::settingsSaveFailureRetainsDraft()
     QCOMPARE(saved.count(), 1);
     harness.settings->load();
     QCOMPARE(harness.settings->current().preventDisplaySleep, !original);
+    QVERIFY(!harness.settings->current().dvrStopVodBeforeRecording);
 }
 
 void AppModelTests::iconShutdownCancelsActiveRequestAndQueue()
@@ -11017,6 +11794,38 @@ void AppModelTests::channelListModelSupportsAutoFavouritesAndGroupPrefs()
     QVERIFY(!model.isFavorite(2));
     QCOMPARE(model.rowCount(), 1);
 
+    // Removing either kind of favourite suppresses future automatic eligibility.
+    QVERIFY(model.toggleFavorite(1));
+    QVERIFY(!model.isFavorite(1));
+    QCOMPARE(model.rowCount(), 0);
+    model.setWatchSeconds({ { 1, 20 * 60 * 60 }, { 2, 10 * 60 * 60 } });
+    QVERIFY(!model.isFavorite(1));
+    QVERIFY(!model.isFavorite(2));
+    QCOMPARE(model.rowCount(), 0);
+    QCOMPARE(model.categories().at(0).toMap().value(QStringLiteral("count")).toInt(), 0);
+
+    SettingsManager reloaded(tempDir.filePath(QStringLiteral("settings.json")));
+    reloaded.load();
+    ChannelListModel restored(&reloaded);
+    restored.setActiveProfileId(QStringLiteral("profile-a"));
+    restored.setChannels({ news, sports }, {});
+    restored.setWatchSeconds({ { 1, 20 * 60 * 60 }, { 2, 10 * 60 * 60 } });
+    QVERIFY(!restored.isFavorite(1));
+    QVERIFY(!restored.isFavorite(2));
+    restored.setActiveProfileId(QStringLiteral("profile-b"));
+    restored.setWatchSeconds({ { 1, 20 * 60 * 60 } });
+    QVERIFY(restored.isFavorite(1));
+    restored.setActiveProfileId(QStringLiteral("profile-a"));
+    restored.setWatchSeconds({ { 1, 20 * 60 * 60 } });
+    QVERIFY(!restored.isFavorite(1));
+
+    // A deliberate re-add clears the exclusion and pins the channel.
+    QVERIFY(model.toggleFavorite(1));
+    QVERIFY(model.isFavorite(1));
+    QVERIFY(!settings.current().autoFavoriteExcludedChannelIdsByProfile
+                 .value(QStringLiteral("profile-a")).contains(1));
+    QCOMPARE(model.rowCount(), 1);
+
     QVERIFY(model.setCategoryHidden(QStringLiteral("Sports"), true));
     const auto hiddenCategories = model.categories();
     QCOMPARE(hiddenCategories.size(), 2);
@@ -11611,6 +12420,12 @@ void AppModelTests::sourceGroupsModelAppliesSelectionThresholdAndPersistsReorder
     QTRY_COMPARE_WITH_TIMEOUT(model.loading(), false, 3000);
     QCOMPARE(favouritesCount(), 2);
 
+    settings.current().autoFavoriteExcludedChannelIdsByProfile[profileAKey] = { news.id, sports.id };
+    settings.save();
+    model.reload();
+    QTRY_COMPARE_WITH_TIMEOUT(model.loading(), false, 3000);
+    QCOMPARE(favouritesCount(), 1); // Manual pins still take precedence.
+
     model.setProfileId(profileBKey);
     QTRY_COMPARE_WITH_TIMEOUT(model.totalCount(), 52, 3000);
     QCOMPARE(model.get(0).value(QStringLiteral("id")).toString(), QStringLiteral("__favourites__"));
@@ -11851,6 +12666,46 @@ void AppModelTests::channelListModelSelectByIdNoOpWhenUnchanged()
     QCOMPARE(selectionSpy.count(), 1);
 }
 
+void AppModelTests::channelListModelActivatesDecimalNumbers()
+{
+    QTemporaryDir temp;
+    SettingsManager settings(temp.filePath(QStringLiteral("settings.json")));
+    ChannelListModel model(&settings);
+    const auto profile = QUuid::createUuid();
+    QList<Channel> channels;
+    const QStringList numbers {QStringLiteral("4"), QStringLiteral("2.5"), QStringLiteral("2"),
+        QStringLiteral("2.10"), QStringLiteral("2.1"), QStringLiteral("2.0000000000000000001")};
+    for (int i = 0; i < numbers.size(); ++i) {
+        Channel channel;
+        channel.id = i + 10;
+        channel.profileId = profile;
+        channel.name = QStringLiteral("Channel %1").arg(i);
+        channel.source = ChannelSource::M3U;
+        channel.sortOrder = i + 1;
+        channel.channelNumber = numbers[i];
+        channels.push_back(channel);
+    }
+    model.setChannels(channels, {});
+    QCOMPARE(model.data(model.index(0), ChannelListModel::DisplayNumberRole).toString(), QStringLiteral("4"));
+    QCOMPARE(model.displayNumbers()[1], QStringLiteral("2.5"));
+    QCOMPARE(model.displayNumberForChannel(toVariantMap(channels[1])), QStringLiteral("2.5"));
+    model.setSearchText(QStringLiteral("Channel 0"));
+    QCOMPARE(model.rowCount(), 1);
+    QSignalSpy activation(&model, &ChannelListModel::channelActivated);
+    QVERIFY(model.activateByDisplayNumber(QStringLiteral("002.500")));
+    QCOMPARE(model.selectedChannelId(), 11);
+    QVERIFY(model.activateByDisplayNumber(QStringLiteral("2")));
+    QCOMPARE(model.selectedChannelId(), 12);
+    QVERIFY(model.activateByDisplayNumber(QStringLiteral("2.1")));
+    QCOMPARE(model.selectedChannelId(), 13); // First duplicate in source order.
+    QVERIFY(model.activateByDisplayNumber(QStringLiteral("2.0000000000000000001")));
+    QCOMPARE(model.selectedChannelId(), 15);
+    for (const auto &bad : {"2.", "2,5", "0", "3", "-2"})
+        QVERIFY(!model.activateByDisplayNumber(QString::fromLatin1(bad)));
+    QCOMPARE(activation.count(), 4);
+    QCOMPARE(model.selectedChannelId(), 15);
+}
+
 void AppModelTests::channelListModelActivatesByDisplayNumber()
 {
     QTemporaryDir tempDir;
@@ -11896,24 +12751,24 @@ void AppModelTests::channelListModelActivatesByDisplayNumber()
 
     QSignalSpy activationSpy(&model, &ChannelListModel::channelActivated);
 
-    QVERIFY(model.activateByDisplayNumber(1));
+    QVERIFY(model.activateByDisplayNumber(QStringLiteral("1")));
     QCOMPARE(model.selectedChannelId(), 11);
     QCOMPARE(activationSpy.count(), 1);
     QCOMPARE(activationSpy.at(0).at(0).toInt(), 11);
 
-    QVERIFY(model.activateByDisplayNumber(2));
+    QVERIFY(model.activateByDisplayNumber(QStringLiteral("2")));
     QCOMPARE(model.selectedChannelId(), 22);
     QCOMPARE(activationSpy.count(), 2);
     QCOMPARE(activationSpy.at(1).at(0).toInt(), 22);
 
-    QVERIFY(model.activateByDisplayNumber(77));
+    QVERIFY(model.activateByDisplayNumber(QStringLiteral("77")));
     QCOMPARE(model.selectedChannelId(), 33);
     QCOMPARE(activationSpy.count(), 3);
     QCOMPARE(activationSpy.at(2).at(0).toInt(), 33);
 
     const auto selectedBeforeMissing = model.selectedChannelId();
     const auto activationCountBeforeMissing = activationSpy.count();
-    QVERIFY(!model.activateByDisplayNumber(999));
+    QVERIFY(!model.activateByDisplayNumber(QStringLiteral("999")));
     QCOMPARE(model.selectedChannelId(), selectedBeforeMissing);
     QCOMPARE(activationSpy.count(), activationCountBeforeMissing);
 }
@@ -11996,6 +12851,38 @@ void AppModelTests::epgGridModelRefreshPreservesViewport()
     model.rebuild(channels, 6, 24);
     QCOMPARE(resetSpy.count(), 1);
     QVERIFY(!persistent.isValid());
+}
+
+void AppModelTests::epgGridModelConstructionIgnoresPreviousStorage()
+{
+    EpgService epg;
+    // Deterministically expose constructor reads of not-yet-initialized members.
+    alignas(EpgGridModel) unsigned char storage[sizeof(EpgGridModel)] {};
+    const auto before = QDateTime::currentDateTimeUtc();
+    auto *constructed = std::construct_at(reinterpret_cast<EpgGridModel *>(storage), &epg);
+    const auto destroy = [](EpgGridModel *model) { std::destroy_at(model); };
+    const std::unique_ptr<EpgGridModel, decltype(destroy)> model(constructed, destroy);
+    const auto after = QDateTime::currentDateTimeUtc();
+
+    const auto roundedStart = [](const QDateTime &now) {
+        auto local = now.addSecs(-6 * 3600).toLocalTime();
+        local.setTime(QTime(local.time().hour(), 0));
+        return local.toMSecsSinceEpoch();
+    };
+    QVERIFY(model->windowStartEpochMs() >= roundedStart(before));
+    QVERIFY(model->windowStartEpochMs() <= roundedStart(after));
+    QCOMPARE(model->guidePastHours(), 6);
+    QCOMPARE(model->lookAheadHours(), 24);
+    QCOMPARE(model->timeSlots().size(), 31);
+
+    // Default viewport is 180 minutes with 120 minutes of forward prefetch.
+    const auto visibleSlots = model->visibleTimeSlots();
+    QCOMPARE(visibleSlots.size(), 6);
+    for (int slot = 0; slot < visibleSlots.size(); ++slot) {
+        QCOMPARE(visibleSlots.at(slot).toMap().value(QStringLiteral("offsetMinutes")).toInt(), slot * 60);
+        QCOMPARE(visibleSlots.at(slot).toMap().value(QStringLiteral("label")),
+                 model->timeSlots().at(slot).toMap().value(QStringLiteral("label")));
+    }
 }
 
 void AppModelTests::epgGridModelInitializesTimeWindow()
@@ -13701,6 +14588,8 @@ void AppModelTests::updateCheckTimeoutAndShutdown()
     QVERIFY(!closing.pending());
     QCOMPARE(server.requests, 2);
 }
+
+#include "vod/vodcatalogtests.inc"
 
 QTEST_MAIN(AppModelTests)
 

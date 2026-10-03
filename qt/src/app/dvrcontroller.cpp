@@ -315,6 +315,7 @@ void DvrController::shutdownForApplicationExit()
         return;
     }
     m_exitShutdownStarted = true;
+    m_pendingStarts.clear();
     m_tickTimer.stop();
 
     for (auto &entry : m_sessions) {
@@ -779,7 +780,53 @@ void DvrController::tick()
     emit stateChanged();
 }
 
+bool DvrController::hasRecordingDemand() const
+{
+    if (m_exitShutdownStarted) return false;
+    if (!m_pendingStarts.isEmpty() || !m_sessions.empty()) return true;
+    const auto now = QDateTime::currentDateTimeUtc();
+    for (const auto &window : mergedWindows())
+        if (window.startAt <= now && now < window.stopAt) return true;
+    return false;
+}
+
 bool DvrController::startSession(const MergedWindow &window)
+{
+    if (m_exitShutdownStarted) return false;
+    if (m_sessions.contains(window.id) || m_pendingStarts.contains(window.id)) return true;
+    if (!prepareRecordingStart) return startPreparedSession(window);
+    const auto token = QUuid::createUuid();
+    m_pendingStarts.insert(window.id, token);
+    QPointer<DvrController> self(this);
+    prepareRecordingStart([self, window, token](bool allowed) {
+        if (!self) return;
+        // Even synchronous approval finishes after tick's iteration/backoff bookkeeping.
+        QTimer::singleShot(0, self, [self, window, token, allowed]() {
+            if (self) self->completeStartPreparation(window, token, allowed);
+        });
+    });
+    QTimer::singleShot(12000, this, [this, window, token]() { completeStartPreparation(window, token, false); });
+    return true;
+}
+
+void DvrController::completeStartPreparation(const MergedWindow &window, const QUuid &token, bool allowed)
+{
+    if (m_exitShutdownStarted || m_pendingStarts.value(window.id) != token) return;
+    m_pendingStarts.remove(window.id);
+    const auto now = QDateTime::currentDateTimeUtc();
+    for (const auto &current : mergedWindows()) {
+        if (current.channelKey != window.channelKey || !(current.startAt <= now && now < current.stopAt)) continue;
+        // Cancellation, source removal and merged-window changes are revalidated
+        // after the asynchronous stop/checkpoint, before opening any stream.
+        if (sessionByChannel(current.profileId, current.channelId)) return;
+        if (!allowed || !startPreparedSession(current))
+            scheduleRestartForWindow(current.id, QStringLiteral("preparation-or-start-failed"));
+        emit stateChanged();
+        return;
+    }
+}
+
+bool DvrController::startPreparedSession(const MergedWindow &window)
 {
     if (m_exitShutdownStarted) {
         return false;
@@ -966,6 +1013,7 @@ bool DvrController::startSession(const MergedWindow &window)
 
 void DvrController::maybeAutoHandoffToTap(const Session &session)
 {
+    if (automaticPlaybackHandoffAllowed && !automaticPlaybackHandoffAllowed()) return;
     const auto current = m_playerController->currentChannelValue();
     if (!current.has_value()) {
         return;

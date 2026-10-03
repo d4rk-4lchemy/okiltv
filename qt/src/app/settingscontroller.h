@@ -52,6 +52,7 @@ class SettingsController final : public QObject
     Q_PROPERTY(bool remuxRecordingsToMkv READ remuxRecordingsToMkv WRITE setRemuxRecordingsToMkv NOTIFY settingsChanged)
     Q_PROPERTY(bool minimizeToTrayOnMinimize READ minimizeToTrayOnMinimize WRITE setMinimizeToTrayOnMinimize NOTIFY settingsChanged)
     Q_PROPERTY(QString dvrRecordingsDirectory READ dvrRecordingsDirectory WRITE setDvrRecordingsDirectory NOTIFY settingsChanged)
+    Q_PROPERTY(bool dvrStopVodBeforeRecording READ dvrStopVodBeforeRecording WRITE setDvrStopVodBeforeRecording NOTIFY settingsChanged)
     Q_PROPERTY(bool dvrRemuxToMkv READ dvrRemuxToMkv WRITE setDvrRemuxToMkv NOTIFY settingsChanged)
     Q_PROPERTY(int dvrStartOffsetMinutes READ dvrStartOffsetMinutes WRITE setDvrStartOffsetMinutes NOTIFY settingsChanged)
     Q_PROPERTY(int dvrEndOffsetMinutes READ dvrEndOffsetMinutes WRITE setDvrEndOffsetMinutes NOTIFY settingsChanged)
@@ -171,6 +172,8 @@ public:
     QString dvrRecordingsDirectory() const;
     void setDvrRecordingsDirectory(const QString &value);
 
+    bool dvrStopVodBeforeRecording() const;
+    void setDvrStopVodBeforeRecording(bool value);
     bool dvrRemuxToMkv() const;
     void setDvrRemuxToMkv(bool value);
 
@@ -254,6 +257,7 @@ private:
     bool m_minimizeToTrayOnMinimize { true };
     QString m_dvrRecordingsDirectory;
     bool m_dvrRemuxToMkv { true };
+    bool m_dvrStopVodBeforeRecording { true };
     int m_dvrStartOffsetMinutes { 2 };
     int m_dvrEndOffsetMinutes { 2 };
 };

@@ -77,3 +77,14 @@ pause state of two independent local backends, focused-channel stepping, browse
 selection versus playback, EPG changes, empty tiles and focused Stop.
 The multiview snapshot includes focused playback state and per-tile channel,
 pause, position and video-surface/backend identity; provider URLs are not exposed.
+
+### Test Movies library
+
+`12-vod-movies.py` uses a local Xtream API and generated media. It exercises V,
+text entry (including V), Ctrl+F, details, Escape, catalog reopening, playback
+handoff and session-only activation. It also checks hidden Live rails/Guide during
+VOD, the playing title and duration, exact click/drag seeks while paused, title
+stability while browsing another movie and restored Live rails after Stop. The
+local media endpoint supports HTTP byte ranges for real mpv seeks. Run through `scripts/ci/run_ui_test.sh` for
+an isolated unlocked keyring; CTest registers it as `UI-12-vod-movies` when
+`OKILTV_BUILD_UI_TESTS=ON`.
