@@ -125,6 +125,11 @@ experiments sequentially when the account has a single connection slot, and keep
 private harnesses, captures and measurements uncommitted. FILE_LOADED timing is
 distinct from seek completion and the first rendered frame/audio.
 
+The VOD library QML suite writes screenshots relative to its working directory.
+CTest uses `qml-artifacts/vod-movies` under the build tree, created at configure
+time; PR artifacts include these PNGs. Direct qmltestrunner invocations use the
+current directory, which must be writable.
+
 Some tests are conditional on platform/tools. QML tests need `qmltestrunner`;
 rendering integration uses Xvfb/software rendering where configured. Respect CTest
 timeouts: download tests exercise real retry/stall windows. Report skipped tests
@@ -198,6 +203,9 @@ DPAPI, native-dialog and installer checks.
 ## CI and releases
 
 [pr-tests.yml](../.github/workflows/pr-tests.yml) owns grouped test execution.
+The playback group builds `OKILTVQtVodRangeTests` as well as the policy, catch-up
+and native mpv targets. MinGW compiles `tst_app_models.cpp` with `-Wa,-mbig-obj`
+to accommodate the Debug object's section count without removing debug symbols.
 [release.yml](../.github/workflows/release.yml) builds release assets; packaging
 does not implicitly execute tests. Release tags must match the version in
 `qt/CMakeLists.txt`; dependency releases are separate.

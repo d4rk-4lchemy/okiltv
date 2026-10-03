@@ -4829,6 +4829,14 @@ Item {
                 neutralPalette: false
                 onTextEdited: function(text) { root.channelList.searchText = text }
                 onSearchKeyPressed: function(event) {
+                    // TextField consumes Ctrl+Up before it can bubble to the window.
+                    // Route only the Live search actions; cursor editing stays native.
+                    if (event.modifiers === Qt.ControlModifier
+                        && (event.key === Qt.Key_Up || event.key === Qt.Key_G
+                            || event.key === Qt.Key_S || event.key === Qt.Key_F)) {
+                        event.accepted = root.handleWindowKey(event)
+                        return
+                    }
                     if (event.modifiers === Qt.NoModifier && (event.key === Qt.Key_Down
                         || event.key === Qt.Key_Tab
                         || event.key === Qt.Key_Return

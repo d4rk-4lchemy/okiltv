@@ -175,6 +175,11 @@ qt_add_executable(OKILTVQtAppTests
     ../src/player/mpvvideoitem.h
 )
 
+# The large Debug test translation unit exceeds the standard PE/COFF section limit.
+if (MINGW)
+    set_source_files_properties(tst_app_models.cpp PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")
+endif ()
+
 target_include_directories(OKILTVQtAppTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 
 target_link_libraries(OKILTVQtAppTests PRIVATE
@@ -433,8 +438,10 @@ if (OKILTV_QMLTESTRUNNER)
         -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_vodplaybackpanels.qml")
     set_tests_properties(OKILTVQtVodPlaybackUiTests PROPERTIES LABELS "qml;vod" TIMEOUT 60
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/qml-artifacts/vod-movies")
     add_test(NAME OKILTVQtVodUiTests COMMAND "${OKILTV_QMLTESTRUNNER}"
         -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_vodmovies.qml")
     set_tests_properties(OKILTVQtVodUiTests PROPERTIES LABELS "qml;vod" TIMEOUT 60
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/qml-artifacts/vod-movies"
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
 endif ()

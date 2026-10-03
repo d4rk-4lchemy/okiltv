@@ -60,7 +60,6 @@ TestCase {
     }
     VodMoviesPage { id: page; anchors.fill: parent; catalog: backend; onSidebarWidthCommitted: newWidth => preferredSidebarWidth = newWidth }
     SignalSpy { id: closed; target: page; signalName: "closeRequested" }
-    readonly property string artifactDirectory: decodeURIComponent(Qt.resolvedUrl("../../../.tmp/00_vod_ui_tests/").toString().replace("file://", ""))
     SignalSpy { id: widthCommitted; target: page; signalName: "sidebarWidthCommitted" }
     function init() {
         page.resizingSidebar = false; page.preferredSidebarWidth = 0; widthCommitted.clear()
@@ -238,7 +237,7 @@ TestCase {
         const gridPoster = findChild(page, "ui.vod.progress.0").parent
         compare(gridPoster.width, shelf.itemAtIndex(0).width)
         compare(gridPoster.height, page.posterHeight)
-        grabImage(page).save(artifactDirectory + "continue-watching.png")
+        grabImage(page).save("continue-watching.png")
         mouseClick(shelf.itemAtIndex(0))
         wait(30)
         verify(page.detailsOpen)
@@ -523,7 +522,7 @@ TestCase {
         compare(shelfBadge.label, "4K")
         backend.setProperty(0, "resolutionLabel", "480p")
         waitForRendering(page)
-        grabImage(page).save(artifactDirectory + "resolution-badges.png")
+        grabImage(page).save("resolution-badges.png")
     }
     function test_posterProgress() {
         const grid = findChild(page, "ui.vod.grid")
@@ -546,9 +545,9 @@ TestCase {
             page.width = size[0]
             wait(40)
             if (size[0] === 1600) compare(findChild(page, "ui.vod.grid").columns, 6)
-            grabImage(page).save(artifactDirectory + "library-" + size[0] + "x" + size[1] + ".png")
+            grabImage(page).save("library-" + size[0] + "x" + size[1] + ".png")
             backend.selectMovie(0); wait(30)
-            grabImage(page).save(artifactDirectory + "details-" + size[0] + "x" + size[1] + ".png")
+            grabImage(page).save("details-" + size[0] + "x" + size[1] + ".png")
             backend.back()
         }
     }

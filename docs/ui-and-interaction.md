@@ -90,6 +90,8 @@ The 42 px header has a flexible search field and a 78 px view switch separated b
 exposes the field for focus handling and forwards edits, key/focus events and
 switch requests; each consumer keeps its own model and input policy. Live retains
 its existing palette; movie and movie-group headers use the neutral overlay palette.
+The Live search field explicitly forwards Ctrl+Up/G/S/F to the window handler
+before native text editing consumes them; Ctrl+Left/Right retain cursor editing.
 The list headers show ← Groups; the group header shows Channels → or Movies →.
 During movie playback, the 40×40 px Back arrow sits outside the left panel,
 24 px to its right and 24 px below the reserved title-bar inset. It follows the

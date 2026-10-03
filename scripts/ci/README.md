@@ -9,9 +9,9 @@ same PR; a failed group does not cancel other groups.
 | --- | --- |
 | `core` | Services, settings, database and database startup |
 | `app` | Controllers, models, archive downloads and real libmpv integration |
-| `playback` | Playback decisions and synthetic catch-up transport |
-| `qml` | Five component suites using qmltestrunner |
-| `ui` | Six local-media scenarios on Xvfb/Openbox |
+| `playback` | Playback decisions, synthetic catch-up transport, VOD mpv and HTTP range cache |
+| `qml` | Component suites using qmltestrunner, including the VOD library and playback panels |
+| `ui` | Local-media scenarios on Xvfb/Openbox |
 | `windows` | Native Windows process ownership, cleanup and DVR reconciliation |
 
 Linux jobs use CTest labels and build only their required targets. CTest verbose
@@ -20,7 +20,10 @@ uses FFmpeg-generated media and a separate unlocked disposable Secret Service
 keyring for each scenario. No IPTV account or private recording is needed.
 Windows runs process ownership tests and the two Windows-only DVR controller
 cases using Qt/MinGW on `windows-2022`. JUnit reports and diagnostic logs are
-saved as separate Actions artifacts for seven days. The final **Tests passed**
+saved as separate Actions artifacts for seven days. VOD library QML screenshots
+are written to the configure-created `qml-artifacts/vod-movies` build directory
+and included in the QML artifact. The MinGW app test translation unit uses
+big-object format to retain Debug symbols beyond the standard COFF section limit. The final **Tests passed**
 check succeeds only when all groups pass; it can be selected as a required
 check in branch protection.
 
