@@ -69,6 +69,7 @@ qt_add_executable(OKILTVQt
     src/app/vod/vodmediaprobe.h
     src/app/vod/vodartworkcache.cpp
     src/app/vod/vodcatalogmodel.cpp
+    src/app/vod/vodepisodesmodel.cpp
     src/app/catchupdownloadcontroller.cpp
     src/app/catchuparchivetransfer.cpp
     src/app/catchuparchivetransfer.h
@@ -298,6 +299,11 @@ set(OKILTV_QML_FILES
     qml/components/VodPlaybackList.qml
     qml/components/PlaybackSearchHeader.qml
     qml/components/VodPlaybackInfo.qml
+    qml/components/VodMarqueeTitle.qml
+    qml/components/VodMarqueeController.qml
+    qml/components/VodSelector.qml
+    qml/components/VodScrollBar.qml
+    qml/components/VodEpisodesList.qml
     qml/components/ChannelBadge.qml
     qml/components/FormComboBox.qml
     qml/components/FormSpinBox.qml
@@ -313,10 +319,13 @@ set(OKILTV_QML_FILES
     qml/components/PathBrowseField.qml
     qml/components/SettingsRailButton.qml
     qml/components/WindowChromeBar.qml
+    qml/components/MediaModeSwitch.qml
+    qml/components/MediaModeChrome.qml
     qml/components/WindowResizeHandles.qml
     qml/components/SourceGroupsList.qml
     qml/components/SourceManagerPane.qml
     qml/screens/VodMoviesPage.qml
+    qml/screens/VodLibraryPage.qml
     qml/screens/GuidePage.qml
     qml/components/ChannelNumber.js
     qml/screens/LiveTvPage.qml

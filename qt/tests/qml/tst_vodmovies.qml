@@ -1,6 +1,9 @@
 import QtQuick
+import QtQuick.Controls
 import QtTest
 import "../../qml/screens"
+import "../../qml/components"
+import "../../qml/theme/Theme.js" as Theme
 
 TestCase {
     id: testCase
@@ -11,6 +14,8 @@ TestCase {
     when: windowShown
     ListModel {
         id: backend
+        property bool series: false
+        property var episodesModel: episodeBackend
         property var continueMovies: []
         property bool continueMoviesLoaded: true
         function toggleToWatch(key) { toggleList(key, "toWatch") }
@@ -22,7 +27,10 @@ TestCase {
             if (movie.movieKey === key) movie = Object.assign({}, movie, {[flag]: !movie[flag]})
             changed()
         }
-        function toggleWatched() { movie = Object.assign({}, movie, {watched: !movie.watched, resumeSeconds: 0}) }
+        function toggleWatched() {
+            if (series) { ++episodeBackend.seriesMarks; episodeBackend.allWatched = !episodeBackend.allWatched }
+            else movie = Object.assign({}, movie, {watched: !movie.watched, resumeSeconds: 0})
+        }
         property var sources: [{id: "one", name: "Local cinema"}, {id: "two", name: "Second library"}]
         property var categories: [{id: "__continue_watching__", name: "Continue watching", iconSource: "qrc:/resources/icons/play.svg"}, {id: "__to_watch__", name: "To Watch", iconSource: "qrc:/resources/icons/bookmark.svg"}, {id: "__favourites__", name: "Favourites", iconSource: "qrc:/resources/icons/favourites.svg"}, {id: "action", name: "Action"}, {id: "drama", name: "Drama"}]
         property string sourceId: "one"
@@ -58,14 +66,338 @@ TestCase {
         function back() { movie = ({}) }
         function play(fromBeginning) { ++playCount; playedFromBeginning = fromBeginning }
     }
+    QtObject {
+        id: episodeBackend
+        property bool busy: false
+        property bool statusReady: true
+        property bool statusBusy: false
+        property bool allWatched: false
+        property int seriesMarks: 0
+        property int episodeMarks: 0
+        property var rows: null
+        property int currentIndex: selectedIndex
+        property string errorText: ""
+        property string seasonId: "1"
+        property var seasons: [{id:"0",name:"Specials"},{id:"1",name:"Season 1"},{id:"3",name:"Season 3"}]
+        property var episodes: [{episodeKey:"first",label:"S01E01",title:"First",number:1,description:"Episode plot",poster:"",durationMinutes:20,progressFraction:0.5,resumeSeconds:600,selected:true,available:true,watched:false}]
+        property var selectedEpisode: episodes[0]
+        property int selectedIndex: 0
+        signal changed()
+        signal rowsChanging()
+        function toggleEpisodeWatched(key) {
+            ++episodeMarks
+            for (let i = 0; rows && i < rows.count; ++i) {
+                const item = rows.get(i).modelData
+                if (item.episodeKey === key) rows.setProperty(i, "modelData", Object.assign({}, item, {watched: !item.watched}))
+            }
+        }
+        function selectSeason(id) { seasonId=id; selectedIndex=0; changed() }
+        function selectEpisode(index) { selectedIndex=index; changed() }
+        function playEpisode(index,fromBeginning) { selectedIndex=index;backend.play(Boolean(fromBeginning)) }
+    }
+    ListModel { id: stableEpisodes; dynamicRoles: true }
     VodMoviesPage { id: page; anchors.fill: parent; catalog: backend; onSidebarWidthCommitted: newWidth => preferredSidebarWidth = newWidth }
     SignalSpy { id: closed; target: page; signalName: "closeRequested" }
     SignalSpy { id: widthCommitted; target: page; signalName: "sidebarWidthCommitted" }
+    Component {
+        id: scrollFixture
+        Flickable {
+            width: 100; height: 100
+            contentWidth: 100; contentHeight: 100
+            ScrollBar.vertical: VodScrollBar { objectName: "verticalBar" }
+            ScrollBar.horizontal: VodScrollBar { objectName: "horizontalBar" }
+        }
+    }
+    function test_scrollbarsOnlyAppearForOverflow_data() {
+        return [{tag: "empty", extent: 0, shown: false},
+                {tag: "fits", extent: 100, shown: false},
+                {tag: "overflows", extent: 101, shown: true}]
+    }
+    function test_scrollbarsOnlyAppearForOverflow(data) {
+        const view = createTemporaryObject(scrollFixture, testCase, {
+            contentWidth: data.extent, contentHeight: data.extent
+        })
+        const vertical = findChild(view, "verticalBar")
+        const horizontal = findChild(view, "horizontalBar")
+        tryCompare(vertical, "visible", data.shown)
+        tryCompare(horizontal, "visible", data.shown)
+        const reservedWidth = vertical.width
+        const reservedHeight = horizontal.height
+        verify(reservedWidth > 0); verify(reservedHeight > 0)
+        view.width = 120; view.height = 120
+        tryCompare(vertical, "visible", false)
+        tryCompare(horizontal, "visible", false)
+        compare(vertical.width, reservedWidth); compare(horizontal.height, reservedHeight)
+    }
+    function test_seriesDetailsKeyboardUsesSelectedEpisodeWithoutTab() {
+        backend.series = true
+        for (let i = 0; i < 40; ++i)
+            stableEpisodes.append({modelData: Object.assign({}, episodeBackend.episodes[0], {
+                episodeKey: "episode-" + i, title: "Episode " + i, selected: i === 0
+            })})
+        episodeBackend.rows = stableEpisodes
+        backend.selectMovie(0)
+        const list = findChild(page, "ui.vod.episodes")
+        tryCompare(list, "activeFocus", true)
+        for (let i = 1; i < 15; ++i) {
+            keyClick(Qt.Key_Down)
+            compare(episodeBackend.selectedIndex, i)
+            compare(list.currentIndex, i)
+        }
+        verify(list.contentY > 0)
+        keyClick(Qt.Key_Up)
+        compare(episodeBackend.selectedIndex, 13)
+        keyClick(Qt.Key_Return)
+        compare(backend.playCount, 1)
+        compare(episodeBackend.selectedIndex, 13)
+        keyClick(Qt.Key_Enter)
+        compare(backend.playCount, 2)
+        episodeBackend.changed() // Passive history updates retain keyboard focus.
+        verify(list.activeFocus)
+        for (let i = 0; i < 20; ++i) keyClick(Qt.Key_Up)
+        compare(episodeBackend.selectedIndex, 0)
+        keyClick(Qt.Key_Return)
+        compare(episodeBackend.selectedIndex, 0)
+        compare(backend.playCount, 3)
+        for (let i = 0; i < 45; ++i) keyClick(Qt.Key_Down)
+        compare(episodeBackend.selectedIndex, 39)
+        compare(list.currentIndex, 39)
+        keyClick(Qt.Key_Return)
+        compare(episodeBackend.selectedIndex, 39)
+        compare(backend.playCount, 4)
+    }
+    function test_seriesReturnFocusWaitsForOverlayReadiness() {
+        backend.series = true
+        page.enabled = false
+        page.prepareForOpen()
+        backend.selectMovie(0)
+        testCase.forceActiveFocus()
+        const list = findChild(page, "ui.vod.episodes")
+        wait(30)
+        verify(!list.activeFocus)
+        page.enabled = true
+        tryCompare(list, "activeFocus", true)
+        keyClick(Qt.Key_Return)
+        compare(backend.playCount, 1)
+    }
+    function test_seriesUsesSharedLibraryAndIndependentEpisodeSelection() {
+        backend.series=true
+        backend.selectMovie(0)
+        wait(50)
+        const list=findChild(page,"ui.vod.episodes")
+        verify(list);compare(list.model.length,1)
+        compare(findChild(page,"ui.vod.season").currentText,"Season 1")
+        const play=findChild(page,"ui.vod.play")
+        compare(play.text,"Resume · 00:10")
+        list.forceActiveFocus();keyClick(Qt.Key_Return)
+        compare(backend.playCount,1)
+        backend.playCount=0
+        mouseClick(findChild(page,"ui.vod.episode.0"))
+        compare(backend.playCount,0)
+        page.handleEscape();verify(!page.detailsOpen)
+    }
+    function test_seriesTracksBeforeFirstPlayback() {
+        backend.series = true
+        backend.selectMovie(0)
+        backend.movie = Object.assign({}, backend.movie, {
+            mediaProbeReady: true, trackOptionsEditable: true, progressLoaded: true,
+            audioTrackOptions: [{label: "Default"}, {label: "Polish"}, {label: "English"}],
+            subtitleTrackOptions: [{label: "Default"}, {label: "Off"}, {label: "Polish"}]
+        })
+        const audio = findChild(page, "ui.vod.audioBeforePlay")
+        const subtitles = findChild(page, "ui.vod.subtitlesBeforePlay")
+        verify(audio.enabled); verify(subtitles.enabled)
+        audio.activated(2); subtitles.activated(2)
+        compare(backend.movie.audioTrackIndex, 2)
+        compare(backend.movie.subtitleTrackIndex, 2)
+        compare(backend.playCount, 0)
+        backend.movie = Object.assign({}, backend.movie, {mediaProbeReady: false, trackOptionsEditable: false, mediaProbeLoading: true})
+        backend.probePlayBlocked = true
+        verify(!audio.enabled); verify(!subtitles.enabled)
+        verify(!findChild(page, "ui.vod.play").enabled)
+    }
+    function test_seriesSeasonKeysClampAndKeepEpisodeFocus() {
+        backend.series = true
+        backend.selectMovie(0)
+        const list = findChild(page, "ui.vod.episodes")
+        tryCompare(list, "activeFocus", true)
+        episodeBackend.selectedIndex = 4
+        keyClick(Qt.Key_Right)
+        compare(episodeBackend.seasonId, "3")
+        compare(episodeBackend.selectedIndex, 0)
+        keyClick(Qt.Key_Right)
+        compare(episodeBackend.seasonId, "3")
+        keyClick(Qt.Key_Left)
+        compare(episodeBackend.seasonId, "1")
+        keyClick(Qt.Key_Left)
+        compare(episodeBackend.seasonId, "0")
+        keyClick(Qt.Key_Left)
+        compare(episodeBackend.seasonId, "0")
+        verify(list.activeFocus)
+        compare(backend.playCount, 0)
+        const seasons = episodeBackend.seasons
+        episodeBackend.seasons = [{id: "0", name: "Specials"}]
+        keyClick(Qt.Key_Right); keyClick(Qt.Key_Left)
+        compare(episodeBackend.seasonId, "0")
+        episodeBackend.seasons = seasons
+    }
+    function test_inheritedEpisodeTracksCannotOpenSelectors() {
+        backend.series = true
+        backend.selectMovie(0)
+        backend.movie = Object.assign({}, backend.movie, {
+            mediaProbeReady: false, trackOptionsEditable: false, progressLoaded: true,
+            audioTrackOptions: [{label: "Default"}, {label: "English"}],
+            subtitleTrackOptions: [{label: "Default"}, {label: "Off"}, {label: "Polish"}]
+        })
+        const audio = findChild(page, "ui.vod.audioBeforePlay")
+        const subtitles = findChild(page, "ui.vod.subtitlesBeforePlay")
+        compare(audio.count, 2); compare(subtitles.count, 3)
+        verify(!audio.enabled); verify(!subtitles.enabled)
+        mouseClick(audio); mouseClick(subtitles)
+        verify(!audio.popup.visible); verify(!subtitles.popup.visible)
+        verify(findChild(page, "ui.vod.play").enabled)
+    }
+    function test_libraryStorageLoading_data() {
+        return [{tag: "movies", series: false}, {tag: "series", series: true}]
+    }
+    function test_libraryStorageLoading(data) {
+        backend.series = data.series
+        backend.clear(); backend.busy = true
+        const spinner = findChild(page, "ui.vod.libraryLoading")
+        tryCompare(spinner, "visible", true); verify(spinner.running)
+        compare(backend.errorText, "")
+        backend.busy = false; backend.errorText = "VOD storage unavailable after 15 seconds. Try again."
+        tryCompare(spinner, "visible", false); verify(!spinner.running)
+    }
+    function test_seriesDetailsBoundedAndStatusPreservesScroll() {
+        backend.series = true
+        for (let i = 0; i < 80; ++i) stableEpisodes.append({modelData: {
+            episodeKey: "episode-" + i, label: "S01E" + i, title: "Episode " + i,
+            description: "Plot", poster: "", durationMinutes: 20, progressFraction: 0.3,
+            resumeSeconds: 360, selected: i === 0, available: true, watched: false
+        }})
+        episodeBackend.rows = stableEpisodes
+        backend.selectMovie(0)
+        backend.movie = Object.assign({}, backend.movie, {description: "Long description ".repeat(300), cast: "Long cast ".repeat(100)})
+        wait(50)
+        const viewport = findChild(page, "ui.vod.detailsViewport")
+        const info = findChild(page, "ui.vod.detailsInfo")
+        const container = findChild(page, "ui.vod.seriesDetails")
+        const list = findChild(page, "ui.vod.episodes")
+        compare(viewport.interactive, false)
+        compare(viewport.contentHeight, viewport.height)
+        verify(info.contentHeight > info.height)
+        compare(container.mapToItem(viewport, 0, container.height).y, viewport.height)
+        list.positionViewAtIndex(35, ListView.Beginning); wait(30)
+        const before = list.contentY
+        const selection = episodeBackend.selectedIndex
+        const row = list.itemAtIndex(35)
+        verify(row)
+        const button = findChild(row, "ui.vod.episodeWatched.episode-35")
+        verify(button && button.enabled)
+        list.forceActiveFocus()
+        mouseClick(button)
+        compare(episodeBackend.episodeMarks, 1)
+        compare(episodeBackend.selectedIndex, selection)
+        compare(backend.playCount, 0)
+        compare(list.activeFocus, true)
+        compare(list.contentY, before)
+        stableEpisodes.setProperty(35, "modelData", Object.assign({}, stableEpisodes.get(35).modelData, {progressFraction: 0.8, poster: ""}))
+        compare(list.contentY, before)
+        backend.toggleWatched(); compare(episodeBackend.seriesMarks, 1)
+        compare(findChild(page, "ui.vod.watched").caption, "Mark series as unwatched")
+        compare(list.contentY, before)
+        const seriesButton = findChild(page, "ui.vod.watched")
+        info.contentY = Math.max(0, seriesButton.mapToItem(info.contentItem, 0, 0).y - 10); wait(30)
+        mouseClick(seriesButton); compare(episodeBackend.seriesMarks, 2)
+        compare(list.contentY, before)
+        // A catalogue insertion before the viewport preserves the visible identity/offset.
+        episodeBackend.rowsChanging()
+        stableEpisodes.insert(0, {modelData: Object.assign({}, stableEpisodes.get(0).modelData, {episodeKey: "new-episode", selected: false})})
+        episodeBackend.rowsChanged(); wait(30)
+        const anchor = list.indexAt(1, list.contentY + 1)
+        compare(stableEpisodes.get(anchor).modelData.episodeKey, "episode-35")
+        compare(list.itemAtIndex(anchor).y, list.contentY)
+        page.width = 700; testCase.width = 700; testCase.height = 520; wait(50)
+        verify(info.contentHeight > info.height)
+        compare(container.mapToItem(viewport, 0, container.height).y, viewport.height)
+        verify(list.height > 0)
+        const resizedScroll = list.contentY
+        episodeBackend.toggleEpisodeWatched("episode-35")
+        compare(list.contentY, resizedScroll)
+    }
+    function test_movieStatusWriteKeepsIconsAndPlayAppearance() {
+        backend.selectMovie(0)
+        wait(30)
+        mouseMove(page, 0, 0)
+        const play = findChild(page, "ui.vod.play")
+        const watched = findChild(page, "ui.vod.watched")
+        const restart = findChild(page, "ui.vod.playFromBeginning")
+        const playColor = play.background.color
+        const watchedColor = watched.background.color
+        backend.busy = true // The catalogue blocks actions during the status write.
+        verify(!play.enabled && !watched.enabled && !restart.enabled)
+        compare(play.contentItem.children[0].opacity, 1)
+        compare(watched.contentItem.children[0].opacity, 1)
+        compare(restart.contentItem.children[0].opacity, 1)
+        compare(play.background.color, playColor)
+        compare(watched.background.color, watchedColor)
+        mouseClick(play)
+        mouseClick(watched)
+        compare(backend.playCount, 0)
+        compare(backend.movie.watched, false)
+        backend.movie = Object.assign({}, backend.movie, {watched: true})
+        backend.busy = false
+        compare(watched.caption, "Mark as unwatched")
+        verify(play.enabled && watched.enabled)
+        // Actual playback/probe unavailability still has a disabled appearance.
+        backend.probePlayBlocked = true
+        compare(play.contentItem.children[0].opacity, 0.36)
+    }
+    function test_seriesStatusWriteKeepsEveryEpisodeIconAppearance() {
+        backend.series = true
+        episodeBackend.episodes = [episodeBackend.episodes[0], Object.assign({}, episodeBackend.episodes[0], {episodeKey: "second", selected: false})]
+        backend.selectMovie(0)
+        wait(30)
+        mouseMove(page, 0, 0)
+        const first = findChild(page, "ui.vod.episodeWatched.first")
+        const second = findChild(page, "ui.vod.episodeWatched.second")
+        const watched = findChild(page, "ui.vod.watched")
+        const play = findChild(page, "ui.vod.play")
+        const playColor = play.background.color
+        const originalIcon = first.iconSource
+        episodeBackend.statusBusy = true
+        for (const button of [first, second, watched]) {
+            verify(!button.enabled)
+            compare(button.contentItem.children[0].opacity, 1)
+        }
+        mouseClick(first)
+        compare(episodeBackend.episodeMarks, 0)
+        episodeBackend.statusReady = false // Follow-up history refresh stays blocked.
+        episodeBackend.statusBusy = false
+        compare(first.contentItem.children[0].opacity, 1)
+        compare(second.contentItem.children[0].opacity, 1)
+        compare(play.contentItem.children[0].opacity, 1)
+        compare(play.background.color, playColor)
+        episodeBackend.episodes = [Object.assign({}, episodeBackend.episodes[0], {watched: true}), episodeBackend.episodes[1]]
+        episodeBackend.statusReady = true
+        wait(30)
+        const updatedFirst = findChild(page, "ui.vod.episodeWatched.first")
+        const updatedSecond = findChild(page, "ui.vod.episodeWatched.second")
+        verify(updatedFirst.iconSource !== originalIcon)
+        compare(updatedSecond.iconSource, originalIcon)
+        verify(updatedFirst.enabled && updatedSecond.enabled)
+    }
     function init() {
         page.resizingSidebar = false; page.preferredSidebarWidth = 0; widthCommitted.clear()
         testCase.width = 1200; testCase.height = 800
         page.enabled = true
         page.visible = true; page.width = 1200
+        backend.series=false; episodeBackend.seasonId="1"; episodeBackend.selectedIndex=0
+        episodeBackend.rows = null; episodeBackend.allWatched = false; episodeBackend.seriesMarks = 0; episodeBackend.episodeMarks = 0
+        episodeBackend.busy = false; episodeBackend.statusReady = true; episodeBackend.statusBusy = false
+        episodeBackend.episodes = [{episodeKey:"first",label:"S01E01",title:"First",number:1,description:"Episode plot",poster:"",durationMinutes:20,progressFraction:0.5,resumeSeconds:600,selected:true,available:true,watched:false}]
+        stableEpisodes.clear()
         backend.clear()
         for (let i = 0; i < 80; ++i)
             backend.append({movieKey: "movie-" + i, title: "Movie " + i, year: "2024", poster: "", available: true, progressFraction: 0, resolutionLabel: "", toWatch: false, favourite: false, listsBusy: false})
@@ -95,7 +427,7 @@ TestCase {
         dragSidebarTo(50)
         compare(sidebar.width, 208); compare(page.preferredSidebarWidth, 208)
         compare(backend.categoryId, ""); compare(backend.playCount, 0)
-        compare(page.posterWidth, 199); compare(page.posterHeight, 282)
+        verifyPosterLayout()
     }
     function test_sidebarWindowResizeAndReopen() {
         page.preferredSidebarWidth = 390
@@ -178,6 +510,7 @@ TestCase {
     }
     function test_movieListButtonsOnContinueShelf() {
         startWithHistory([{movieKey: "started", title: "Started movie", poster: "", progressFraction: 0.5, toWatch: false, favourite: false}])
+        tryVerify(() => findChild(page, "ui.vod.toWatch.started") !== null)
         const watch = findChild(page, "ui.vod.toWatch.started")
         const favourite = findChild(page, "ui.vod.favourite.started")
         verify(watch !== null); verify(favourite !== null)
@@ -372,9 +705,9 @@ TestCase {
         const firstOffset = shelf.contentX
         backend.continueMovies = backend.continueMovies.map(item => Object.assign({}, item, {resolutionLabel: "720p"}))
         wait(30)
-        compare(shelf.contentX, firstOffset)
+        fuzzyCompare(shelf.contentX, firstOffset, 0.5)
         page.visible = false; page.visible = true; page.prepareForOpen(); wait(30)
-        compare(shelf.contentX, firstOffset); compare(shelf.currentIndex, selection)
+        fuzzyCompare(shelf.contentX, firstOffset, 0.5); compare(shelf.currentIndex, selection)
         mouseWheel(shelf, 100, 100, -120, 0)
         tryVerify(function() { return shelf.contentX > firstOffset })
         mouseWheel(shelf, 100, 100, 0, 1200)
@@ -400,7 +733,7 @@ TestCase {
         checkComboPopup(findChild(page, "ui.vod.category"))
         backend.selectMovie(0)
         const options = [{label: "Default"}, {label: "Track with a very long description that must never resize a dropdown"}, {label: "Off"}]
-        backend.movie = Object.assign({}, backend.movie, {mediaProbeReady: true, audioTrackOptions: options,
+        backend.movie = Object.assign({}, backend.movie, {mediaProbeReady: true, trackOptionsEditable: true, audioTrackOptions: options,
             subtitleTrackOptions: options, audioTrackIndex: 0, subtitleTrackIndex: 0})
         for (const size of [1200, 700]) {
             testCase.width = size; page.width = size; wait(30)
@@ -445,7 +778,7 @@ TestCase {
     }
     function test_playWhileReadingTracks() {
         backend.selectMovie(0)
-        backend.movie = Object.assign({}, backend.movie, {mediaProbeLoading: true, mediaProbeReady: false, resumeSeconds: 120})
+        backend.movie = Object.assign({}, backend.movie, {mediaProbeLoading: true, mediaProbeReady: false, trackOptionsEditable: false, resumeSeconds: 120})
         const play = findChild(page, "ui.vod.play")
         const beginning = findChild(page, "ui.vod.playFromBeginning")
         backend.probePlayBlocked = true
@@ -494,12 +827,223 @@ TestCase {
         wait(20)
         compare(grid.currentIndex, selected)
     }
+    function test_marqueeGridKeyboardAndRealPointer_data() {
+        return [{tag: "movies", series: false}, {tag: "series", series: true}]
+    }
+    function test_marqueeGridKeyboardAndRealPointer(data) {
+        backend.series = data.series
+        backend.selectCategory("drama")
+        for (let i = 0; i < 2; ++i)
+            backend.setProperty(i, "title", "A deliberately long title that cannot fit below this poster " + i)
+        mouseMove(page, 30, 60)
+        page.gridIndex = 0; page.focusGrid()
+        const grid = findChild(page, "ui.vod.grid")
+        const first = findChild(page, "ui.vod.gridTitle.0")
+        const second = findChild(page, "ui.vod.gridTitle.1")
+        verify(first && second)
+        verify(first.overflowing)
+        wait(600); verify(!first.scrolling)
+        tryCompare(first, "scrolling", true, 1000)
+        verify(!second.scrolling)
+        // A real move takes ownership without opening details or changing selection.
+        mouseMove(second, 30, 10)
+        tryCompare(first, "indicated", false)
+        tryCompare(second, "indicated", true)
+        verify(!first.scrolling); compare(first.offset, 0)
+        wait(600); verify(!second.scrolling)
+        tryCompare(second, "scrolling", true, 1000)
+        keyClick(Qt.Key_Right)
+        keyClick(Qt.Key_Left)
+        tryCompare(first, "indicated", true)
+        verify(!second.indicated); verify(!second.scrolling)
+        // Force real keyboard scrolling/reflow below the stationary pointer.
+        const selection = findChild(page, "ui.vod.titleSelection")
+        keyClick(Qt.Key_Down); keyClick(Qt.Key_Down)
+        tryVerify(() => grid.contentY > 0)
+        waitForRendering(grid)
+        compare(selection.inputSource, "keyboard")
+        compare(selection.activeTarget, "grid|movie-" + grid.currentIndex)
+        keyClick(Qt.Key_Up); keyClick(Qt.Key_Up)
+        tryCompare(grid, "currentIndex", 0)
+        tryVerify(() => findChild(page, "ui.vod.gridTitle.0") !== null && findChild(page, "ui.vod.gridTitle.1") !== null)
+        const restoredFirst = findChild(page, "ui.vod.gridTitle.0")
+        const restoredSecond = findChild(page, "ui.vod.gridTitle.1")
+        tryCompare(restoredFirst, "indicated", true)
+        verify(!restoredSecond.indicated)
+        mouseMove(restoredSecond, 32, 10)
+        tryCompare(restoredSecond, "indicated", true)
+        verify(!restoredFirst.indicated)
+        const playCount = backend.playCount
+        compare(backend.selectedIndex, -1); compare(playCount, 0)
+        page.enabled = false
+        verify(!restoredSecond.scrolling); compare(restoredSecond.offset, 0)
+    }
+    function test_marqueeShelfAndGridShareOneTarget() {
+        const title = "A deliberately long continuing title that will not fit below a poster"
+        startWithHistory([{movieKey: "movie-0", title: title, poster: "", progressFraction: 0.5}])
+        backend.setProperty(0, "title", title)
+        const shelf = findChild(page, "ui.vod.continue")
+        tryCompare(shelf, "activeFocus", true)
+        const caption = findChild(page, "ui.vod.continueTitle.0")
+        verify(caption.indicated)
+        tryCompare(caption, "scrolling", true, 1500)
+        backend.continueMovies = [Object.assign({}, backend.continueMovies[0], {progressFraction: 0.6})]
+        wait(50)
+        compare(findChild(page, "ui.vod.continueTitle.0"), caption)
+        verify(caption.scrolling)
+        keyClick(Qt.Key_Down)
+        const gridTitle = findChild(page, "ui.vod.gridTitle.0")
+        verify(gridTitle.indicated); verify(!caption.indicated)
+        verify(!caption.scrolling)
+        tryCompare(gridTitle, "scrolling", true, 1500)
+        keyClick(Qt.Key_Return)
+        verify(page.detailsOpen); verify(!gridTitle.scrolling)
+    }
     function test_fractionalColumnWidth() {
         page.width = 1600
         const grid = findChild(page, "ui.vod.grid")
         grid.contentY = 0
         wait(30)
         compare(grid.indexAt(grid.cellWidth * (grid.columns - 0.5), 20), grid.columns - 1)
+    }
+    function verifyPosterLayout() {
+        const grid = findChild(page, "ui.vod.grid")
+        const viewport = findChild(page, "ui.vod.posterViewport")
+        verify(page.posterWidth >= 289.5 * 11 / 15 - 0.001)
+        verify(page.posterWidth <= 289.5 * Math.sqrt(0.75) + 0.001)
+        verify(page.posterHeight >= 303.6 - 0.001)
+        verify(page.posterHeight <= 414 * Math.sqrt(0.75) + 0.001)
+        fuzzyCompare(page.posterHeight / page.posterWidth, 414 / 289.5, 0.00001)
+        fuzzyCompare(grid.cellHeight, page.posterHeight + 54, 0.001)
+        const occupied = grid.columns * page.posterWidth + (grid.columns - 1) * 16
+        if (viewport.width >= 289.5 * 11 / 15)
+            verify(occupied <= viewport.width + 0.01, "Last poster must fit before the scrollbar")
+        verify((grid.columns + 1) * (289.5 * 11 / 15) + grid.columns * 16 > viewport.width,
+               "Another minimum-size poster must not fit")
+        fuzzyCompare(grid.cellWidth - page.posterWidth, 16, 0.001)
+    }
+    function test_responsivePosterThresholds() {
+        backend.selectCategory("drama")
+        page.preferredSidebarWidth = 208
+        wait(30)
+        const grid = findChild(page, "ui.vod.grid")
+        const viewport = findChild(page, "ui.vod.posterViewport")
+        const reserved = testCase.width - viewport.width
+        const threshold = 5 * (289.5 * 11 / 15) + 4 * 16
+        testCase.width = reserved + threshold - 0.25; wait(30)
+        compare(grid.columns, 4); verifyPosterLayout()
+        const before = page.posterWidth
+        testCase.width = reserved + threshold + 0.25; wait(30)
+        compare(grid.columns, 5); verifyPosterLayout()
+        // Check actual packing while both rows have instantiated delegates.
+        compare(grid.indexAt(4 * grid.cellWidth + page.posterWidth / 2, 20), 4)
+        compare(grid.indexAt(page.posterWidth / 2, grid.cellHeight + 20), 5)
+        verify(page.posterWidth < before)
+        const after = page.posterWidth
+        testCase.width += 20; wait(30)
+        compare(grid.columns, 5); verifyPosterLayout()
+        verify(page.posterWidth > after)
+        testCase.width = reserved + threshold - 0.25; wait(30)
+        compare(grid.columns, 4); fuzzyCompare(page.posterWidth, before, 0.01)
+    }
+    function test_responsivePosterLimits() {
+        backend.selectCategory("drama")
+        const viewport = findChild(page, "ui.vod.posterViewport")
+        const scrollbar = findChild(page, "ui.vod.movieScrollBar")
+        // Exercise extreme viewports independently of the toolbar's minimum width.
+        try {
+            viewport.width = 289.5 * Math.sqrt(0.75); wait(30)
+            fuzzyCompare(page.posterWidth, 289.5 * Math.sqrt(0.75), 0.01)
+            fuzzyCompare(page.posterHeight, 414 * Math.sqrt(0.75), 0.01)
+            verifyPosterLayout()
+            viewport.width = 289.5 * 11 / 15; wait(30)
+            fuzzyCompare(page.posterWidth, 289.5 * 11 / 15, 0.01)
+            fuzzyCompare(page.posterHeight, 303.6, 0.01)
+            verifyPosterLayout()
+            viewport.width = 100; wait(30)
+            verifyPosterLayout()
+            compare(findChild(page, "ui.vod.grid").columns, 1)
+            verify(viewport.clip)
+        } finally {
+            viewport.width = Qt.binding(() => Math.max(0, viewport.parent.width - scrollbar.width - Theme.vodLibraryScrollBarGap))
+        }
+    }
+    function test_responsivePostersPreserveBrowsing() {
+        backend.selectCategory("drama")
+        const grid = findChild(page, "ui.vod.grid")
+        page.gridIndex = 30; page.focusGrid(); wait(30)
+        const widths = [900, 1600, 759, 760, 1200]
+        for (const windowWidth of widths) {
+            testCase.width = windowWidth; wait(30)
+            verifyPosterLayout()
+            compare(grid.currentIndex, 30); compare(page.gridIndex, 30)
+            verify(grid.activeFocus)
+            verify(grid.contentY > 0, "Resizing must not reset browsing to the beginning")
+        }
+        const posterWidth = page.posterWidth
+        const posterHeight = page.posterHeight
+        testCase.height = 600; wait(30)
+        compare(page.posterWidth, posterWidth); compare(page.posterHeight, posterHeight)
+        testCase.width = 1250
+        page.preferredSidebarWidth = 208; wait(30)
+        const wideViewportPoster = page.posterWidth
+        dragSidebarTo(390)
+        verifyPosterLayout()
+        verify(page.posterWidth !== wideViewportPoster)
+        compare(grid.currentIndex, 30); verify(grid.activeFocus)
+        keyClick(Qt.Key_Down); compare(grid.currentIndex, 30 + grid.columns)
+        keyClick(Qt.Key_Return)
+        compare(backend.selectedIndex, grid.currentIndex)
+        verify(page.detailsOpen); compare(backend.playCount, 0)
+    }
+    function test_scrollbarKeepsPosterGeometryStable() {
+        const grid = findChild(page, "ui.vod.grid")
+        const viewport = findChild(page, "ui.vod.posterViewport")
+        const scrollbar = findChild(page, "ui.vod.movieScrollBar")
+        verify(scrollbar.size < 1)
+        verify(scrollbar.visible)
+        const columns = grid.columns
+        const viewportWidth = viewport.width
+        const posterWidth = page.posterWidth
+        backend.clear()
+        backend.append({movieKey: "one", title: "One movie", year: "2024", poster: "", available: true,
+                        progressFraction: 0, resolutionLabel: "", toWatch: false, favourite: false, listsBusy: false})
+        tryCompare(scrollbar, "size", 1)
+        tryCompare(scrollbar, "visible", false)
+        compare(grid.columns, columns)
+        compare(viewport.width, viewportWidth)
+        compare(page.posterWidth, posterWidth)
+    }
+    function test_responsiveContinueShelf() {
+        const history = []
+        for (let i = 0; i < 12; ++i)
+            history.push({movieKey: "started-" + i, title: "A long movie title for responsive posters " + i,
+                          year: "2024", poster: "", progressFraction: 0.5, toWatch: false, favourite: false})
+        startWithHistory(history)
+        const shelf = findChild(page, "ui.vod.continue")
+        tryCompare(shelf, "activeFocus", true)
+        keyClick(Qt.Key_Right)
+        for (const windowWidth of [1600, 900, 759, 426]) {
+            testCase.width = windowWidth; wait(30)
+            const item = shelf.itemAtIndex(1)
+            verify(item !== null)
+            fuzzyCompare(item.width, page.posterWidth, 0.001)
+            fuzzyCompare(item.height, page.posterHeight + 54, 0.001)
+            compare(shelf.currentIndex, 1); verify(shelf.activeFocus)
+            compare(page.shelfKey, "started-1")
+            const watch = findChild(item, "ui.vod.toWatch.started-1")
+            const favourite = findChild(item, "ui.vod.favourite.started-1")
+            verify(watch !== null); verify(favourite !== null)
+            verify(watch.x + watch.width <= favourite.x)
+            verify(watch.parent.y + watch.height <= page.posterHeight)
+            grabImage(page).save("continue-responsive-" + windowWidth + ".png")
+        }
+        keyClick(Qt.Key_Down)
+        const grid = findChild(page, "ui.vod.grid")
+        verify(grid.activeFocus)
+        keyClick(Qt.Key_Up); verify(shelf.activeFocus)
+        keyClick(Qt.Key_Return)
+        compare(backend.selectedIndex, -2); verify(page.detailsOpen)
     }
     function test_resolutionBadges() {
         const labels = ["480p", "720p", "1080p", "1440p", "4K"]
@@ -544,7 +1088,7 @@ TestCase {
             testCase.width = size[0]; testCase.height = size[1]
             page.width = size[0]
             wait(40)
-            if (size[0] === 1600) compare(findChild(page, "ui.vod.grid").columns, 6)
+            verifyPosterLayout()
             grabImage(page).save("library-" + size[0] + "x" + size[1] + ".png")
             backend.selectMovie(0); wait(30)
             grabImage(page).save("details-" + size[0] + "x" + size[1] + ".png")

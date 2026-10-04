@@ -72,6 +72,7 @@ qt_add_executable(OKILTVQtAppTests
     ../src/app/vod/vodmediaprobe.h
     ../src/app/vod/vodartworkcache.cpp
     ../src/app/vod/vodcatalogmodel.cpp
+    ../src/app/vod/vodepisodesmodel.cpp
     ../src/player/mpvplaybackengine.cpp
     ../src/app/catchupdownloadcontroller.cpp
     ../src/app/catchuparchivetransfer.cpp
@@ -241,6 +242,10 @@ endif ()
 if (NOT CMAKE_CROSSCOMPILING)
     find_program(OKILTV_QMLTESTRUNNER qmltestrunner HINTS "${Qt6_DIR}/../../../bin" REQUIRED)
     if (OKILTV_QMLTESTRUNNER)
+        add_test(NAME OKILTVQtMediaModeSwitchTests
+            COMMAND "${OKILTV_QMLTESTRUNNER}" -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_mediamodeswitch.qml")
+        set_tests_properties(OKILTVQtMediaModeSwitchTests PROPERTIES LABELS qml TIMEOUT 60
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
         add_test(NAME OKILTVQtPlaybackSearchHeaderTests
             COMMAND "${OKILTV_QMLTESTRUNNER}" -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_playbacksearchheader.qml")
         set_tests_properties(OKILTVQtPlaybackSearchHeaderTests PROPERTIES LABELS qml TIMEOUT 60
@@ -323,7 +328,8 @@ if (OKILTV_BUILD_UI_TESTS)
         09-catchup-download
         10-multiview-keyboard
         11-multiview-controls
-        12-vod-movies)
+        12-vod-movies
+        13-vod-series)
         add_test(NAME "UI-${scenario}"
             COMMAND "${OKILTV_TEST_BASH}" "${CMAKE_SOURCE_DIR}/scripts/ci/run_ui_test.sh"
                 "${CMAKE_SOURCE_DIR}/ui-tests/tests/${scenario}.py"
@@ -433,9 +439,18 @@ else ()
 endif ()
 set_tests_properties(OKILTVQtVodMpvTests PROPERTIES LABELS "playback;vod" TIMEOUT 90)
 
+add_test(NAME OKILTVQtVodSeriesTests COMMAND OKILTVQtAppTests vodSeriesRuntime)
+set_tests_properties(OKILTVQtVodSeriesTests PROPERTIES LABELS "app;vod" TIMEOUT 90 ENVIRONMENT "QT_QPA_PLATFORM=offscreen;OKILTV_HEADLESS_TEST=1")
+add_test(NAME OKILTVQtVodStorageStartupTests COMMAND OKILTVQtAppTests vodLibraryWaitsForStorage)
+set_tests_properties(OKILTVQtVodStorageStartupTests PROPERTIES LABELS "app;vod" TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=offscreen;OKILTV_HEADLESS_TEST=1")
+
 if (OKILTV_QMLTESTRUNNER)
     add_test(NAME OKILTVQtVodPlaybackUiTests COMMAND "${OKILTV_QMLTESTRUNNER}"
         -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_vodplaybackpanels.qml")
+    add_test(NAME OKILTVQtVodMarqueeTests COMMAND "${OKILTV_QMLTESTRUNNER}"
+        -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_vodmarquee.qml")
+    set_tests_properties(OKILTVQtVodMarqueeTests PROPERTIES LABELS "qml;vod" TIMEOUT 60
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
     set_tests_properties(OKILTVQtVodPlaybackUiTests PROPERTIES LABELS "qml;vod" TIMEOUT 60
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/qml-artifacts/vod-movies")
@@ -443,5 +458,12 @@ if (OKILTV_QMLTESTRUNNER)
         -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_vodmovies.qml")
     set_tests_properties(OKILTVQtVodUiTests PROPERTIES LABELS "qml;vod" TIMEOUT 60
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/qml-artifacts/vod-movies"
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+endif ()
+
+if (NOT CMAKE_CROSSCOMPILING AND OKILTV_QMLTESTRUNNER)
+    add_test(NAME OKILTVQtSourceMediaUiTests COMMAND "${OKILTV_QMLTESTRUNNER}"
+        -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_sourcemedia.qml")
+    set_tests_properties(OKILTVQtSourceMediaUiTests PROPERTIES LABELS "qml;vod" TIMEOUT 60
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
 endif ()

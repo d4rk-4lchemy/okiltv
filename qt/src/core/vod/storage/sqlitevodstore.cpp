@@ -212,6 +212,19 @@ Outcome SqliteVodStore::prepare(const RequestContext &context)
         };
         for (const auto &statement : statements) connection.sql(statement);
         connection.sql(QStringLiteral("CREATE TABLE IF NOT EXISTS vod_movie_lists(identity BLOB PRIMARY KEY,profile TEXT NOT NULL,namespace TEXT NOT NULL,kind INTEGER NOT NULL,provider_id TEXT NOT NULL,parent TEXT NOT NULL,to_watch INTEGER NOT NULL DEFAULT 0,favourite INTEGER NOT NULL DEFAULT 0,UNIQUE(profile,namespace,kind,provider_id,parent))"));
+        connection.sql(QStringLiteral("CREATE TABLE IF NOT EXISTS vod_series_history(series BLOB PRIMARY KEY,profile TEXT NOT NULL,namespace TEXT NOT NULL,provider_id TEXT NOT NULL,episode_id TEXT NOT NULL,updated INTEGER NOT NULL)"));
+        connection.sql(QStringLiteral("CREATE INDEX IF NOT EXISTS vod_series_history_source ON vod_series_history(profile,namespace)"));
+        connection.sql(QStringLiteral("CREATE TABLE IF NOT EXISTS vod_series_state(series BLOB PRIMARY KEY,profile TEXT NOT NULL,namespace TEXT NOT NULL,continue_hidden INTEGER NOT NULL DEFAULT 0,blocked_session TEXT NOT NULL DEFAULT '')"));
+        if (version < 10) connection.sql(QStringLiteral("DROP VIEW IF EXISTS vod_series_continue"));
+        connection.sql(QStringLiteral("CREATE VIEW IF NOT EXISTS vod_series_continue AS "
+            "WITH available AS (SELECT l.*,s.number AS season_number, "
+            "ROW_NUMBER() OVER (PARTITION BY l.series ORDER BY COALESCE(s.number,2147483647),COALESCE(s.ordering,2147483647),COALESCE(l.number,2147483647),l.ordering) AS queue_order "
+            "FROM vod_episode_links l JOIN vod_items i ON i.identity=l.episode LEFT JOIN vod_seasons s ON s.series=l.series AND s.season=l.season "
+            "WHERE i.availability<>2), last AS (SELECT h.series,h.updated,a.episode,a.queue_order,a.season_number,p.status,p.position,p.duration "
+            "FROM vod_series_history h JOIN vod_items i ON i.profile=h.profile AND i.namespace=h.namespace AND i.kind=2 AND i.provider_id=h.episode_id AND i.parent=h.provider_id "
+            "JOIN available a ON a.episode=i.identity LEFT JOIN vod_progress p ON p.identity=i.identity LEFT JOIN vod_series_state state ON state.series=h.series WHERE COALESCE(state.continue_hidden,0)=0) "
+            "SELECT series,updated,CASE WHEN COALESCE(status,0)=0 AND (duration IS NULL OR duration<=0 OR COALESCE(position,0)<=duration*0.95) THEN episode "
+            "WHEN COALESCE(season_number,-1)<>0 THEN (SELECT a.episode FROM available a WHERE a.series=last.series AND COALESCE(a.season_number,-1)<>0 AND a.queue_order>last.queue_order ORDER BY a.queue_order LIMIT 1) END AS episode FROM last"));
         connection.sql(QStringLiteral("CREATE INDEX IF NOT EXISTS vod_movie_lists_source ON vod_movie_lists(profile,namespace,kind)"));
         auto progressColumns = connection.sql(QStringLiteral("PRAGMA table_info(vod_progress)"));
         bool hasTrackPreferences = false;
@@ -247,6 +260,15 @@ Outcome SqliteVodStore::prepare(const RequestContext &context)
             if (!hasArtwork) connection.sql(QStringLiteral("ALTER TABLE %1 ADD COLUMN artwork BLOB NOT NULL DEFAULT '[]'").arg(table));
         }
         connection.sql(QStringLiteral("DELETE FROM vod_sync_runs WHERE owner<>?"), {processInstance()});
+        if (version < 9) {
+            auto history=connection.sql(QStringLiteral("SELECT profile,namespace,parent,provider_id,COALESCE(updated,0) FROM (SELECT *,ROW_NUMBER() OVER (PARTITION BY profile,namespace,parent ORDER BY COALESCE(updated,0) DESC,identity DESC) AS recent FROM vod_progress WHERE kind=2 AND parent<>'' AND position IS NOT NULL) WHERE recent=1"));
+            while (history.next()) {
+                const ContentRef series{QUuid(history.value(0).toString()),QUuid(history.value(1).toString()),ContentKind::Series,history.value(2).toString(),{}};
+                connection.sql(QStringLiteral("INSERT OR IGNORE INTO vod_series_history(series,profile,namespace,provider_id,episode_id,updated) VALUES(?,?,?,?,?,?)"),
+                    {series.key(),history.value(0),history.value(1),history.value(2),history.value(3),history.value(4)});
+            }
+            history.finish();
+        }
         if (version < 7) {
             // Bound memory and release read queries before updating their rows.
             // The enclosing transaction rolls back every key and generation on failure.
@@ -287,7 +309,8 @@ Result<SourceContext> SqliteVodStore::snapshot(const QUuid &id)
         if (source.revision.profileId != id || id.isNull() || source.revision.credentialRevision == 0
             || source.revision.credentialRevision > quint64(std::numeric_limits<qint64>::max()))
             throw Error{ErrorCode::InvalidResponse, context.operationId};
-        if (!source.enabled) { invalidate(id); throw Error{ErrorCode::UnsupportedCapability, context.operationId}; }
+        // Disabled sources remain readable for current-session progress/recovery.
+        // Network and new playback admission belong to VodController.
         Connection connection(m_path, context); connection.open(); connection.begin();
         // Serialize publication with invalidate(), including the SQL commit. A
         // loader that started before a source mutation must never restore it.
@@ -496,6 +519,8 @@ Result<quint64> SqliteVodStore::publishIfCurrent(const ImportToken &token, bool 
         }
         rows.finish();
         advanceGeneration(connection, token.scope);
+        std::unique_lock<std::recursive_mutex> policyLock;
+        if (token.request.policyMutex) policyLock = std::unique_lock<std::recursive_mutex>(*token.request.policyMutex);
         connection.current();
         auto generation = connection.sql(QStringLiteral("SELECT generation FROM vod_generations WHERE profile=? AND kind=?"), {uuid(token.scope.profileId), contentKind(token.scope.kind)});
         generation.next(); const auto number = generation.value(0).toULongLong(); generation.finish();
@@ -521,18 +546,29 @@ Result<CatalogPage> SqliteVodStore::query(const CatalogQuery &input, const Reque
         if (generation.next()) { page.generation = generation.value(0).toULongLong(); page.refreshedAtUtc = QDateTime::fromMSecsSinceEpoch(generation.value(1).toLongLong(), QTimeZone::UTC); }
         generation.finish();
         if (input.page && input.page->generation != page.generation) throw Error{ErrorCode::Cancelled, context.operationId};
-        const auto orderKey = input.continueWatchingOnly
+        const bool seriesContinue = input.continueWatchingOnly && input.scope.kind == CatalogKind::Series;
+        const auto orderKey = seriesContinue ? QStringLiteral("(SELECT updated FROM vod_series_continue WHERE series=vod_items.identity)") : input.continueWatchingOnly
             ? QStringLiteral("(SELECT COALESCE(updated,0) FROM vod_progress WHERE vod_progress.identity=vod_items.identity)")
             : QStringLiteral("sort_key");
         QString statement = QStringLiteral("SELECT identity,provider_id,parent,title,year,availability,%1,artwork,COALESCE((SELECT to_watch FROM vod_movie_lists WHERE vod_movie_lists.identity=vod_items.identity),0),COALESCE((SELECT favourite FROM vod_movie_lists WHERE vod_movie_lists.identity=vod_items.identity),0) FROM vod_items WHERE profile=? AND namespace=? AND kind=?").arg(orderKey);
         QVariantList args{uuid(input.scope.profileId), uuid(input.scope.catalogNamespace), contentKind(input.scope.kind)};
+        if (input.identity) { statement += QStringLiteral(" AND identity=?"); args.append(*input.identity); }
         if (const auto category = input.scope.categoryId) {
             statement += QStringLiteral(" AND identity IN (SELECT identity FROM vod_item_categories WHERE category=?)"); args.append(*category);
         }
-        if (input.continueWatchingOnly)
+        if (input.allowedCategories) {
+            if (input.allowedCategories->isEmpty()) statement += QStringLiteral(" AND 0");
+            else {
+                QStringList placeholders;
+                for (const auto &category : *input.allowedCategories) { placeholders.append(QStringLiteral("?")); args.append(category); }
+                statement += QStringLiteral(" AND identity IN (SELECT identity FROM vod_item_categories WHERE category IN (%1))").arg(placeholders.join(u','));
+            }
+        }
+        if (seriesContinue) statement += QStringLiteral(" AND identity IN (SELECT series FROM vod_series_continue WHERE episode IS NOT NULL)");
+        else if (input.continueWatchingOnly)
             statement += QStringLiteral(" AND identity IN (SELECT identity FROM vod_progress WHERE status=0 AND position>0 AND (duration IS NULL OR duration<=0 OR position<=duration*0.95))");
         if (input.movieList != MovieList::None) {
-            if (input.scope.kind != CatalogKind::Movies || (input.movieList != MovieList::ToWatch && input.movieList != MovieList::Favourites))
+            if ((input.movieList != MovieList::ToWatch && input.movieList != MovieList::Favourites))
                 throw Error{ErrorCode::InvalidResponse, context.operationId};
             statement += input.movieList == MovieList::ToWatch
                 ? QStringLiteral(" AND identity IN (SELECT identity FROM vod_movie_lists WHERE to_watch=1)")
@@ -565,10 +601,14 @@ Result<CatalogPage> SqliteVodStore::query(const CatalogQuery &input, const Reque
             summary.availability = Availability(rows.value(5).toInt());
             summary.artwork = decodeArtwork(rows.value(7).toByteArray());
             page.movieLists.insert(summary.ref.key(), {rows.value(8).toBool(), rows.value(9).toBool()});
+            if (input.scope.kind==CatalogKind::Series) {
+                auto target=connection.sql(QStringLiteral("SELECT COALESCE(s.number,0),COALESCE(l.number,0),i.title FROM vod_series_continue v JOIN vod_items i ON i.identity=v.episode JOIN vod_episode_links l ON l.episode=i.identity LEFT JOIN vod_seasons s ON s.series=l.series AND s.season=l.season WHERE v.series=?"), {summary.ref.key()});
+                if (target.next()) page.continuationLabels.insert(summary.ref.key(),QStringLiteral("S%1E%2 · %3").arg(target.value(0).toInt(),2,10,QChar('0')).arg(target.value(1).toInt(),2,10,QChar('0')).arg(target.value(2).toString()));
+            }
             auto categories = connection.sql(QStringLiteral("SELECT category FROM vod_item_categories WHERE identity=? ORDER BY category"), {rows.value(0)});
             while (categories.next()) summary.categoryIds.append(categories.value(0).toString());
             if (input.scope.kind == CatalogKind::Movies) page.items.append(summary);
-            else page.items.append(SeriesSummary{summary.ref, summary.title, summary.year, {}, summary.categoryIds, summary.availability});
+            else page.items.append(SeriesSummary{summary.ref, summary.title, summary.year, summary.artwork, summary.categoryIds, summary.availability});
             last = {page.generation, rows.value(6).toString(), rows.value(0).toByteArray()};
         }
         rows.finish(); connection.commit(); return page;
@@ -628,6 +668,11 @@ Outcome SqliteVodStore::storeCategories(const CategorySnapshot &snapshot, const 
             values.append(optionalString(category.parentId)); values.append(order++);
             connection.sql(QStringLiteral("INSERT INTO vod_categories(profile,namespace,kind,id,name,parent,ordering) VALUES(?,?,?,?,?,?,?)"), values);
         }
+        // Take policy after the database write lock, as in movie publication.
+        // Holding it while waiting for SQLite would invert the lock order when
+        // different sources synchronize concurrently.
+        std::unique_lock<std::recursive_mutex> policyLock;
+        if (context.policyMutex) policyLock = std::unique_lock<std::recursive_mutex>(*context.policyMutex);
         connection.current(); connection.commit(); return {};
     });
 }
@@ -640,6 +685,28 @@ Result<std::optional<VodDetails>> SqliteVodStore::readDetails(const ContentRef &
         const auto details = Storage::decodeDetails(query.value(0).toByteArray());
         if (!details || details->ref != ref) throw Error{ErrorCode::StorageUnavailable, context.operationId};
         return details;
+    });
+}
+Result<std::optional<VodMediaProbe>> SqliteVodStore::readSeasonMediaMetadata(const ContentRef &series, const QString &seasonId, const RequestContext &context)
+{
+    return guarded<std::optional<VodMediaProbe>>(context, [&]() -> std::optional<VodMediaProbe> {
+        Connection connection(m_path, context); connection.open(); connection.begin(false); connection.checkRef(series);
+        if (series.kind != ContentKind::Series) throw Error{ErrorCode::InvalidResponse, context.operationId};
+        auto query = connection.sql(QStringLiteral(
+            "SELECT d.payload FROM vod_episode_links e JOIN vod_details d ON d.identity=e.episode "
+            "WHERE e.series=? AND COALESCE(e.season,'')=? AND d.fetched>=? "
+            "ORDER BY COALESCE(e.number,2147483647),e.ordering,e.rowid"),
+            {series.key(), seasonId, QDateTime::currentMSecsSinceEpoch() - qint64(168) * 3600 * 1000});
+        std::optional<VodMediaProbe> newest;
+        while (query.next()) {
+            if (const auto error = context.interruption()) throw *error;
+            const auto details = Storage::decodeDetails(query.value(0).toByteArray());
+            if (!details || parentSeries(details->ref) != series) throw Error{ErrorCode::StorageUnavailable, context.operationId};
+            const auto metadata = details->mediaProbe;
+            if (metadata && (!newest || metadata->observedAtUtc > newest->observedAtUtc)) newest = metadata;
+        }
+        connection.current();
+        return newest;
     });
 }
 Outcome SqliteVodStore::storeDetails(const VodDetails &details, const RequestContext &context)
@@ -662,6 +729,14 @@ Outcome SqliteVodStore::storeDetails(const VodDetails &details, const RequestCon
                      episode.ref.providerItemId, series.providerItemId, episode.title, sortKey(episode.title), int(episode.availability)});
                 connection.sql(QStringLiteral("INSERT INTO vod_episode_links(episode,series,profile,season,number,ordering) VALUES(?,?,?,?,?,?)"),
                     {episode.ref.key(), series.key(), uuid(series.profileId), optionalString(episode.seasonId), optionalNumber(episode.number), episode.order});
+                auto existing=connection.sql(QStringLiteral("SELECT payload FROM vod_details WHERE identity=?"),{episode.ref.key()});
+                auto episodeDetails=existing.next() ? Storage::decodeDetails(existing.value(0).toByteArray()).value_or(VodDetails{}) : VodDetails{};
+                existing.finish();
+                episodeDetails.ref=episode.ref;episodeDetails.title=episode.title;
+                episodeDetails.description=episode.description;episodeDetails.artwork=episode.artwork;
+                if (!episodeDetails.mediaProbe) episodeDetails.declaredDurationMs=episode.durationMs;
+                connection.sql(QStringLiteral("INSERT INTO vod_details(identity,profile,payload,fetched) VALUES(?,?,?,?) ON CONFLICT(identity) DO UPDATE SET payload=excluded.payload,fetched=excluded.fetched"),
+                    {episode.ref.key(),uuid(episode.ref.profileId),Storage::encodeDetails(episodeDetails),QDateTime::currentMSecsSinceEpoch()});
             }
         }
         connection.sql(QStringLiteral("INSERT INTO vod_details(identity,profile,payload,fetched) VALUES(?,?,?,?) ON CONFLICT(identity) DO UPDATE SET payload=excluded.payload,fetched=excluded.fetched"),
@@ -694,7 +769,7 @@ Outcome SqliteVodStore::removeSourceState(const QUuid &id)
         auto state = connection.sql(QStringLiteral("SELECT removed FROM vod_source_state WHERE profile=?"), {uuid(id)});
         if (!state.next() || state.value(0).toInt() == 0) throw Error{ErrorCode::StorageUnavailable, {}};
         state.finish();
-        for (const auto &table : {QStringLiteral("vod_category_snapshots"), QStringLiteral("vod_items"), QStringLiteral("vod_seasons"), QStringLiteral("vod_details"), QStringLiteral("vod_generations"), QStringLiteral("vod_sync_runs"), QStringLiteral("vod_progress"), QStringLiteral("vod_movie_lists")})
+        for (const auto &table : {QStringLiteral("vod_category_snapshots"), QStringLiteral("vod_items"), QStringLiteral("vod_seasons"), QStringLiteral("vod_details"), QStringLiteral("vod_generations"), QStringLiteral("vod_sync_runs"), QStringLiteral("vod_progress"), QStringLiteral("vod_movie_lists"), QStringLiteral("vod_series_history"), QStringLiteral("vod_series_state")})
             connection.sql(QStringLiteral("DELETE FROM %1 WHERE profile=?").arg(table), {uuid(id)});
         connection.commit(); return {};
     });
@@ -721,6 +796,19 @@ Outcome SqliteVodStore::checkpoint(const ContentRef &ref, const VodProgress &pro
             {progress.positionMs, optionalNumber(progress.durationMs), int(progress.status), optionalString(progress.contentRevision),
              progress.updatedAtUtc.toMSecsSinceEpoch(), QVariant::fromValue(progress.sequence), QJsonDocument(progress.trackPreferences).toJson(QJsonDocument::Compact), ref.key(), uuid(progress.sessionToken), QVariant::fromValue(progress.sequence)});
         if (update.numRowsAffected() != 1) throw Error{ErrorCode::Cancelled, context.operationId};
+        if (ref.kind == ContentKind::Episode && ref.parentNamespace) {
+            const auto series = parentSeries(ref);
+            if (progress.playbackCheckpoint) {
+                connection.sql(QStringLiteral("UPDATE vod_series_state SET continue_hidden=0 WHERE series=? AND continue_hidden=1 AND blocked_session<>?"), {series.key(), uuid(progress.sessionToken)});
+                connection.sql(QStringLiteral("INSERT INTO vod_series_history(series,profile,namespace,provider_id,episode_id,updated) VALUES(?,?,?,?,?,?) ON CONFLICT(series) DO UPDATE SET episode_id=excluded.episode_id,updated=excluded.updated"),
+                    {series.key(), uuid(ref.profileId), uuid(ref.catalogNamespace), series.providerItemId, ref.providerItemId, progress.updatedAtUtc.toMSecsSinceEpoch()});
+            }
+            if (completed && progress.status == WatchStatus::Watched) {
+                auto remaining = connection.sql(QStringLiteral("SELECT COUNT(*),SUM(CASE WHEN p.status=1 OR (p.duration>0 AND p.position>p.duration*0.95) THEN 0 ELSE 1 END) FROM vod_episode_links l JOIN vod_items i ON i.identity=l.episode LEFT JOIN vod_seasons s ON s.series=l.series AND s.season=l.season LEFT JOIN vod_progress p ON p.identity=l.episode WHERE l.series=? AND COALESCE(s.number,CASE WHEN l.season='0' THEN 0 ELSE -1 END)<>0"), {series.key()});
+                if (remaining.next() && remaining.value(0).toInt() > 0 && remaining.value(1).toInt() == 0)
+                    connection.sql(QStringLiteral("UPDATE vod_movie_lists SET to_watch=0 WHERE identity=?"), {series.key()});
+            }
+        }
         if (completed && ref.kind == ContentKind::Movie && progress.status == WatchStatus::Watched)
             connection.sql(QStringLiteral("UPDATE vod_movie_lists SET to_watch=0 WHERE identity=?"), {ref.key()});
         connection.current(); connection.commit(); return {};
@@ -730,7 +818,7 @@ Result<MovieListState> SqliteVodStore::readMovieLists(const ContentRef &ref, con
 {
     return guarded<MovieListState>(context, [&]() -> MovieListState {
         Connection connection(m_path, context); connection.open(); connection.begin(false); connection.checkRef(ref);
-        if (ref.kind != ContentKind::Movie) throw Error{ErrorCode::ContentUnavailable, context.operationId};
+        if (ref.kind != ContentKind::Movie && ref.kind != ContentKind::Series) throw Error{ErrorCode::ContentUnavailable, context.operationId};
         auto row = connection.sql(QStringLiteral("SELECT to_watch,favourite FROM vod_movie_lists WHERE identity=?"), {ref.key()});
         const MovieListState result = row.next() ? MovieListState{row.value(0).toBool(), row.value(1).toBool()} : MovieListState{};
         row.finish(); connection.commit(); return result;
@@ -740,7 +828,7 @@ Result<MovieListState> SqliteVodStore::setMovieList(const ContentRef &ref, Movie
 {
     return guarded<MovieListState>(context, [&]() -> MovieListState {
         Connection connection(m_path, context); connection.open(); connection.begin(); connection.checkRef(ref);
-        if (ref.kind != ContentKind::Movie || (list != MovieList::ToWatch && list != MovieList::Favourites))
+        if ((ref.kind != ContentKind::Movie && ref.kind != ContentKind::Series) || (list != MovieList::ToWatch && list != MovieList::Favourites))
             throw Error{ErrorCode::InvalidResponse, context.operationId};
         const auto column = list == MovieList::ToWatch ? QStringLiteral("to_watch") : QStringLiteral("favourite");
         connection.sql(QStringLiteral("INSERT INTO vod_movie_lists(identity,profile,namespace,kind,provider_id,parent,%1) VALUES(?,?,?,?,?,?,?) ON CONFLICT(identity) DO UPDATE SET %1=excluded.%1").arg(column),
@@ -765,6 +853,81 @@ Result<std::optional<VodProgress>> SqliteVodStore::read(const ContentRef &ref, c
         result.trackPreferences = QJsonDocument::fromJson(query.value(7).toByteArray()).object();
         result.updatedAtUtc = QDateTime::fromMSecsSinceEpoch(query.value(6).toLongLong(), QTimeZone::UTC);
         return result;
+    });
+}
+}
+
+namespace OKILTV::Vod {
+Result<SeriesProgress> SqliteVodStore::readSeriesProgress(const ContentRef &series, const RequestContext &context) {
+    return guarded<SeriesProgress>(context, [&]() {
+        Connection connection(m_path, context); connection.open(); connection.begin(false); connection.checkRef(series);
+        if (series.kind != ContentKind::Series) throw Error{ErrorCode::ContentUnavailable, context.operationId};
+        SeriesProgress result;
+        auto hidden = connection.sql(QStringLiteral("SELECT continue_hidden FROM vod_series_state WHERE series=?"), {series.key()});
+        if (hidden.next()) result.continuationHidden = hidden.value(0).toBool();
+        hidden.finish();
+        auto history = connection.sql(QStringLiteral("SELECT episode_id FROM vod_series_history WHERE series=?"), {series.key()});
+        if (history.next()) result.lastEpisode = ContentRef{series.profileId, series.catalogNamespace, ContentKind::Episode, history.value(0).toString(), series.providerItemId};
+        history.finish();
+        auto target=connection.sql(QStringLiteral("SELECT i.provider_id FROM vod_series_continue v JOIN vod_items i ON i.identity=v.episode WHERE v.series=?"),{series.key()});
+        if (target.next()) result.continuationEpisode=ContentRef{series.profileId,series.catalogNamespace,ContentKind::Episode,target.value(0).toString(),series.providerItemId};
+        target.finish();
+        auto rows = connection.sql(QStringLiteral("SELECT provider_id,position,duration,status,updated,track_preferences FROM vod_progress WHERE profile=? AND namespace=? AND kind=2 AND parent=? AND position IS NOT NULL"), {uuid(series.profileId),uuid(series.catalogNamespace),series.providerItemId});
+        while (rows.next()) {
+            ContentRef ref{series.profileId,series.catalogNamespace,ContentKind::Episode,rows.value(0).toString(),series.providerItemId};
+            VodProgress progress; progress.positionMs=rows.value(1).toLongLong();
+            if (!rows.value(2).isNull()) progress.durationMs=rows.value(2).toLongLong();
+            progress.status=WatchStatus(rows.value(3).toInt()); progress.updatedAtUtc=QDateTime::fromMSecsSinceEpoch(rows.value(4).toLongLong(),QTimeZone::UTC);
+            progress.trackPreferences=QJsonDocument::fromJson(rows.value(5).toByteArray()).object();
+            result.episodes.insert(ref.key(),progress);
+        }
+        rows.finish(); connection.commit(); return result;
+    });
+}
+}
+
+namespace OKILTV::Vod {
+Outcome SqliteVodStore::setSeriesWatched(const SeriesWatchedChange &change, const RequestContext &context)
+{
+    return guarded<Success>(context, [&]() -> Success {
+        Connection connection(m_path, context); connection.open(); connection.begin(); connection.checkRef(change.series);
+        if (change.series.kind != ContentKind::Series || change.episodes.isEmpty()) throw Error{ErrorCode::InvalidResponse, context.operationId};
+        QSet<QByteArray> seen;
+        for (const auto &ref : change.episodes) {
+            if (!ref.valid() || ref.kind != ContentKind::Episode || parentSeries(ref) != change.series || seen.contains(ref.key()))
+                throw Error{ErrorCode::InvalidResponse, context.operationId};
+            seen.insert(ref.key());
+            const bool active = ref == change.activeEpisode;
+            VodProgress progress;
+            auto saved = connection.sql(QStringLiteral("SELECT position,duration,track_preferences,content_revision FROM vod_progress WHERE identity=?"), {ref.key()});
+            if (saved.next()) {
+                progress.positionMs = saved.value(0).toLongLong();
+                if (!saved.value(1).isNull()) progress.durationMs = saved.value(1).toLongLong();
+                progress.trackPreferences = QJsonDocument::fromJson(saved.value(2).toByteArray()).object();
+                if (!saved.value(3).isNull()) progress.contentRevision = saved.value(3).toString();
+            }
+            saved.finish();
+            if (active) {
+                if (change.activeProgress) progress = *change.activeProgress;
+                progress.sessionToken = change.blockedSession; progress.sequence = change.activeSequence;
+            } else { progress.sessionToken = QUuid::createUuid(); progress.sequence = 1; }
+            if (progress.positionMs < 0 || (progress.durationMs && *progress.durationMs <= 0) || progress.sessionToken.isNull() || progress.sequence == 0 || progress.sequence > quint64(std::numeric_limits<qint64>::max()))
+                throw Error{ErrorCode::InvalidResponse, context.operationId};
+            if (!active)
+                connection.sql(QStringLiteral("INSERT INTO vod_progress(identity,profile,namespace,kind,provider_id,parent,session,sequence) VALUES(?,?,?,?,?,?,?,0) ON CONFLICT(identity) DO UPDATE SET session=excluded.session,sequence=0"),
+                    {ref.key(),uuid(ref.profileId),uuid(ref.catalogNamespace),int(ref.kind),ref.providerItemId,ref.parentNamespace.value_or(QString{}),uuid(progress.sessionToken)});
+            auto updated = connection.sql(QStringLiteral("UPDATE vod_progress SET position=?,duration=?,status=?,track_preferences=?,content_revision=?,updated=?,sequence=? WHERE identity=? AND session=? AND sequence<?"),
+                {change.watched ? progress.positionMs : 0,optionalNumber(progress.durationMs),int(change.watched ? WatchStatus::Watched : WatchStatus::InProgress),
+                 QJsonDocument(progress.trackPreferences).toJson(QJsonDocument::Compact),optionalString(progress.contentRevision),QDateTime::currentMSecsSinceEpoch(),
+                 QVariant::fromValue(progress.sequence),ref.key(),uuid(progress.sessionToken),QVariant::fromValue(progress.sequence)});
+            if (updated.numRowsAffected() != 1) throw Error{ErrorCode::Cancelled, context.operationId};
+        }
+        if (change.watched) {
+            connection.sql(QStringLiteral("INSERT INTO vod_series_state(series,profile,namespace,continue_hidden,blocked_session) VALUES(?,?,?,1,?) ON CONFLICT(series) DO UPDATE SET continue_hidden=1,blocked_session=excluded.blocked_session"),
+                {change.series.key(),uuid(change.series.profileId),uuid(change.series.catalogNamespace),uuid(change.blockedSession)});
+            connection.sql(QStringLiteral("UPDATE vod_movie_lists SET to_watch=0 WHERE identity=?"), {change.series.key()});
+        }
+        connection.current(); connection.commit(); return {};
     });
 }
 }

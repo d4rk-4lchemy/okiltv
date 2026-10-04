@@ -18,6 +18,8 @@ Button {
     property bool borderless: false
     property bool barMode: false
     property bool glassMode: false
+    property bool retainEnabledAppearance: false
+    readonly property bool visuallyEnabled: enabled || retainEnabledAppearance
     property real iconInset: control.compact ? 10 : 9
     property color iconColor: Theme.textPrimary
 
@@ -42,7 +44,7 @@ Button {
             fillMode: Image.PreserveAspectFit
             smooth: true
             mipmap: true
-            opacity: control.enabled ? 1.0 : 0.36
+            opacity: control.visuallyEnabled ? 1.0 : 0.36
         }
 
         Canvas {
@@ -202,7 +204,7 @@ Button {
     background: Rectangle {
         radius: Theme.radiusS
         color: {
-            if (!control.enabled)
+            if (!control.visuallyEnabled)
                 return control.barMode ? "transparent" : Theme.surface
             if (control.glassMode) {
                 if (control.down)

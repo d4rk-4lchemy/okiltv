@@ -9,6 +9,34 @@ using namespace OKILTV::Player;
 class VodContractTests : public QObject {
     Q_OBJECT
 private slots:
+    void episodeTrackFallbackUsesCurrentConfirmation_data() {
+        QTest::addColumn<bool>("savedTarget");
+        QTest::newRow("current-confirmation") << false;
+        QTest::newRow("saved-target") << true;
+    }
+    void episodeTrackFallbackUsesCurrentConfirmation() {
+        QFETCH(bool,savedTarget);
+        Fixture fixture;const auto request=requestFor(fixture.source);
+        const ContentRef series{fixture.source.revision.profileId,fixture.source.revision.catalogNamespace,ContentKind::Series,QStringLiteral("series"),{}};
+        const ContentRef previous{series.profileId,series.catalogNamespace,ContentKind::Episode,QStringLiteral("first"),series.providerItemId};
+        auto target=previous;target.providerItemId=QStringLiteral("second");
+        const QJsonObject oldChoice{{QStringLiteral("sub"),QJsonObject{{QStringLiteral("mode"),QStringLiteral("track")},{QStringLiteral("ordinal"),0}}}};
+        const QJsonObject currentChoice{{QStringLiteral("sub"),QJsonObject{{QStringLiteral("mode"),QStringLiteral("off")}}}};
+        VodDetails details;details.ref=series;details.episodes={{previous,series,QStringLiteral("1"),1,0,QStringLiteral("First"),Availability::Available},{target,series,QStringLiteral("1"),2,1,QStringLiteral("Second"),Availability::Available}};
+        QVERIFY(std::holds_alternative<Success>(fixture.store->storeDetails(details,request)));
+        auto save=[&](const ContentRef &ref) {
+            VodProgress progress;progress.sessionToken=QUuid::createUuid();progress.sequence=1;progress.trackPreferences=oldChoice;
+            QVERIFY(std::holds_alternative<Success>(fixture.store->beginSession(ref,progress.sessionToken,request)));
+            QVERIFY(std::holds_alternative<Success>(fixture.store->checkpoint(ref,progress,request)));
+        };
+        save(previous);if(savedTarget)save(target);
+        VodModule module({true},[&](){return fixture.composition();});
+        PlaybackPreferences options;options.inheritedTracks=currentChoice;
+        module.controller()->play(target,options);
+        QTRY_VERIFY(fixture.engine && fixture.engine->loads==1);
+        QCOMPARE(fixture.engine->request.trackPreferences,savedTarget ? oldChoice : currentChoice);
+        module.shutdown();
+    }
     void movieListsCompletionAndRewatch()
     {
         Fixture fixture;
@@ -641,6 +669,22 @@ private slots:
         QCOMPARE(std::get<Error>(events.last().result).code, ErrorCode::InvalidResponse);
         QVERIFY(!fixture.engine); QCOMPARE(fixture.releases, 0);
         QVERIFY(!std::get<Error>(events.last().result).message().contains(QStringLiteral("synthetic-secret")));
+    }
+    void sourcePolicyChangeDuringLegacyReleaseCannotStart()
+    {
+        Fixture fixture; fixture.deferRelease = true;
+        const auto allowed = std::make_shared<std::atomic_bool>(true);
+        fixture.source.policyCurrent = [allowed]() { return allowed->load(); };
+        fixture.store = std::make_shared<MemoryStore>(fixture.source);
+        VodModule module({true}, [&]() { return fixture.composition(); });
+        QList<VodEvent> events;
+        connect(module.controller(), &VodController::eventCompleted, module.controller(), [&](const VodEvent &event) { events.append(event); });
+        module.controller()->play(refFor(fixture.source));
+        QTRY_VERIFY(bool(fixture.releaseAck));
+        allowed->store(false); fixture.releaseAck(Success{});
+        QTRY_COMPARE(events.size(), 1);
+        QCOMPARE(std::get<Error>(events.first().result).code, ErrorCode::Cancelled);
+        QVERIFY(!fixture.engine);
     }
     void handoffWaitsForLegacyAndStopAcknowledgement()
     {

@@ -28,6 +28,7 @@ public:
     // credentials. The integration must call finishSourceChange afterwards.
     void prepareSourceChange(const QUuid &, PlaybackCoordinator::Completion);
     void finishSourceChange(const QUuid &);
+    std::function<void()> playbackInterrupted;
     std::function<void(const Error &)> progressFailed;
     std::function<void(const SessionSnapshot &)> changed;
 private:

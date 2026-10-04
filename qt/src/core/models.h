@@ -40,8 +40,9 @@ struct ServerProfile
     QString xtreamPassword;
     QString xtreamServerTimezone;
     int catchupSafetyMinutes { 3 };
-    bool vodEnabled { false };
+    bool vodEnabled { true };
     quint64 vodCredentialRevision { 1 };
+    int vodDefaultsVersion { 1 };
 
     QString m3uUrl;
     QString m3uFilePath;

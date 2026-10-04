@@ -44,7 +44,7 @@ Item {
     property date currentClockTime: new Date()
     readonly property string currentClockText: Qt.locale("en_US").toString(root.currentClockTime, root.dateTime.clockPattern)
     property bool hasPlaybackChannel: root.player.currentChannel.id !== undefined
-    readonly property bool vodActive: root.vod !== null && root.vod.active
+    readonly property bool vodActive: root.vod !== null && (root.vod.active || root.vod.episodeTransition)
     property bool vodInfoOpen: false
     property string vodSidebarError: ""
     onVodActiveChanged: {
@@ -145,7 +145,7 @@ Item {
         const query = root.groupPickerSearchText.trim().toLowerCase()
         if (root.groupPickerForVod) {
             const categories = root.vodSidebar ? root.vodSidebar.categories : []
-            return [{id: "", name: "All movies", isAll: true}].concat(categories)
+            return [{id: "", name: root.vod && root.vod.activeSeries ? "All series" : "All movies", isAll: true}].concat(categories)
                 .filter(function(group) { return group.name.toLowerCase().indexOf(query) >= 0 })
         }
         const total = root.liveGroups.totalCount
@@ -208,6 +208,7 @@ Item {
 
         return rows
     }
+    readonly property bool vodSeasonFocused: vodInfoPanel.seasonFocused
     property bool searchFieldActive: channelSearchHeader.field.activeFocus || vodListPanel.searchActive
         || groupSearchHeader.field.activeFocus
         || sourcePickerSearchField.activeFocus
@@ -215,12 +216,24 @@ Item {
     readonly property bool topBarVisible: !root.shell.fullscreen && root.showHoverUi
     readonly property real topBarReservedHeight: root.mainWindow ? root.mainWindow.topBarReservedHeight : 0
     readonly property real topOverlayMargin: root.topBarReservedHeight + Theme.spacingL
+    readonly property real mediaNavigationInset: root.mainWindow
+        ? root.mainWindow.mediaNavigationHeight : 0
+    readonly property real centerOverlayMargin: root.topOverlayMargin + root.mediaNavigationInset
+    function mediaNavigationInsetFor(left, width) {
+        if (!root.mediaNavigationInset || !root.mainWindow) return 0
+        const navigationWidth = root.mainWindow.mediaNavigationWidth
+        return left < (root.width + navigationWidth) / 2
+            && left + width > (root.width - navigationWidth) / 2
+                ? root.mediaNavigationInset : 0
+    }
     property bool topBarExternalHideLock: false
     onTopBarExternalHideLockChanged: updateAutoHide()
     onLeftPickerOpenChanged: clearLeftPaneHideIfSettled()
     property bool showShellChrome: root.shell.overlaysVisible
         && root.shell.activeOverlay === "none"
         && !root.leftPickerOpen
+        && !(root.mainWindow && (root.mainWindow.vodMounted || root.mainWindow.pendingLiveNavigation))
+        && !(root.vod && root.vod.liveTransition)
     readonly property bool chromeAnimationsRunning: vodListPanel.animating || vodInfoPanel.animating
         || leftChromeSlideAnimation.running
         || leftChromeOpacityAnimation.running
@@ -588,7 +601,8 @@ Item {
 
     function handleStopPlaybackAction() {
         if (root.vodActive) {
-            root.vod.stop()
+            if (root.vod.activeSeries) root.vod.returnToSeriesLibrary()
+            else root.vod.stop()
             root.revealUi("pointer")
             return
         }
@@ -2613,9 +2627,18 @@ Item {
         root.shell.overlaysVisible = false
     }
 
+    function returnToVodLibrary() {
+        interactionFocusTarget.forceActiveFocus()
+        if (root.vod.activeSeries) root.vod.returnToSeriesLibrary()
+        else if (root.mainWindow && root.mainWindow.toggleVod()) root.vod.stop()
+    }
+
     function handleEscape() {
-        if (root.vodActive && !root.audioPickerOpen && !root.subtitlePickerOpen && root.shell.activeOverlay === "none" && root.showShellChrome) {
-            root.closeTransientPlayerChrome()
+        if (vodInfoPanel.seasonPopupOpen) { vodInfoPanel.closeSeasonPopup(); return true }
+        if (root.vodActive && !root.audioPickerOpen && !root.subtitlePickerOpen && root.shell.activeOverlay === "none") {
+            if (root.chromeAnimationsRunning) return true
+            if (root.shell.overlaysVisible) root.closeTransientPlayerChrome()
+            else root.returnToVodLibrary()
             return true
         }
         if (root.multiviewSelectionMode) {
@@ -3070,7 +3093,12 @@ Item {
             }
             return false
         }
+        if (vodInfoPanel.handleEpisodeKey(event)) { root.noteKeyboardNavigationKey(); return true }
         switch (event.key) {
+        case Qt.Key_Backspace:
+            if (!root.shell.overlaysVisible && !root.chromeAnimationsRunning)
+                root.returnToVodLibrary()
+            return true
         case Qt.Key_Left:
             if (root.chromeAnimationsRunning) return true
             if (root.showShellChrome && vodListPanel.listActive) {
@@ -3083,7 +3111,10 @@ Item {
             }
             return true
         case Qt.Key_Right:
-            root.vodInfoOpen = true; root.noteKeyboardNavigationKey(); interactionFocusTarget.forceActiveFocus(); return true
+            root.vodInfoOpen = true; root.noteKeyboardNavigationKey()
+            if (root.vod.activeSeries) vodInfoPanel.focusEpisodes()
+            else interactionFocusTarget.forceActiveFocus()
+            return true
         case Qt.Key_Up:
         case Qt.Key_Down:
             root.vodInfoOpen = false; root.noteKeyboardNavigationKey(); vodListPanel.navigate(event.key === Qt.Key_Up ? -1 : 1); return true
@@ -4813,7 +4844,7 @@ Item {
             anchors.fill: parent
             anchors.leftMargin: 4
             anchors.rightMargin: 8
-            anchors.topMargin: Theme.spacingM
+            anchors.topMargin: Theme.spacingM + root.mediaNavigationInsetFor(leftChrome.x, leftChrome.width)
             anchors.bottomMargin: Theme.spacingM
             spacing: Theme.spacingS
 
@@ -4872,7 +4903,7 @@ Item {
                 switchActionObjectName: "ui.player.groupReturnAction"
                 text: root.groupPickerSearchText
                 placeholderText: "Search groups"
-                switchText: root.groupPickerForVod ? "Movies →" : "Channels →"
+                switchText: root.groupPickerForVod ? (root.vod.activeSeries ? "Series →" : "Movies →") : "Channels →"
                 uiTransparency: root.uiTransparency
                 neutralPalette: root.groupPickerForVod
                 onTextEdited: function(text) {
@@ -4979,6 +5010,7 @@ Item {
                     visible: root.groupPickerVisibleRows.length > 0
                     ScrollBar.vertical: ScrollBar {
                         id: groupPickerScrollBar
+                        parent: groupPickerView
                         policy: groupPickerView.contentHeight > groupPickerView.height
                             ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
                         interactive: true
@@ -4990,13 +5022,14 @@ Item {
                         background: Rectangle {
                             implicitWidth: 6
                             radius: width / 2
-                            color: "#2a20364d"
+                            color: root.groupPickerForVod ? Theme.overlaySurfaceMuted : "#2a20364d"
                         }
                         contentItem: Rectangle {
                             implicitWidth: 6
                             radius: width / 2
-                            color: groupPickerScrollBar.pressed
-                                ? Theme.borderStrong : "#8c4e88b8"
+                            color: root.groupPickerForVod
+                                ? Theme.vodScrollBarColor(groupPickerScrollBar.pressed, groupPickerScrollBar.hovered)
+                                : groupPickerScrollBar.pressed ? Theme.borderStrong : "#8c4e88b8"
                         }
                     }
 
@@ -5004,7 +5037,8 @@ Item {
                         required property var modelData
                         objectName: "ui.player.groupRow." + modelData.id
 
-                        width: ListView.view.width
+                        width: Math.max(0, ListView.view.width - (root.groupPickerForVod
+                            ? groupPickerScrollBar.width + Theme.vodScrollBarGap : 0))
                         height: 62
                         radius: 4
                         color: root.groupPickerHighlightedId === modelData.id ? Theme.uiBackground("#96182431", root.uiTransparency) : "transparent"
@@ -5772,6 +5806,7 @@ Item {
         uiTransparency: root.uiTransparency
         shown: root.vodActive && root.showShellChrome && (root.vodPanelsFit || !root.vodInfoOpen)
         inputAllowed: !root.chromeAnimationsRunning
+        topContentInset: root.mediaNavigationInsetFor(vodListPanel.x, vodListPanel.width)
         onGroupsRequested: root.openGroupPicker("pointer", true)
         onInteraction: function(source) {
             if (source === "keyboard") root.noteKeyboardNavigationKey()
@@ -5795,7 +5830,8 @@ Item {
         anchors.left: parent.left
         anchors.leftMargin: (groupPanel ? leftChrome.width : vodListPanel.width) + Theme.spacingL
         anchors.top: parent.top
-        anchors.topMargin: root.topOverlayMargin
+        anchors.topMargin: root.topBarReservedHeight
+            + root.mediaNavigationInsetFor(vodBackButton.x, vodBackButton.width) + Theme.spacingL
         opacity: groupPanel ? leftChrome.opacity : vodListPanel.opacity
         transform: Translate {
             x: vodBackButton.groupPanel ? leftChromeShift.x : vodListPanel.slideOffset
@@ -5804,16 +5840,13 @@ Item {
         z: 3
         borderless: true
         iconSource: root.iconPath("left-arrow.svg")
-        caption: "Back to movies"
+        caption: root.vod.activeSeries ? "Back to series" : "Back to movies"
         uiTransparency: root.uiTransparency
         background: Rectangle {
             radius: 4
             color: Theme.uiBackground(Theme.overlaySurfaceInteractive, root.uiTransparency)
         }
-        onClicked: {
-            interactionFocusTarget.forceActiveFocus()
-            if (root.mainWindow && root.mainWindow.toggleVod()) root.vod.stop()
-        }
+        onClicked: root.returnToVodLibrary()
         onHoveredChanged: root.updateAutoHide()
     }
 
@@ -5828,12 +5861,23 @@ Item {
         anchors.bottom: parent.bottom
         z: 2
         movie: root.vodSidebar ? root.vodSidebar.playingMovie : ({})
+        episodeModel: root.vod && root.vod.activeSeries ? root.vod.episodesModel : null
         uiTransparency: root.uiTransparency
         shown: root.vodActive && root.showShellChrome && (root.vodPanelsFit || root.vodInfoOpen)
         inputAllowed: !root.chromeAnimationsRunning
+        topContentInset: root.mediaNavigationInsetFor(vodInfoPanel.x, vodInfoPanel.width)
         onHoveredChanged: root.updateAutoHide()
+        onSettingsRequested: root.openSettingsOverlay("", "pointer")
     }
 
+    Connections {
+        target: root.vod
+        function onEpisodeStarted() {
+            root.vodInfoOpen = false
+            if (root.shell.activeOverlay === "none") root.closeTransientPlayerChrome()
+            else root.shell.overlaysVisible = false
+        }
+    }
     Connections {
         target: root.vodSidebar
         function onPlaybackStarted() { root.vodInfoOpen = false; root.closeTransientPlayerChrome() }
@@ -5854,7 +5898,7 @@ Item {
         height: 48
         anchors.top: parent.top
         anchors.horizontalCenter: parent.horizontalCenter
-        anchors.topMargin: root.topOverlayMargin
+        anchors.topMargin: root.centerOverlayMargin
         opacity: root.showShellChrome ? 1 : 0
         z: 2
         compact: true
@@ -5938,7 +5982,7 @@ Item {
             anchors.fill: parent
             anchors.leftMargin: 12
             anchors.rightMargin: 12
-            anchors.topMargin: 14
+            anchors.topMargin: 14 + root.mediaNavigationInsetFor(rightChrome.x, rightChrome.width)
             anchors.bottomMargin: 14
             spacing: 10
 
@@ -6507,11 +6551,12 @@ Item {
                     implicitWidth: bottomChrome.mediaButtonSize
                     implicitHeight: bottomChrome.mediaButtonSize
                     iconSource: root.iconPath("movie-info.svg")
-                    caption: root.vodInfoOpen ? "Movie list" : "Movie information"
+                    caption: root.vod.activeSeries ? (root.vodInfoOpen ? "Series list" : "Episodes") : (root.vodInfoOpen ? "Movie list" : "Movie information")
                     onClicked: {
                         root.vodInfoOpen = !root.vodInfoOpen
-                        interactionFocusTarget.forceActiveFocus()
                         root.revealUi("pointer")
+                        if (root.vodInfoOpen && root.vod.activeSeries) vodInfoPanel.focusEpisodes()
+                        else interactionFocusTarget.forceActiveFocus()
                     }
                 }
 
@@ -6524,11 +6569,12 @@ Item {
                     iconInset: 1
                     iconSource: root.iconPath("previous-channel.svg")
                     objectName: "ui.live.previousChannel"
-                    visible: !root.vodActive
-                    caption: "Previous channel"
-                    enabled: root.hasChannelList
+                    visible: !root.vodActive || root.vod.activeSeries
+                    caption: root.vodActive ? "Previous episode" : "Previous channel"
+                    enabled: root.vodActive ? root.vod.hasPreviousEpisode && !root.vod.episodeTransition : root.hasChannelList
                     onClicked: {
-                        root.activateChannelRelative(-1, false)
+                        if (root.vodActive) root.vod.previousEpisode()
+                        else root.activateChannelRelative(-1, false)
                         root.revealUi("pointer")
                     }
                 }
@@ -6576,11 +6622,12 @@ Item {
                     iconInset: 1
                     iconSource: root.iconPath("next-channel.svg")
                     objectName: "ui.live.nextChannel"
-                    visible: !root.vodActive
-                    caption: "Next channel"
-                    enabled: root.hasChannelList
+                    visible: !root.vodActive || root.vod.activeSeries
+                    caption: root.vodActive ? "Next episode" : "Next channel"
+                    enabled: root.vodActive ? root.vod.hasNextEpisode && !root.vod.episodeTransition : root.hasChannelList
                     onClicked: {
-                        root.activateChannelRelative(1, false)
+                        if (root.vodActive) root.vod.nextEpisode()
+                        else root.activateChannelRelative(1, false)
                         root.revealUi("pointer")
                     }
                 }
@@ -6866,6 +6913,7 @@ Item {
                 Item {
                     id: guideCollapseStrip
                     anchors.top: parent.top
+                    anchors.topMargin: root.mediaNavigationInset
                     anchors.left: parent.left
                     anchors.right: parent.right
                     height: root.shell.layoutBand === "compact" ? 28 : 30
@@ -6890,7 +6938,7 @@ Item {
                     onDownloadRequested: function(channel, program) { root.mainWindow.requestCatchupDownload(channel, program) }
                     id: guidePage
                     anchors.fill: parent
-                    anchors.topMargin: root.shell.layoutBand === "compact" ? 28 : 30
+                    anchors.topMargin: (root.shell.layoutBand === "compact" ? 28 : 30) + root.mediaNavigationInset
                     overlayMode: true
                     onCollapseRequested: root.collapseGuideOverlayToVideoOnly()
                     onPictureInPictureRequested: function(channelId) {
@@ -6944,6 +6992,7 @@ Item {
                 id: settingsPage
                 anchors.fill: settingsOverlayFrame
                 overlayMode: true
+                navigationTopInset: root.mediaNavigationInsetFor(settingsOverlayFrame.x, settingsOverlayFrame.width)
             }
         }
     }
@@ -7306,7 +7355,7 @@ Item {
     Item {
         anchors.top: parent.top
         anchors.horizontalCenter: parent.horizontalCenter
-        anchors.topMargin: root.topOverlayMargin
+        anchors.topMargin: root.centerOverlayMargin
         visible: root.multiviewSelectionMode
         opacity: visible ? 1 : 0
         z: 9
@@ -7341,7 +7390,7 @@ Item {
     Item {
         anchors.top: parent.top
         anchors.horizontalCenter: parent.horizontalCenter
-        anchors.topMargin: root.topOverlayMargin
+        anchors.topMargin: root.centerOverlayMargin
         visible: root.numericHudVisible
         opacity: visible ? 1 : 0
         z: 9

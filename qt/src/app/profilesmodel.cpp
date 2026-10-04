@@ -89,11 +89,12 @@ QString ProfilesModel::addXtreamProfile(
     const QString &password,
     const QString &xmltvUrl,
     const int autoRefreshIntervalHours, // NOLINT(bugprone-easily-swappable-parameters) — fixed QML positional API.
-    const int catchupSafetyMinutes)
+    const int catchupSafetyMinutes, const bool vodEnabled)
 {
     ServerProfile profile;
     profile.name = name.trimmed();
     profile.type = ProfileType::Xtream;
+    profile.vodEnabled = vodEnabled;
     profile.xtreamBaseUrl = baseUrl.trimmed();
     profile.xtreamUsername = username.trimmed();
     profile.xtreamPassword = password.trimmed();
@@ -102,6 +103,7 @@ QString ProfilesModel::addXtreamProfile(
     profile.autoRefreshIntervalHours = normalizeAutoRefreshIntervalHours(autoRefreshIntervalHours);
 
     if (!m_settings->addProfile(profile)) {
+        emit profileMutationFailed(m_settings->lastSaveError());
         return {};
     }
     reload();
@@ -124,6 +126,7 @@ QString ProfilesModel::addM3uUrlProfile(
     profile.autoRefreshIntervalHours = normalizeAutoRefreshIntervalHours(autoRefreshIntervalHours);
 
     if (!m_settings->addProfile(profile)) {
+        emit profileMutationFailed(m_settings->lastSaveError());
         return {};
     }
     reload();
@@ -140,6 +143,7 @@ QString ProfilesModel::addM3uFileProfile(const QString &name, const QString &fil
     profile.xmltvUrl = xmltvUrl.trimmed();
 
     if (!m_settings->addProfile(profile)) {
+        emit profileMutationFailed(m_settings->lastSaveError());
         return {};
     }
     reload();

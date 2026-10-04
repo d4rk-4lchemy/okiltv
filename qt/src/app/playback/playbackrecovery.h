@@ -9,6 +9,8 @@ struct StreamHealth {
     std::optional<double> cacheDurationSeconds;
     std::optional<double> cacheSpeedBytesPerSecond;
     double bufferTargetSeconds { 0.0 };
+    std::optional<double> cacheEndSeconds;
+    bool sampleFresh { true };
 };
 struct RecoveryContext {
     bool catchup { false };
@@ -100,5 +102,13 @@ private:
     std::optional<double> m_lastObservedCacheDurationSeconds;
     std::optional<double> m_lastReconnectStabilizationCacheDurationSeconds;
     std::optional<double> m_lastDisplayedVideoFramePtsSeconds;
+    std::optional<double> m_lastReconnectCacheEndSeconds;
+    std::optional<qint64> m_stablePlaybackStartedMs;
+    std::optional<qint64> m_lastRecoveryObservationMs;
+    std::optional<qint64> m_lastRecoveryDeliveryMs;
+    std::optional<double> m_recoveryWindowCacheSeconds;
+    qint64 m_recoveryWindowStartedMs { 0 };
+    bool m_latestRecoveryPlayable { false };
+    bool m_stabilizationReady { false };
 };
 } // namespace OKILTV::App::Playback

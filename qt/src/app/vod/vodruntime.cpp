@@ -1,11 +1,14 @@
 #include "app/playback/trackpresentation.h"
 #include "vodruntime.h"
+#include "vodepisodesmodel.h"
 #include "vodmediaprobe.h"
 #include "app/multiviewcontroller.h"
 #include "app/dvrcontroller.h"
 #include "app/timeshiftcontroller.h"
 #include "core/settingsmanager.h"
 #include "core/sourcestore.h"
+#include "core/sourcegrouppreferences.h"
+#include <stdexcept>
 #include "core/appdatapaths.h"
 #include "core/vod/providers/xtreamvodprovider.h"
 #include "player/mpvplaybackengine.h"
@@ -57,14 +60,171 @@ VodRuntime::VodRuntime(Core::SettingsManager *settings, App::MultiViewController
     : QObject(parent), m_settings(settings), m_multiview(multiview), m_dvr(dvr), m_timeshift(timeshift)
 {
     m_module = std::make_unique<VodModule>();
-    if (settings->current().vodEnabled) initialize(std::move(engineFactory));
-    else m_deferredFactory = std::move(engineFactory);
+    m_episodes = std::make_unique<VodEpisodesModel>(this);
+    connect(m_episodes.get(), &VodEpisodesModel::playRequested, this, [this](const ContentRef &ref,bool fromBeginning) { startEpisode(ref,fromBeginning); });
+    connect(m_episodes.get(), &VodEpisodesModel::changed, this, [this]() {
+        if (!m_pendingEpisodeEnd || m_episodes->busy()) return;
+        const auto pending=std::exchange(m_pendingEpisodeEnd,{});
+        completeEpisode(pending->first,pending->second);
+    });
+    connect(m_episodes.get(), &VodEpisodesModel::loaded, this, [this]() {
+        if (!activeSeries()) return;
+        const auto ref=m_module->session()->snapshot().ref;
+        const auto &details=m_episodes->details();
+        for (const auto &episode : details.episodes) if (episode.ref==ref) {
+            const auto label=m_episodes->selectedEpisode().value(QStringLiteral("label")).toString();
+            if (!details.title.isEmpty()) m_seriesTitle=details.title;
+            const auto seriesTitle=m_seriesTitle;
+            setPlaybackTitle(ref,seriesTitle + QStringLiteral(" · ")+label+QStringLiteral(" · ")+episode.title);
+        }
+        emit stateChanged();
+    });
+    m_deferredFactory = std::move(engineFactory);
+    m_settings->vodPolicyChanged = [this](const QUuid &id) { policyChanged(id); };
+    bool enabled = settings->current().vodEnabled;
+    for (const auto &summary : settings->sourceSummaries()) {
+        updatePolicy(summary.id);
+        const auto profile = settings->profileById(summary.id);
+        enabled = enabled || (profile && profile->type == Core::ProfileType::Xtream && profile->vodEnabled);
+    }
+    if (enabled) initialize(std::move(m_deferredFactory));
 }
-void VodRuntime::enableForSession(const QUuid &profile)
+void VodRuntime::ensureForSource(const QUuid &profile)
 {
     if (m_stopped) return;
-    { QMutexLocker lock(&m_sessionSources->mutex); m_sessionSources->enabled.insert(profile); }
+    const auto saved = m_settings->profileById(profile);
+    if (!saved || saved->type != Core::ProfileType::Xtream || !saved->vodEnabled) return;
     if (!m_module->enabled()) initialize(std::move(m_deferredFactory));
+}
+void VodRuntime::updatePolicy(const QUuid &id, std::optional<QStringList> categories, CatalogKind kind)
+{
+    const auto profile = m_settings->profileById(id);
+    const auto key = id.toString(QUuid::WithoutBraces) + QStringLiteral("|movies");
+    std::lock_guard lock(*m_policies->mutex);
+    auto &policy = m_policies->values[id];
+    ++policy.generation;
+    policy.enabled = profile && profile->type == Core::ProfileType::Xtream && profile->vodEnabled;
+    policy.hidden = m_settings->current().hiddenGroupsByProfile.value(key);
+    policy.configured = m_settings->current().groupOrderByProfile.contains(key);
+    const auto seriesKey = id.toString(QUuid::WithoutBraces) + QStringLiteral("|series");
+    policy.seriesHidden = m_settings->current().hiddenGroupsByProfile.value(seriesKey);
+    policy.seriesConfigured = m_settings->current().groupOrderByProfile.contains(seriesKey);
+    if (categories && kind == CatalogKind::Series) policy.seriesCategories = *categories;
+    else if (policy.seriesCategories.isEmpty()) policy.seriesCategories = m_settings->current().groupOrderByProfile.value(seriesKey);
+    if (categories && kind == CatalogKind::Movies) policy.categories = *categories;
+    else if (policy.categories.isEmpty()) policy.categories = m_settings->current().groupOrderByProfile.value(key);
+}
+void VodRuntime::policyChanged(const QUuid &id)
+{
+    finishLibraryBrowsing(false);
+    cancelLiveNavigation();
+    cancelEpisodeTransition();
+    updatePolicy(id);
+    if (m_module->controller()) m_module->controller()->sourceChanged(id);
+    emit sourceInvalidated(id);
+    emit sourceUpdated(id);
+    const auto saved = m_settings->profileById(id);
+    if (saved && saved->type == Core::ProfileType::Xtream && saved->vodEnabled)
+        synchronizeSource(id.toString(QUuid::WithoutBraces));
+    else {
+        m_queuedSync.remove(id);
+        const auto requests = m_syncRequests.keys();
+        for (const auto &request : requests) if (m_syncRequests.value(request).profile == id) m_syncRequests.remove(request);
+        finishSync(id);
+    }
+}
+void VodRuntime::synchronizeSource(const QString &profileId)
+{
+    const QUuid id(profileId);
+    if (m_stopped || id.isNull()) return;
+    const auto saved = m_settings->profileById(id);
+    if (!saved || saved->type != Core::ProfileType::Xtream || !saved->vodEnabled) return;
+    ensureForSource(id);
+    if (!m_ready) { m_queuedSync.insert(id); return; }
+    updatePolicy(id);
+    m_module->controller()->sourceChanged(id);
+    const auto requests = m_syncRequests.keys();
+    for (const auto &request : requests) if (m_syncRequests.value(request).profile == id) m_syncRequests.remove(request);
+    m_syncing.insert(id); m_syncErrors.remove(id);
+    m_syncRequests.insert(m_module->controller()->scope(id), {id, SyncStage::Scope, {}});
+    emit sourceSyncChanged(id);
+}
+bool VodRuntime::reconcileCategories(const CategorySnapshot &snapshot)
+{
+    auto &settings = m_settings->current();
+    const auto before = settings;
+    const auto id = snapshot.scope.profileId;
+    const auto key = id.toString(QUuid::WithoutBraces) + (snapshot.scope.kind == CatalogKind::Movies ? QStringLiteral("|movies") : QStringLiteral("|series"));
+    QStringList discovered;
+    for (const auto &category : snapshot.categories) if (!discovered.contains(category.id)) discovered.append(category.id);
+    const auto reconciled = Core::reconcileSourceGroups(discovered, {settings.hiddenGroupsByProfile.value(key), settings.groupOrderByProfile.value(key)});
+    settings.hiddenGroupsByProfile[key] = reconciled.hiddenGroups;
+    settings.groupOrderByProfile[key] = reconciled.groupOrder;
+    m_settings->save();
+    if (!m_settings->lastSaveError().isEmpty()) {
+        settings = before; m_syncErrors[id] = m_settings->lastSaveError(); return false;
+    }
+    updatePolicy(id, discovered, snapshot.scope.kind);
+    emit categoriesUpdated(id);
+    return true;
+}
+void VodRuntime::receiveSync(const VodEvent &event)
+{
+    const auto it = m_syncRequests.find(event.operationId);
+    if (it == m_syncRequests.end()) return;
+    auto request = it.value(); m_syncRequests.erase(it);
+    if (const auto *error = std::get_if<Error>(&event.result)) {
+        m_syncErrors[request.profile] = error->message();
+        // Series categories fail independently; movie synchronization still runs.
+        if (request.stage == SyncStage::Scope) { finishSync(request.profile); return; }
+    } else {
+        const auto &value = std::get<PublicValue>(event.result);
+        if (request.stage == SyncStage::Scope) request.scope = std::get<CatalogScope>(value);
+        if (request.stage == SyncStage::Movies || request.stage == SyncStage::Series) {
+            reconcileCategories(std::get<CategorySnapshot>(value));
+        }
+    }
+    auto *controller = m_module->controller();
+    QUuid next;
+    switch (request.stage) {
+    case SyncStage::Scope:
+        request.stage = SyncStage::Movies; next = controller->categories(request.scope, true); break;
+    case SyncStage::Movies: {
+        request.stage = SyncStage::Series;
+        auto series = request.scope; series.kind = CatalogKind::Series;
+        next = controller->categories(series, true); break;
+    }
+    case SyncStage::Series:
+        request.stage = SyncStage::Catalog; next = controller->refresh(request.scope); break;
+    case SyncStage::Catalog:
+        request.stage = SyncStage::SeriesCatalog; request.scope.kind = CatalogKind::Series; next = controller->refresh(request.scope); break;
+    case SyncStage::SeriesCatalog:
+        finishSync(request.profile); return;
+    }
+    m_syncRequests.insert(next, request);
+    emit sourceSyncChanged(request.profile);
+}
+void VodRuntime::finishSync(const QUuid &id)
+{
+    m_syncing.remove(id);
+    emit sourceSyncChanged(id);
+    emit sourceSyncFinished(id);
+}
+QList<Core::ChannelCategory> VodRuntime::sourceCategories(const QUuid &id, CatalogKind kind) const
+{
+    std::shared_ptr<SqliteVodStore> store;
+    { QMutexLocker lock(&m_storeMutex); store = m_store; }
+    if (!store) return {};
+    const auto source = store->snapshot(id);
+    if (const auto *error = std::get_if<Error>(&source)) throw std::runtime_error(error->message().toStdString());
+    RequestContext context; context.source = std::get<SourceContext>(source).revision;
+    const CatalogScope scope{id, context.source.catalogNamespace, kind, {}};
+    const auto result = store->readCategories(scope, context);
+    if (const auto *error = std::get_if<Error>(&result)) throw std::runtime_error(error->message().toStdString());
+    QList<Core::ChannelCategory> groups;
+    if (const auto cached = std::get<std::optional<CategorySnapshot>>(result))
+        for (const auto &category : cached->categories) groups.append({category.id, category.name, 0});
+    return groups;
 }
 void VodRuntime::initialize(EngineFactory engineFactory)
 {
@@ -72,7 +232,7 @@ void VodRuntime::initialize(EngineFactory engineFactory)
     m_artwork = std::make_shared<VodArtworkCache>(Core::AppDataPaths::vodArtworkDirectory(directory.absolutePath()));
 
     const Core::SourceStore sources(directory.filePath(QStringLiteral("source-summaries.json")), directory.filePath(QStringLiteral("sources")));
-    m_store = std::make_shared<SqliteVodStore>(directory.filePath(QStringLiteral("iptv.db")), [sources, session = m_sessionSources](const QUuid &id) -> Result<SourceContext> {
+    auto store = std::make_shared<SqliteVodStore>(directory.filePath(QStringLiteral("iptv.db")), [sources, policies = m_policies](const QUuid &id) -> Result<SourceContext> {
         try {
             const auto summaries = sources.loadSummaries();
             if (std::none_of(summaries.cbegin(), summaries.cend(), [&](const Core::SourceSummary &summary) { return summary.id == id; }))
@@ -81,15 +241,32 @@ void VodRuntime::initialize(EngineFactory engineFactory)
             if (!profile) return Error{ErrorCode::ContentUnavailable, {}};
             SourceContext source;
             source.revision = {id, {}, profile->vodCredentialRevision};
-            bool enabledForSession = false;
-            { QMutexLocker lock(&session->mutex); enabledForSession = session->enabled.contains(id); }
-            source.enabled = (profile->vodEnabled || enabledForSession) && profile->type == Core::ProfileType::Xtream;
+            source.enabled = profile->vodEnabled && profile->type == Core::ProfileType::Xtream;
+            {
+                std::lock_guard lock(*policies->mutex);
+                const auto policy = policies->values.value(id);
+                QStringList allowed;
+                for (const auto &category : policy.categories) if (!policy.hidden.contains(category)) allowed.append(category);
+                if (policy.configured) source.allowedMovieCategories = allowed;
+                source.movieCategoryCount = static_cast<int>(policy.categories.size());
+                QStringList seriesAllowed;
+                for (const auto &category : policy.seriesCategories) if (!policy.seriesHidden.contains(category)) seriesAllowed.append(category);
+                if (policy.seriesConfigured) source.allowedSeriesCategories = seriesAllowed;
+                source.seriesCategoryCount = static_cast<int>(policy.seriesCategories.size());
+                source.policyMutex = policies->mutex;
+                source.policyCurrent = [policies, id, generation = policy.generation]() {
+                    std::lock_guard policyLock(*policies->mutex);
+                    const auto current = policies->values.value(id);
+                    return current.enabled && current.generation == generation;
+                };
+            }
             source.provider = QStringLiteral("xtream");
             source.endpoint = QUrl(profile->xtreamBaseUrl);
             source.username = profile->xtreamUsername; source.password = profile->xtreamPassword;
             return source;
         } catch (...) { return Error{ErrorCode::SecretUnavailable, {}}; }
     });
+    { QMutexLocker lock(&m_storeMutex); m_store = std::move(store); }
     auto legacy = std::make_shared<LegacyPlaybackAdapter>(LegacyPlaybackAdapter::Hooks{
         [this]() { return LegacyResources{m_multiview->hasRecordingForHandoff(), m_dvr->hasRecordingDemand(), !m_settings->current().dvrStopVodBeforeRecording}; },
         [this](const QUuid &id, LegacyPlaybackAdapter::Acknowledgement done) {
@@ -106,7 +283,7 @@ void VodRuntime::initialize(EngineFactory engineFactory)
         }});
     m_module = std::make_unique<VodModule>(VodOptions{true}, [this, legacy, engineFactory = std::move(engineFactory)]() {
         VodComposition composition;
-        auto provider = std::make_shared<XtreamVodProvider>(std::make_shared<QtHttpTransport>(), m_settings->current().vodSeriesEnabled);
+        auto provider = std::make_shared<XtreamVodProvider>(std::make_shared<QtHttpTransport>(), true);
         const auto artwork = m_artwork;
         provider->registerArtwork = [artwork](const SourceContext &source, const QUrl &url, const RequestContext &context) {
             return artwork->remember(source, url, context);
@@ -132,15 +309,33 @@ void VodRuntime::initialize(EngineFactory engineFactory)
         return composition;
     });
     m_module->changed = [this](const SessionSnapshot &snapshot) {
+        if (snapshot.end || snapshot.sessionToken != m_libraryPausedSession) m_libraryPausedSession = QUuid{};
         emit stateChanged();
         updatePlaybackMetadata(snapshot);
+        observeEpisode(snapshot);
         if (snapshot.state == SessionState::Failed) {
-            const auto message = tr("The movie could not be played. Press V to return to the library and try again.");
+            const auto message = snapshot.ref.kind==ContentKind::Episode
+                ? tr("The episode could not be played. Press B to return to the library and try again.")
+                : tr("The movie could not be played. Press V to return to the library and try again.");
             emit errorOccurred(message);
             emit notification(message);
         }
     };
+    m_module->playbackInterrupted = [this]() { finishLibraryBrowsing(false); cancelEpisodeTransition(); };
     m_module->progressFailed = [this](const Error &error) { emit errorOccurred(error.message()); };
+    connect(m_module->controller(), &VodController::playbackRequested, this, &VodRuntime::cancelEpisodeTransition);
+    connect(m_module->controller(), &VodController::playbackRequested, this, [this]() {
+        finishLibraryBrowsing(false);
+        cancelLiveNavigation();
+    });
+    connect(m_module->controller(), &VodController::eventCompleted, this, [this](const VodEvent &event) {
+        if (event.operationId!=m_episodePlay) return;
+        m_episodePlay=QUuid{}; m_episodeTransition=false;
+        if (const auto *error=std::get_if<Error>(&event.result)) emit errorOccurred(error->message());
+        else emit episodeStarted();
+        emit stateChanged();
+    });
+    connect(m_module->controller(), &VodController::eventCompleted, this, &VodRuntime::receiveSync);
     m_module->controller()->completed = [this](const VodEvent &event) {
         if (m_removals.contains(event.operationId)) {
             auto done = m_removals.take(event.operationId);
@@ -183,6 +378,8 @@ void VodRuntime::reconcileSources()
         for (const auto &id : existing) m_module->controller()->unblockSource(id);
         m_ready = true;
         emit sourcesReconciled(); emit stateChanged();
+        const auto queued = std::exchange(m_queuedSync, {});
+        for (const auto &id : queued) synchronizeSource(id.toString(QUuid::WithoutBraces));
     });
     const auto store = m_store;
     const auto artwork = m_artwork;
@@ -200,6 +397,7 @@ bool VodRuntime::isPlaying() const { return active() && m_module->session()->sna
 bool VodRuntime::isPaused() const { return active() && m_module->session()->snapshot().pauseRequested; }
 bool VodRuntime::isLoading() const
 {
+    if (m_episodeTransition) return true;
     if (!active()) return false;
     const auto &snapshot = m_module->session()->snapshot();
     return snapshot.state == SessionState::Opening || snapshot.state == SessionState::SeekingResume
@@ -277,7 +475,10 @@ QVariantMap VodRuntime::debugOverlaySnapshot() const
     const auto interlaced = backend->isInterlaced();
     const auto fps = backend->deinterlaceEnabled() && !interlaced.value_or(true)
         ? backend->sourceFrameRateFps() : backend->estimatedFrameRateFps();
-    const auto cache = backend->demuxerCacheDurationSeconds().value_or(-1.0);
+    const auto buffer = backend->playbackBufferSnapshot();
+    const auto cache = buffer.seconds.value_or(-1.0);
+    const auto cacheText = (buffer.seconds && buffer.estimated ? QStringLiteral("≈") : QString {})
+        + Presentation::formatDebugBufferDuration(cache);
     const auto volume = backend->volumePercent();
     double bitrate = 0;
     bool hasBitrate = false;
@@ -304,16 +505,62 @@ QVariantMap VodRuntime::debugOverlaySnapshot() const
         {QStringLiteral("bitrateText"), Presentation::formatDebugBitrate(hasBitrate ? bitrate : -1.0)},
         {QStringLiteral("bitrateValueKbps"), hasBitrate ? bitrate / 1000.0 : -1.0},
         {QStringLiteral("bufferDurationSeconds"), cache},
-        {QStringLiteral("bufferDurationText"), Presentation::formatDebugBufferDuration(cache)},
+        {QStringLiteral("bufferDurationText"), cacheText},
         {QStringLiteral("bufferDurationSourceText"), QStringLiteral("mpv cache")},
-        {QStringLiteral("mpvBufferDurationText"), Presentation::formatDebugBufferDuration(cache)},
+        {QStringLiteral("mpvBufferDurationText"), cacheText},
         {QStringLiteral("minBufferNeededSeconds"), backend->bufferTargetSeconds()},
         {QStringLiteral("timeshiftMode"), QStringLiteral("Off (VOD)")},
         {QStringLiteral("timestamp"), Presentation::debugTimestampNowLocal()}
     };
 }
-void VodRuntime::togglePause() { if (active()) { if (isPaused()) m_module->session()->resume(); else m_module->session()->pause(); } }
-void VodRuntime::stop() { if (active()) m_module->session()->stop(); }
+void VodRuntime::beginLibraryBrowsing()
+{
+    if (!active() || isPaused() || m_liveTransition) return;
+    m_libraryPausedSession = m_module->session()->snapshot().sessionToken;
+    m_module->session()->pause();
+    emit stateChanged();
+}
+void VodRuntime::finishLibraryBrowsing(bool resumePlayback)
+{
+    const auto session = std::exchange(m_libraryPausedSession, {});
+    if (resumePlayback && !session.isNull() && active() && isPaused()
+        && m_module->session()->snapshot().sessionToken == session) {
+        m_module->session()->resume();
+        emit stateChanged();
+    }
+}
+void VodRuntime::cancelLiveNavigation()
+{
+    ++m_liveGeneration;
+    if (!m_liveTransition) return;
+    m_liveTransition = false;
+    emit stateChanged();
+}
+void VodRuntime::returnToLive()
+{
+    if (m_stopped || m_liveTransition) return;
+    finishLibraryBrowsing(false);
+    if (!m_module->enabled()) { emit liveRequested(); return; }
+    m_liveTransition = true;
+    const auto generation = ++m_liveGeneration;
+    emit stateChanged();
+    // Reuse the acknowledged stop and serial progress flush barrier. This
+    // does not start or stop any recording; it only releases the VOD session.
+    m_module->prepareRecording([this, generation](Outcome result) {
+        if (m_stopped || generation != m_liveGeneration) return;
+        m_liveTransition = false;
+        emit stateChanged();
+        if (const auto *error = std::get_if<Error>(&result)) {
+            emit errorOccurred(error->message());
+            emit notification(error->message());
+            return;
+        }
+        const auto activate = [this]() { emit liveRequested(); };
+        if (!gate(this, activate)) activate();
+    });
+}
+void VodRuntime::togglePause() { finishLibraryBrowsing(false); if (active()) { if (isPaused()) m_module->session()->resume(); else m_module->session()->pause(); } }
+void VodRuntime::stop() { finishLibraryBrowsing(false); cancelLiveNavigation(); cancelEpisodeTransition(); if (m_module->controller()) m_module->controller()->cancelPendingPlayback(); if (active()) m_module->session()->stop(); }
 void VodRuntime::seekRelative(double seconds) { if (active() && std::isfinite(seconds)) m_module->session()->seek(static_cast<qint64>(std::max(0.0, positionSeconds() + std::clamp(seconds, -86400.0, 86400.0)) * 1000.0)); }
 QString VodRuntime::title() const
 {
@@ -360,6 +607,7 @@ void VodRuntime::bindPlayer(App::PlayerController *player)
 }
 bool VodRuntime::gate(QObject *owner, std::function<void()> action)
 {
+    cancelEpisodeTransition();
     if (m_approvedLive) return false;
     if (m_stopped) return true;
     if (!m_module->enabled()) return false;
@@ -372,6 +620,9 @@ bool VodRuntime::gate(QObject *owner, std::function<void()> action)
 }
 bool VodRuntime::prepareMutation(const QUuid &id, const Core::ServerProfile *replacement, QString *error)
 {
+    finishLibraryBrowsing(false);
+    cancelLiveNavigation();
+    cancelEpisodeTransition();
     if (m_reconciling) return true;
     if (!m_ready || m_stopped) { if (error) *error = QStringLiteral("VOD storage is not ready. Source changes were not saved."); return false; }
     if (m_preparingEdits.contains(id) || m_finishingEdits.contains(id)) {
@@ -413,6 +664,7 @@ bool VodRuntime::prepareMutation(const QUuid &id, const Core::ServerProfile *rep
 }
 void VodRuntime::prepareRecording(std::function<void(bool)> done)
 {
+    cancelEpisodeTransition();
     if (m_stopped) { done(false); return; }
     if (!m_settings->current().dvrStopVodBeforeRecording) { done(true); return; }
     m_module->controller()->cancelPendingPlayback();
@@ -452,8 +704,12 @@ void VodRuntime::finishMutation(const QUuid &id)
 }
 void VodRuntime::shutdown()
 {
+    finishLibraryBrowsing(false);
+    cancelLiveNavigation();
+    cancelEpisodeTransition();
     if (m_stopped) return;
     m_stopped = true;
+    m_settings->vodPolicyChanged = {};
     if (m_module->enabled()) {
         m_dvr->prepareRecordingStart = {};
         m_dvr->automaticPlaybackHandoffAllowed = {};
@@ -470,5 +726,93 @@ void VodRuntime::shutdown()
     // and its drivers still exist; workers never wait for the GUI thread.
     m_sourceWork.waitForFinished();
     if (m_reconcileWork.isStarted()) m_reconcileWork.waitForFinished();
+}
+}
+
+namespace OKILTV::Vod {
+QObject *VodRuntime::episodesObject() const { return m_episodes.get(); }
+bool VodRuntime::activeSeries() const { return m_module->session() && m_module->session()->snapshot().ref.kind==ContentKind::Episode && (active() || m_episodeTransition); }
+bool VodRuntime::hasPreviousEpisode() const { return activeSeries() && adjacentEpisode(m_episodes->details(),m_module->session()->snapshot().ref,-1).has_value(); }
+bool VodRuntime::hasNextEpisode() const { return activeSeries() && adjacentEpisode(m_episodes->details(),m_module->session()->snapshot().ref,1).has_value(); }
+void VodRuntime::cancelEpisodeTransition() {
+    const bool changed=m_episodeTransition || m_returnSeries.valid();
+    ++m_episodeGeneration; m_pendingEpisodeEnd.reset();
+    if (!m_episodePlay.isNull() && m_module->controller()) m_module->controller()->cancel(m_episodePlay);
+    m_episodePlay=QUuid{}; m_episodeTransition=false; m_returnSeries={}; m_returnAfterStop=false;
+    if (changed) emit stateChanged();
+}
+void VodRuntime::startEpisode(const ContentRef &ref,bool fromBeginning) {
+    if (m_stopped || !m_ready) return;
+    PlaybackPreferences preferences; preferences.fromBeginning=fromBeginning;
+    const auto &snapshot=m_module->session()->snapshot();
+    if (parentSeries(snapshot.ref)==parentSeries(ref)) preferences.inheritedTracks=snapshot.trackPreferences;
+    m_episodePlay=m_module->controller()->play(ref,preferences);
+    m_episodeTransition=true; emit stateChanged();
+}
+void VodRuntime::navigateEpisode(int direction) {
+    if (!activeSeries() || m_episodeTransition) return;
+    const auto episode=adjacentEpisode(m_episodes->details(),m_module->session()->snapshot().ref,direction);
+    if (episode) startEpisode(episode->ref,true);
+}
+void VodRuntime::previousEpisode() { navigateEpisode(-1); }
+void VodRuntime::nextEpisode() { navigateEpisode(1); }
+void VodRuntime::observeEpisode(const SessionSnapshot &snapshot) {
+    if (snapshot.ref.kind!=ContentKind::Episode) return;
+    if (!snapshot.end && snapshot.sessionToken!=m_episodeSession) {
+        m_episodeSession=snapshot.sessionToken;
+        m_episodes->load(parentSeries(snapshot.ref),snapshot.ref);
+    }
+    if (!snapshot.end) return;
+    if (snapshot.state!=SessionState::Ended || snapshot.end!=Player::EndReason::NaturalEnd) {
+        if (m_returnAfterStop && m_returnSeries==parentSeries(snapshot.ref) && snapshot.end==Player::EndReason::UserStop) {
+            finishSeriesReturn(); return;
+        }
+        // The coordinator acknowledges replacement by stopping the old episode.
+        // The owned next request survives this acknowledgement; explicit Stop cancels it first.
+        if (!m_episodePlay.isNull() && (snapshot.end==Player::EndReason::UserStop || snapshot.end==Player::EndReason::Replaced)) return;
+        cancelEpisodeTransition(); return;
+    }
+    if (m_handledEnd==snapshot.sessionToken) return;
+    m_handledEnd=snapshot.sessionToken;
+    const auto generation=++m_episodeGeneration;
+    m_episodeTransition=true; emit stateChanged();
+    m_module->progressService()->flushSource(snapshot.ref.profileId,[this,snapshot,generation](Outcome result) {
+        if (m_stopped || generation!=m_episodeGeneration || m_module->session()->snapshot().sessionToken!=snapshot.sessionToken) return;
+        if (const auto *error=std::get_if<Error>(&result)) { m_episodeTransition=false; emit errorOccurred(error->message()); emit stateChanged(); return; }
+        completeEpisode(snapshot,generation);
+    });
+}
+void VodRuntime::completeEpisode(const SessionSnapshot &snapshot,quint64 generation) {
+    if (m_stopped || generation!=m_episodeGeneration || m_module->session()->snapshot().sessionToken!=snapshot.sessionToken) return;
+    if (m_episodes->busy()) { m_pendingEpisodeEnd=std::pair{snapshot,generation}; return; }
+    if (!m_episodes->errorText().isEmpty() || m_episodes->details().ref!=parentSeries(snapshot.ref)) {
+        m_episodeTransition=false; emit errorOccurred(tr("Episode information could not be loaded.")); emit stateChanged(); return;
+    }
+    // An early EOF is not a confirmed completed episode. Unknown duration never marks Watched.
+    if (snapshot.durationMs && !watchedByPosition(snapshot.positionMs,snapshot.durationMs)) { m_episodeTransition=false; emit stateChanged(); return; }
+    const auto next=adjacentEpisode(m_episodes->details(),snapshot.ref,1);
+    if (next) startEpisode(next->ref,true);
+    else { m_episodeTransition=false; m_returnSeries=parentSeries(snapshot.ref); emit stateChanged(); }
+}
+void VodRuntime::returnToSeriesLibrary() {
+    if (!m_module->session()) return;
+    const auto series=parentSeries(m_module->session()->snapshot().ref);
+    stop(); m_returnSeries=series; m_returnAfterStop=true;
+    if (!active()) finishSeriesReturn();
+    emit stateChanged();
+}
+void VodRuntime::finishSeriesReturn() {
+    const auto series=m_returnSeries; const auto generation=m_episodeGeneration;
+    m_module->progressService()->flushSource(series.profileId,[this,series,generation](Outcome result) {
+        if (m_stopped || m_returnSeries!=series || generation!=m_episodeGeneration) return;
+        m_returnAfterStop=false;
+        if (const auto *error=std::get_if<Error>(&result)) emit errorOccurred(error->message());
+        emit stateChanged();
+    });
+}
+void VodRuntime::deliverLibraryReturn() {
+    if (!libraryReturnPending()) return;
+    const auto series=m_returnSeries;m_returnSeries={};
+    emit seriesReturnRequested(series); emit libraryRequested(); emit stateChanged();
 }
 }

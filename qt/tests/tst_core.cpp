@@ -145,6 +145,7 @@ private slots:
     void channelPublicationRejectsObsoleteImports();
     void sourceEditInvalidatesChannelImport();
     void vodSourceMutationGuardPreservesCredentialsOnFailure();
+    void vodDefaultsMigrationRetriesAndPreservesOptOut();
     void initTestCase() { OKILTV::Core::useIsolatedSecretKeyForTests(); }
     void channelTrackPreferencesRoundTrip();
     void trackPreferencesMatchIdentity();
@@ -2709,6 +2710,46 @@ void CoreTests::channelPublicationRejectsObsoleteImports()
     DatabaseService(dir.filePath(QStringLiteral("iptv.db"))).removeProfileData(profile);
     QVERIFY(!db.publishChannels(profile, removedToken, older, true));
     QVERIFY(db.loadChannels(profile).isEmpty());
+}
+
+void CoreTests::vodDefaultsMigrationRetriesAndPreservesOptOut()
+{
+    QVERIFY(ServerProfile{}.vodEnabled);
+    QVERIFY(serverProfileFromJson(QJsonObject{}).vodEnabled);
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json"))); settings.load();
+    ServerProfile first; first.vodEnabled = false;
+    ServerProfile second = first; second.id = QUuid::createUuid();
+    QVERIFY(settings.addProfile(first)); QVERIFY(settings.addProfile(second));
+    SourceStore store(dir.filePath(QStringLiteral("source-summaries.json")), dir.filePath(QStringLiteral("sources")));
+    first.vodDefaultsVersion = 0; second.vodDefaultsVersion = 0;
+    QVERIFY(store.saveDetail(first)); QVERIFY(store.saveDetail(second));
+#ifndef Q_OS_WIN
+    const auto directory = dir.filePath(QStringLiteral("sources"));
+    QVERIFY(QFile::setPermissions(directory, QFileDevice::ReadOwner | QFileDevice::ExeOwner));
+    const auto restore = qScopeGuard([&]() { QFile::setPermissions(directory, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner); });
+    SettingsManager failed(settings.settingsFilePath()); failed.load();
+    QVERIFY(!failed.lastLoadError().isEmpty());
+    QCOMPARE(store.loadDetail(first.id)->vodDefaultsVersion, 0);
+    QVERIFY(!store.loadDetail(first.id)->vodEnabled);
+    QVERIFY(QFile::setPermissions(directory, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+#endif
+    SettingsManager migrated(settings.settingsFilePath()); migrated.load();
+    QVERIFY(migrated.profileById(first.id)->vodEnabled);
+    QVERIFY(migrated.profileById(second.id)->vodEnabled);
+    QCOMPARE(store.loadDetail(first.id)->vodDefaultsVersion, 1);
+    int barriers = 0;
+    migrated.prepareProfileMutation = [&](const QUuid &, const ServerProfile *, QString *) { ++barriers; return true; };
+    auto disabled = *migrated.profileById(first.id); disabled.vodEnabled = false;
+    const auto revision = disabled.vodCredentialRevision;
+    QVERIFY(migrated.replaceProfile(first.id, disabled));
+    QCOMPARE(barriers, 0); QCOMPARE(migrated.profileById(first.id)->vodCredentialRevision, revision);
+    // Retry another unfinished profile without overwriting this committed opt-out.
+    QVERIFY(store.saveDetail(second));
+    SettingsManager restarted(settings.settingsFilePath()); restarted.load();
+    QVERIFY(!restarted.profileById(first.id)->vodEnabled);
+    QVERIFY(restarted.profileById(second.id)->vodEnabled);
+    QCOMPARE(restarted.profileById(first.id)->vodCredentialRevision, revision);
 }
 
 void CoreTests::vodSourceMutationGuardPreservesCredentialsOnFailure()

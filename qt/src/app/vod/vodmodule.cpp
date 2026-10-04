@@ -33,6 +33,7 @@ void VodModule::prepareRecording(PlaybackCoordinator::Completion completion)
 {
     if (!enabled()) { completion(Success{}); return; }
     if (m_stopped) { completion(Error{ErrorCode::Cancelled, {}}); return; }
+    if (playbackInterrupted) playbackInterrupted();
     m_controller->cancelPendingPlayback();
     const auto snapshot = m_session->snapshot();
     if (!snapshot.ref.playable()) { completion(Success{}); return; }
@@ -46,6 +47,7 @@ void VodModule::prepareSourceChange(const QUuid &profile, PlaybackCoordinator::C
 {
     if (!enabled()) { completion(Success{}); return; }
     if (m_stopped) { completion(Error{ErrorCode::Cancelled, {}}); return; }
+    if (playbackInterrupted) playbackInterrupted();
     m_controller->blockSource(profile);
     m_coordinator->removeSource(profile, [this, profile, completion = std::move(completion)](Outcome stopped) {
         if (const auto *error = std::get_if<Error>(&stopped)) { completion(*error); return; }

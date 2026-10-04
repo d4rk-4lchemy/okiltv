@@ -30,6 +30,12 @@ var vodLibrarySidebar = overlaySidebar
 // Shared VOD transport and poster progress colors.
 var vodTimelineTrack = "#36454f"
 var vodTimelineFill = "#a9d8ff"
+var vodScrollBarThumb = "#929292"
+var vodScrollBarThumbHover = "#a0a0a0"
+var vodScrollBarThumbPressed = "#ababab"
+function vodScrollBarColor(pressed, hovered) {
+    return pressed ? vodScrollBarThumbPressed : hovered ? vodScrollBarThumbHover : vodScrollBarThumb
+}
 var success = "#5ac88f"
 var warning = "#d4aa56"
 var danger = "#e17474"
@@ -59,8 +65,25 @@ var spacingXL = 36
 var vodSidebarMinimumWidth = 208
 var vodSidebarDefaultWidth = 268
 var vodSidebarResizeHandleWidth = 8
+var vodScrollBarGap = 12
+var vodLibraryScrollBarGap = 24
+var vodMarqueeDelayMs = 1000
+var vodMarqueePixelsPerSecond = 35
+var vodMarqueeGap = 32
 var railWidth = 104
 var transitionMs = 180
+var titleBarHeight = 33
+var titleBarFontSize = 13
+var titleBarIconSize = 18
+var titleBarButtonSize = 30
+var mediaModeChromeHeight = 50
+var mediaModeWidth = 300
+var mediaModeMinimumWidth = 216
+var mediaModeHeight = 34
+var mediaModeInset = 3
+var mediaModeFontSize = 13
+var mediaModeBackground = "#c21a1a1a"
+var mediaModeSelection = overlaySurfaceInteractive
 
 // Opaque, compact labels remain legible on bright movie artwork.
 var vodResolutionText = "#ffffff"

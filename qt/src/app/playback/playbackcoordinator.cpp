@@ -60,7 +60,8 @@ void PlaybackCoordinator::acquire()
             pending.completion(*error);
             return;
         }
-        if (!self->sourceIsCurrent || !self->sourceIsCurrent(pending.descriptor.source)) {
+        if (!self->sourceIsCurrent || !self->sourceIsCurrent(pending.descriptor.source)
+            || (pending.descriptor.admissionCurrent && !pending.descriptor.admissionCurrent())) {
             self->m_owner = PlaybackOwner::None;
             pending.completion(Error{ErrorCode::Cancelled, operation});
             return;

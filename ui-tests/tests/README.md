@@ -11,6 +11,10 @@ account, private capture or repository secret is needed.
 | `08-stationary-pointer-navigation.py` | Keyboard scrolling under a stationary pointer |
 | `08-ui-transparency.py` | Preview, keyboard/drag changes, Save/discard and playback preservation |
 | `09-catchup-download.py` | Guide/right-pane downloads, pause/resume, filenames and partial archives |
+| `10-multiview-keyboard.py` | Grid selection, cancellation and keyboard priority |
+| `11-multiview-controls.py` | Focused transport and independent backends |
+| `12-vod-movies.py` | Movie library, transport, source policies and overflowing Continue watching |
+| `13-vod-series.py` | B/V, episodes, keyboard/pointer panels, Settings, Back and responsive layouts |
 
 Configure and run the group:
 
@@ -88,3 +92,17 @@ stability while browsing another movie and restored Live rails after Stop. The
 local media endpoint supports HTTP byte ranges for real mpv seeks. Run through `scripts/ci/run_ui_test.sh` for
 an isolated unlocked keyring; CTest registers it as `UI-12-vod-movies` when
 `OKILTV_BUILD_UI_TESTS=ON`.
+
+The VOD movie scenario also covers Settings → Sources: Enable VOD below the
+archive margin, Live TV/Movies/Series segments, empty provider movie categories,
+Series category configuration, independent M3U support hints, drafts across source
+switches, Discard and persisted opt-out removing the source from the library.
+All API/media requests use its local fixture; it never needs a provider account.
+
+### Series library
+
+`13-vod-series.py` shares the movie scenario's local media/keyring fixture and
+adds lazy series metadata, season gaps, B/V switching without loading media,
+right-panel selection/Enter/single-click activation, Settings during playback,
+Back to the owning details and narrow/wide captures. CTest registers
+`UI-13-vod-series` with the same desktop resource lock.

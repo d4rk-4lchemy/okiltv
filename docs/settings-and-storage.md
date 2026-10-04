@@ -14,14 +14,20 @@ the developer's home directory or bypass portable overrides.
 | Source connection details | `SourceStore`, `sources/<UUID>.json` protected envelopes |
 | Channels, watch statistics and related state | [DatabaseService](../qt/src/core/database_service.h), application SQLite database |
 | EPG | [EpgCacheService](../qt/src/core/epgcache_service.h), per-profile manifest and immutable SQLite generations |
-| VOD catalogue/progress/movie lists | [SqliteVodStore](../qt/src/core/vod/storage/sqlitevodstore.h), additive `vod_*` tables |
+| VOD catalogue/progress/movie and series lists | [SqliteVodStore](../qt/src/core/vod/storage/sqlitevodstore.h), additive `vod_*` tables |
 | VOD artwork | Protected URL registry and decoded JPEG cache under the VOD artwork directory |
 
 VOD JPEG posters persist across restarts with a fixed 256-MiB LRU budget and no
 time-based expiry. Catalogue refresh retains them; changed artwork URLs create
 new references. Evicted/unreadable images may be downloaded again on demand.
 Local cache lookup runs on workers before catalogue/detail publication. Source
-removal/reconciliation cleans its registry and decoded images. VOD schema 8 adds independent durable To Watch/Favourites membership; catalogue
+removal/reconciliation cleans its registry and decoded images. VOD schema 10 adds durable series continuation suppression in `vod_series_state`,
+cleared only by confirmed playback from a new session after bulk manual Watched.
+Bulk episode statuses, suppression and To Watch removal share one transaction.
+Schema 9 adds the durable last-played episode pointer in `vod_series_history`,
+updated atomically with playback progress; manual status edits do not move it.
+Migration backfills older episode history and preserves movie catalogues/artwork.
+Schema 8 supplies independent Movie/Series To Watch/Favourites membership; catalogue
 eviction and credential edits preserve it, while source removal deletes it. Schema 7
 transactionally rebuilds base-letter title keys without discarding watch history;
 see the [VOD storage contract](../qt/src/core/vod/storage/README.md).
@@ -56,13 +62,42 @@ preference. The value is global across sources and needs no database migration.
 Use `SettingsManager` profile mutators for add/edit/remove. Source summaries are
 not full profiles and must not be used for credential resolution. VOD source
 changes require its mutation/stop/checkpoint barrier before source files change.
-Settings/source files and SQLite are not one atomic transaction; recovery must
+Availability-only VOD changes bypass the credential stop barrier and preserve
+credential revisions; credential edits/removal still use it. Settings/source files
+and SQLite are not one atomic transaction; recovery must
 reconcile actual persisted state. See [VOD](vod.md).
 
 Live track preferences are per profile/channel and saved only after confirmed
 backend selection. Xtream uses stream IDs; M3U uses a SHA-256 hash of the direct
 Live URL. VOD preferences use independent content identity and progress storage.
 Never persist raw connection URLs as preference keys.
+
+## VOD source defaults and group preferences
+
+`ServerProfile.vodEnabled` defaults to true. Protected profile JSON includes
+`vodDefaultsVersion`; startup migrates each older Xtream profile to enabled and
+commits version 1 with that profile, without changing credential revisions. A
+failed protected write retains the old marker for retry. A migrated profile’s
+later explicit false survives other profiles’ retries and subsequent startups.
+The global technical `AppSettings.vodEnabled` and legacy `vodSeriesEnabled` do not
+veto enabled sources. Saved Enable VOD admits both movies and series.
+
+Existing Live preference keys remain plain source UUIDs. Movies and Series use
+`<UUID>|movies` and `<UUID>|series` keys in `hiddenGroupsByProfile`,
+`groupOrderByProfile` and `hideUncheckedGroupsByProfile`. Provider category
+snapshots remain separate by media kind in `vod_categories`; no VOD schema change
+is needed. Source deletion removes both VOD preference keys. The generalized
+`SourceGroupsModel` keeps drafts keyed by source within each editor; successful
+Save publishes all edited sources, failed settings writes roll back memory and
+retain drafts/error state, and Discard reloads saved values. Search is independent
+per editor/source within the process. These preferences are separate from watch
+progress, durable movie lists and track preferences.
+
+Source-form Save commits edited sources and group models in sequence. A failure
+leaves remaining drafts editable and shows the write error; successful source
+creations are removed from the pending map immediately, so retry cannot duplicate
+them. Successfully changed connections are queued for refresh even if a later
+source/group write fails.
 
 ## Protection boundary
 

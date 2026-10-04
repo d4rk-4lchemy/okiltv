@@ -580,6 +580,9 @@ void AppController::connectPlaybackSession(PlayerController *controller)
         if (controller != m_playerController) {
             return;
         }
+        if (const auto &channel = controller->currentChannelValue(); channel) {
+            m_lastPrimaryChannel = std::pair{channel->profileId, channel->id};
+        }
         m_observedCatchupSession = {};
     });
     connect(controller, &PlayerController::catchupProgressObserved, this,
@@ -759,6 +762,7 @@ void AppController::loadProfile(const QString &profileId)
         m_playerController->stop();
     }
 
+    emit sourceRefreshRequested(guidToString(profile->id));
     const auto settingsSnapshot = m_settings->current();
     const auto generation = ++m_profileLoadGeneration;
     const auto importToken = DatabaseService::beginChannelImport(profile->id);
@@ -1536,6 +1540,47 @@ bool AppController::activatePreviousChannel()
         return false;
     }
     activateChannel(m_previousPlaybackChannelId);
+    return true;
+}
+
+bool AppController::returnToLive()
+{
+    if (m_stopping) return false;
+    if (m_multiViewController->isActive()) return true;
+    if (m_playerController->currentChannelValue()) {
+        if (m_playerController->inCatchupMode()) {
+            if (m_playerController->isRecording()) {
+                setStatusText(QStringLiteral("Cannot switch to Live TV while this playback is recording."));
+                return false;
+            }
+            m_playerController->returnToLiveFromCatchup();
+            return true;
+        }
+        // Library navigation preserves the running Live transport, including
+        // its buffered/timeshift position. GO LIVE is a separate playback action.
+        if (!m_playerController->channelLoadFailed()) return true;
+    }
+    auto identity = m_lastPrimaryChannel;
+    const auto activeProfile = m_settings->current().activeProfileId;
+    if (!identity && activeProfile) {
+        const auto profile = *activeProfile;
+        const auto key = guidToString(profile);
+        if (m_settings->current().lastWatchedChannelId.contains(key)) {
+            identity = std::pair{profile, m_settings->current().lastWatchedChannelId.value(key)};
+        }
+    }
+    if (!identity || !m_settings->profileById(identity->first)) return false;
+    std::optional<Channel> channel;
+    if (m_channelListModel->activeProfileId() == guidToString(identity->first)) {
+        channel = m_channelListModel->channelById(identity->second);
+    } else {
+        const auto channels = m_database->loadChannels(identity->first);
+        for (const auto &candidate : channels) {
+            if (candidate.id == identity->second) { channel = candidate; break; }
+        }
+    }
+    if (!channel) return false;
+    activatePrimaryChannel(*channel);
     return true;
 }
 

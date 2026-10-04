@@ -10,14 +10,16 @@ Button {
     property bool marked: false
     property bool favouriteAction: false
     property bool posterMode: false
+    property real sizeScale: 1
+    property bool retainEnabledAppearance: false
     readonly property url iconSource: favouriteAction ? "qrc:/resources/icons/favourites.svg" : "qrc:/resources/icons/bookmark.svg"
     readonly property color activeIconColor: Theme.accent
     readonly property string caption: favouriteAction
         ? (marked ? "Remove from favourites" : "Add to favourites")
         : (marked ? "Remove from plan to watch" : "Add to plan to watch")
-    implicitWidth: 42
-    implicitHeight: 42
-    padding: 9
+    implicitWidth: 42 * sizeScale
+    implicitHeight: 42 * sizeScale
+    padding: 9 * sizeScale
     hoverEnabled: true
     Accessible.name: caption
     ToolTip.visible: hovered
@@ -28,7 +30,7 @@ Button {
         fillMode: Image.PreserveAspectFit
         smooth: true
         mipmap: true
-        opacity: control.enabled ? 1 : 0.36
+        opacity: control.enabled || control.retainEnabledAppearance ? 1 : 0.36
         layer.enabled: control.marked
         layer.effect: MultiEffect {
             colorization: 1
@@ -36,7 +38,7 @@ Button {
         }
     }
     background: Rectangle {
-        radius: Theme.radiusS
+        radius: Theme.radiusS * control.sizeScale
         color: Theme.uiBackground(control.down || control.hovered ? Theme.overlaySurfaceInteractive
             : control.posterMode ? Theme.overlaySurface : Theme.overlaySurfaceRaised,
             control.uiTransparency, control.posterMode ? 0.8 : 1)

@@ -9,5 +9,5 @@ public:
     virtual ~IVodMigrations() = default;
     virtual Outcome prepare(const RequestContext &) = 0;
 };
-constexpr int schemaVersion = 8;
+constexpr int schemaVersion = 10;
 }

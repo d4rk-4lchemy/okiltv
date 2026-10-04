@@ -7,12 +7,13 @@
 
 namespace OKILTV::Vod {
 using PublicValue = std::variant<CatalogScope, ArtworkRef, Success, ProviderCapabilities, CategorySnapshot, CatalogPage,
-    VodDetails, VodMediaProbe, MovieListState, quint64, std::optional<VodProgress>>;
+    VodDetails, SeriesProgress, VodMediaProbe, MovieListState, quint64, std::optional<VodProgress>, std::optional<VodMediaProbe>>;
 struct JobReply {
     SourceRevision source;
     PublicValue value;
     // Never emitted as a public facade event.
     std::optional<PlaybackDescriptor> playback;
+    std::function<bool()> policyCurrent;
 };
 class VodJobRunner final : public QObject {
 public:

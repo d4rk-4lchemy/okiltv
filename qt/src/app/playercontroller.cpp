@@ -107,7 +107,6 @@ constexpr int kCatchupSeekSettleMs = 3000;
 constexpr double kMinimumBufferSeconds = 0.1;
 constexpr double kMaximumBufferSeconds = 60.0;
 constexpr double kCatchupActiveCacheHeadSeconds = 90.0;
-constexpr double kCatchupDebugEffectiveCacheMaxSeconds = kCatchupActiveCacheHeadSeconds;
 constexpr int kCatchupTimelineReloadAckTimeoutMs = 500;
 constexpr int kCatchupTimelineNoticeAutoClearMs = 5000;
 constexpr double kCatchupRollingOverlapBiasSeconds = 2.0;
@@ -1024,11 +1023,13 @@ QVariantMap PlayerController::debugOverlaySnapshot()
 
     QVariant mpvBufferDurationSeconds;
     QString mpvBufferDurationText = QStringLiteral("N/A");
-    if (const auto cacheDuration = activePlayer->demuxerCacheDurationSeconds();
+    const auto bufferSnapshot = activePlayer->playbackBufferSnapshot();
+    if (const auto cacheDuration = bufferSnapshot.seconds;
         cacheDuration.has_value() && std::isfinite(cacheDuration.value())) {
         const auto normalizedDuration = std::max(0.0, cacheDuration.value());
         mpvBufferDurationSeconds = normalizedDuration;
-        mpvBufferDurationText = formatDebugBufferDuration(normalizedDuration);
+        mpvBufferDurationText = (bufferSnapshot.estimated ? QStringLiteral("≈") : QString {})
+            + formatDebugBufferDuration(normalizedDuration);
     }
 
     QVariant timeshiftBufferToLiveSeconds;
@@ -1043,12 +1044,12 @@ QVariantMap PlayerController::debugOverlaySnapshot()
     QVariant catchupEffectiveBufferDurationSeconds;
     QString catchupEffectiveBufferDurationText = QStringLiteral("N/A");
     if (!timeshiftActiveNow && inCatchupMode()) {
-        if (const auto cacheDuration = activePlayer->demuxerCacheDurationSeconds();
+        if (const auto cacheDuration = bufferSnapshot.seconds;
             cacheDuration.has_value() && std::isfinite(cacheDuration.value())) {
             const auto normalizedDuration = std::max(0.0, cacheDuration.value());
-            const auto effectiveDuration = std::min(normalizedDuration, kCatchupDebugEffectiveCacheMaxSeconds);
+            const auto effectiveDuration = normalizedDuration;
             catchupEffectiveBufferDurationSeconds = effectiveDuration;
-            catchupEffectiveBufferDurationText = formatDebugBufferDuration(effectiveDuration);
+            catchupEffectiveBufferDurationText = mpvBufferDurationText;
         }
     }
 
@@ -1291,7 +1292,7 @@ QString PlayerController::formatDebugBufferDuration(const double bufferDurationS
         return QStringLiteral("N/A");
     }
 
-    return QStringLiteral("%1 s").arg(bufferDurationSeconds, 0, 'f', 2);
+    return QStringLiteral("%1 s").arg(bufferDurationSeconds, 0, 'f', 1);
 }
 
 QString PlayerController::formatDebugFramerate(const double framesPerSecond)
@@ -4898,7 +4899,16 @@ void PlayerController::updatePosition()
         recover(m_recovery.videoFreeze(health, recoveryContext(), advanced, frame, m_liveDeliveryClock.elapsed()), false);
     };
     const auto updateReconnectRecoveryWindow = [&](const Playback::StreamHealth &health, bool advanced, std::optional<bool> frame) {
-        if (m_recovery.observeRecovery(health, recoveryContext(), advanced, frame, m_liveDeliveryClock.elapsed()))
+        auto recoveryHealth = health;
+        if (!inCatchupMode()) {
+            const auto buffer = activePlayer->playbackBufferSnapshot();
+            recoveryHealth.cacheDurationSeconds = buffer.seconds;
+            recoveryHealth.cacheEndSeconds = buffer.endSeconds;
+            recoveryHealth.cacheSpeedBytesPerSecond = buffer.inputBytesPerSecond;
+            recoveryHealth.sampleFresh = buffer.fresh;
+            recoveryHealth.bufferTargetSeconds = effectiveLiveBufferTargetSeconds();
+        }
+        if (m_recovery.observeRecovery(recoveryHealth, recoveryContext(), advanced, frame, m_liveDeliveryClock.elapsed()))
             activePlayer->setStartupBufferingStrictMode(true);
     };
 

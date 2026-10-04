@@ -66,7 +66,7 @@ Result<HttpResponse> QtHttpTransport::get(const HttpRequest &input, const Reques
         request.setAttribute(QNetworkRequest::CookieLoadControlAttribute, QNetworkRequest::Manual);
         request.setAttribute(QNetworkRequest::CookieSaveControlAttribute, QNetworkRequest::Manual);
         request.setAttribute(QNetworkRequest::AuthenticationReuseAttribute, QNetworkRequest::Manual);
-        request.setTransferTimeout(30000);
+        request.setTransferTimeout(90000);
         // Explicit encoding disables Qt's automatic decompression. Inflate in
         // bounded chunks below, with a limit on decoded bytes, including when a
         // server sends compressed data despite the identity preference.

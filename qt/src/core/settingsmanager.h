@@ -44,6 +44,7 @@ public:
     // Return only after VOD progress/stop and durable publication fencing finish.
     std::function<bool(const QUuid &, const ServerProfile *, QString *)> prepareProfileMutation;
     std::function<void(const QUuid &, bool)> profileMutationFinished;
+    std::function<void(const QUuid &)> vodPolicyChanged;
 
 private:
     void resetToDefaultsWithError(const QString &loadError);

@@ -4,8 +4,11 @@
 #include <QTimer>
 
 namespace OKILTV::Vod {
+class VodEpisodesModel;
 class VodCatalogModel final : public QAbstractListModel {
     Q_OBJECT
+    Q_PROPERTY(bool series READ series NOTIFY changed)
+    Q_PROPERTY(QObject *episodesModel READ episodesObject CONSTANT)
     Q_PROPERTY(QVariantList sources READ sources NOTIFY changed)
     Q_PROPERTY(QVariantList categories READ categories NOTIFY changed)
     Q_PROPERTY(QString sourceId READ sourceId NOTIFY changed)
@@ -26,7 +29,11 @@ class VodCatalogModel final : public QAbstractListModel {
 public:
     enum Role { KeyRole = Qt::UserRole + 1, TitleRole, YearRole, PosterRole, AvailableRole, ProgressRole, ResolutionRole, ToWatchRole, FavouriteRole, ListsBusyRole };
     enum class Purpose { Library, PlaybackSidebar };
-    VodCatalogModel(VodRuntime *, Core::SettingsManager *, QObject *parent = nullptr, Purpose purpose = Purpose::Library);
+    VodCatalogModel(VodRuntime *, Core::SettingsManager *, QObject *parent = nullptr, Purpose purpose = Purpose::Library, CatalogKind kind = CatalogKind::Movies);
+    ~VodCatalogModel() override;
+    bool series() const { return m_kind == CatalogKind::Series; }
+    QObject *episodesObject() const;
+    void openSeries(const ContentRef &);
     int rowCount(const QModelIndex &parent = {}) const override;
     QVariant data(const QModelIndex &, int role) const override;
     QHash<int, QByteArray> roleNames() const override;
@@ -46,7 +53,7 @@ public:
     bool continueMoviesLoaded() const { return m_continueMoviesLoaded; }
     QVariantMap movie() const { return m_movie; }
     QVariantMap playingMovie() const { return m_playingMovie; }
-    QString playingMovieKey() const { return m_playingRef.playable() ? QString::fromLatin1(m_playingRef.key().toHex()) : QString{}; }
+    QString playingMovieKey() const { return m_playingRef.valid() ? QString::fromLatin1(m_playingRef.key().toHex()) : QString{}; }
     void setSearchText(const QString &);
     void setDescending(bool);
     Q_INVOKABLE void open();
@@ -72,7 +79,7 @@ signals:
     void changed();
     void playbackStarted();
 private:
-    enum class Operation { Scope, Categories, Query, Refresh, Details, Probe, Progress, CardProgress, CardResolution, Play, Artwork, ContinueQuery, PlayingDetails, PlayingArtwork, MovieLists };
+    enum class Operation { Scope, Categories, Query, Refresh, Details, EpisodeDetails, SeasonMetadata, Probe, Progress, CardProgress, CardResolution, Play, Artwork, ContinueQuery, PlayingDetails, PlayingArtwork, MovieLists };
     struct Pending { Operation kind; quint64 generation; ContentRef ref; bool append = false; quint64 listsRevision = 0; };
     const MovieSummary *itemAt(int row) const;
     void queryContinue();
@@ -84,6 +91,9 @@ private:
     void updatePlayingSummary();
     void applyProgress(const ContentRef &, const VodProgress &);
     void updateMediaPresentation();
+    void readMediaMetadata(const ContentRef &, const VodDetails &);
+    void waitForStorage();
+    void stopWaitingForStorage();
     void applyResolution(const ContentRef &, std::optional<int> width, std::optional<int> height);
     void attach();
     void loadScope();
@@ -94,6 +104,8 @@ private:
     void cancelKind(Operation);
     void resetRows();
     bool pending(Operation) const;
+    CatalogKind m_kind;
+    std::unique_ptr<VodEpisodesModel> m_episodes;
     VodRuntime *m_runtime;
     Core::SettingsManager *m_settings;
     QPointer<VodController> m_controller;
@@ -115,6 +127,7 @@ private:
     bool m_continueMoviesLoaded = false;
     bool m_marking = false;
     QHash<QByteArray, double> m_progress;
+    QHash<QByteArray,QString> m_episodeLabels;
     QHash<QByteArray, QString> m_resolutions;
     QSet<QByteArray> m_requestedResolutions;
     QHash<QByteArray, bool> m_continueEligibility;
@@ -125,10 +138,16 @@ private:
     std::optional<LocalPageToken> m_next;
     QVariantMap m_movie;
     ContentRef m_selected;
+    ContentRef m_refreshSeriesDetails;
+    bool m_trackOptionsEdited = false;
     std::optional<VodMediaProbe> m_mediaProbe;
+    std::optional<VodMediaProbe> m_seasonTrackMetadata;
+    QString m_trackMetadataSeason;
     QJsonObject m_playbackTrackPreferences;
     QHash<QUuid, Pending> m_pending;
     QTimer m_searchTimer;
     QTimer m_probePlayDelay;
+    QTimer m_storageWaitTimeout;
+    QTimer m_storageRetry;
 };
 }

@@ -64,19 +64,31 @@ private slots:
     {
         const auto src = source();
         auto transport = std::make_shared<Transport>();
-        transport->bodies[QStringLiteral("get_series")] = R"([{"series_id":"007","name":"Series","category_id":"2"}])";
-        transport->bodies[QStringLiteral("get_series_info")] = R"({"info":{"plot":"Overview"},"seasons":[{"season_number":10},{"season_number":2},{"season_number":0}],"episodes":{"10":[{"id":"010","season":10,"episode_num":1,"title":"Tenth season","container_extension":"ts"}],"2":[{"id":902,"season":2,"episode_num":2,"title":"Second","container_extension":"mkv"},{"id":"0901","season":2,"episode_num":1,"title":"First","container_extension":"mp4","info":{"duration_secs":60}}],"0":[{"id":"special","season":0,"title":"Special","container_extension":"mkv"}]}})";
+        transport->bodies[QStringLiteral("get_series")] = R"([{"series_id":"007","name":"Series","cover":"https://fixture.invalid/series.jpg","category_id":"2"}])";
+        transport->bodies[QStringLiteral("get_series_info")] = R"({"info":{"name":"Series","plot":"Overview","cover":"https://fixture.invalid/series.jpg"},"seasons":[{"season_number":10},{"season_number":2},{"season_number":0}],"episodes":{"10":[{"id":"010","season":10,"episode_num":1,"title":"Tenth season","container_extension":"ts"}],"2":[{"id":902,"season":2,"episode_num":2,"title":"Second","container_extension":"mkv"},{"id":"0901","season":2,"episode_num":1,"title":"First","container_extension":"mp4","info":{"duration_secs":60,"plot":"Episode description","movie_image":"https://fixture.invalid/episode.jpg"}}],"0":[{"id":"special","season":0,"title":"Special","container_extension":"mkv"}]}})";
         XtreamVodProvider provider(transport, true);
+        QList<QUrl> artworkUrls;
+        provider.registerArtwork=[&](const SourceContext &,const QUrl &url,const RequestContext &) -> std::optional<ArtworkRef> {
+            if (url.isEmpty()) return {};
+            artworkUrls.append(url);return ArtworkRef{url.fileName(),QStringLiteral("poster"),{}};
+        };
         auto scope = scopeFor(src); scope.kind = CatalogKind::Series;
         const auto catalog = provider.fetchCatalog(src, scope, {}, requestFor(src));
         QVERIFY(std::holds_alternative<CatalogBatch>(catalog));
         QCOMPARE(transport->urls.size(), 1);
         const auto series = std::get<SeriesSummary>(std::get<CatalogBatch>(catalog).items.first()).ref;
         QCOMPARE(series.providerItemId, QStringLiteral("007"));
+        QCOMPARE(std::get<SeriesSummary>(std::get<CatalogBatch>(catalog).items.first()).artwork.first().id,QStringLiteral("series.jpg"));
         QVERIFY(series.key() != movieFor(src).key());
         auto detail = provider.fetchDetails(src, series, requestFor(src));
         QVERIFY(std::holds_alternative<VodDetails>(detail));
         const auto details = std::get<VodDetails>(detail);
+        QCOMPARE(details.title,QStringLiteral("Series"));
+        QCOMPARE(details.artwork.first().id,QStringLiteral("series.jpg"));
+        QCOMPARE(details.episodes[1].durationMs,std::optional<qint64>(60000));
+        QCOMPARE(details.episodes[1].description,QStringLiteral("Episode description"));
+        QCOMPARE(details.episodes[1].artwork.first().id,QStringLiteral("episode.jpg"));
+        QCOMPARE(artworkUrls.size(),3);
         QCOMPARE(details.seasons.size(), 3);
         QCOMPARE(details.seasons[0].number, std::optional<int>(0));
         QCOMPARE(details.seasons[1].number, std::optional<int>(2));
@@ -215,6 +227,26 @@ private slots:
         const auto result = QtHttpTransport{}.get({server.url()}, {});
         QVERIFY(std::holds_alternative<Error>(result));
     }
+    void duplicateIdentitiesMergeBeforeLocalFiltering()
+    {
+        auto http = std::make_shared<Transport>();
+        http->bodies[QStringLiteral("get_vod_streams")] = R"([{"stream_id":"007","name":"Movie","category_id":"excluded"},{"stream_id":"007","name":"Movie","category_id":"selected"}])";
+        http->bodies[QStringLiteral("get_vod_categories")] = R"([{"category_id":"selected","category_name":"One"},{"category_id":"selected","category_name":"Duplicate"}])";
+        http->bodies[QStringLiteral("get_series_categories")] = R"([{"category_id":"series","category_name":"Series"}])";
+        XtreamVodProvider provider(http); const auto src = source();
+        auto scope = scopeFor(src); scope.categoryId = QStringLiteral("selected");
+        const auto response = provider.fetchCatalog(src, scope, {}, requestFor(src));
+        QVERIFY(std::holds_alternative<CatalogBatch>(response));
+        const auto batch = std::get<CatalogBatch>(response); QCOMPARE(batch.items.size(), 1);
+        const auto movie = std::get<MovieSummary>(batch.items.first());
+        QVERIFY(movie.categoryIds.contains(QStringLiteral("selected"))); QVERIFY(movie.categoryIds.contains(QStringLiteral("excluded")));
+        scope.categoryId.reset();
+        QCOMPARE(std::get<QList<VodCategory>>(provider.listCategories(src, scope, requestFor(src))).size(), 1);
+        scope.kind = CatalogKind::Series;
+        // Category configuration does not opt into series catalogue/playback.
+        QCOMPARE(std::get<QList<VodCategory>>(provider.listCategories(src, scope, requestFor(src))).size(), 1);
+        QVERIFY(std::holds_alternative<Error>(provider.fetchCatalog(src, scope, {}, requestFor(src))));
+    }
     void movieMappingAndLocalCategoryFilter()
     {
         auto http = std::make_shared<Transport>();
@@ -230,7 +262,7 @@ private slots:
         QCOMPARE(movie.ref.providerItemId, QStringLiteral("007"));
         QCOMPARE(movie.year, std::optional<int>(2025));
         QVERIFY(batch.complete);
-        QVERIFY(!QUrlQuery(http->urls.last()).hasQueryItem(QStringLiteral("category_id")));
+        QCOMPARE(QUrlQuery(http->urls.last()).queryItemValue(QStringLiteral("category_id")), QStringLiteral("2"));
         QVERIFY(http->urls.last().toEncoded().contains("synthetic%2Buser"));
     }
     void movieDetailsExposeOnlyCompleteDeclaredResolution()

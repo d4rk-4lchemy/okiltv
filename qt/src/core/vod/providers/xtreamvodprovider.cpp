@@ -54,6 +54,7 @@ std::optional<int> positiveDimension(const QJsonValue &value)
 VodDetails describe(const SourceContext &source, const ContentRef &ref, const QJsonObject &info)
 {
     VodDetails details; details.ref = ref;
+    details.title=safeText(info.value(QStringLiteral("name")),source);
     for (const auto &field : {QStringLiteral("plot"), QStringLiteral("description"), QStringLiteral("overview")}) {
         details.description = safeText(info.value(field), source);
         if (!details.description.isEmpty()) break;
@@ -89,7 +90,7 @@ Result<SeriesData> parseSeries(const SourceContext &source, const ContentRef &se
         auto id = identifier(object.value(QStringLiteral("season_number")));
         if (id.isEmpty()) id = identifier(object.value(QStringLiteral("id")));
         if (id.isEmpty() || seasons.contains(id)) return Error{ErrorCode::InvalidResponse, context.operationId};
-        seasons.insert(id, Season{series, id, number(object.value(QStringLiteral("season_number"))), 0});
+        seasons.insert(id, Season{series, id, number(object.value(QStringLiteral("season_number"))), static_cast<int>(seasons.size())});
     }
     QMap<QString, QJsonArray> groups;
     const auto episodes = root.value(QStringLiteral("episodes"));
@@ -107,7 +108,7 @@ Result<SeriesData> parseSeries(const SourceContext &source, const ContentRef &se
     } else return Error{ErrorCode::InvalidResponse, context.operationId};
     for (auto group = groups.cbegin(); group != groups.cend(); ++group) {
         if (!group.key().isEmpty() && !seasons.contains(group.key()))
-            seasons.insert(group.key(), Season{series, group.key(), number(group.key()), 0});
+            seasons.insert(group.key(), Season{series, group.key(), number(group.key()), static_cast<int>(seasons.size())});
         int order = 0;
         for (const auto &entry : group.value()) {
             if (const auto error = context.interruption()) return *error;
@@ -125,6 +126,9 @@ Result<SeriesData> parseSeries(const SourceContext &source, const ContentRef &se
             episode.order = order++;
             episode.title = safeText(object.value(QStringLiteral("title")), source);
             episode.availability = Availability::Available;
+            const auto info = describe(source, episode.ref, object.value(QStringLiteral("info")).toObject());
+            episode.durationMs = info.declaredDurationMs;
+            episode.description = info.description;
             parsed.details.episodes.append(episode);
             parsed.media.insert(id, object);
         }
@@ -132,7 +136,7 @@ Result<SeriesData> parseSeries(const SourceContext &source, const ContentRef &se
     parsed.details.seasons = seasons.values();
     std::sort(parsed.details.seasons.begin(), parsed.details.seasons.end(), [](const Season &a, const Season &b) {
         if (a.number != b.number) { if (!a.number) return false; if (!b.number) return true; return *a.number < *b.number; }
-        return a.id < b.id;
+        return a.order < b.order;
     });
     QHash<QString, int> order;
     for (qsizetype i = 0; i < parsed.details.seasons.size(); ++i) {
@@ -236,17 +240,20 @@ Result<ProviderCapabilities> XtreamVodProvider::capabilities(const SourceContext
 Result<QList<VodCategory>> XtreamVodProvider::listCategories(const SourceContext &source, const CatalogScope &scope, const RequestContext &context)
 {
     if (!matches(source, scope)) return Error{ErrorCode::ContentUnavailable, context.operationId};
-    if (scope.kind != CatalogKind::Movies && (scope.kind != CatalogKind::Series || !m_seriesEnabled)) return Error{ErrorCode::UnsupportedCapability, context.operationId};
+    if (scope.kind != CatalogKind::Movies && scope.kind != CatalogKind::Series) return Error{ErrorCode::UnsupportedCapability, context.operationId};
     const auto response = api(source, scope.kind == CatalogKind::Movies ? QStringLiteral("get_vod_categories") : QStringLiteral("get_series_categories"), {}, context);
     if (const auto *error = std::get_if<Error>(&response)) return *error;
     const auto document = std::get<QJsonDocument>(response);
     if (!document.isArray()) return Error{ErrorCode::InvalidResponse, context.operationId};
     QList<VodCategory> categories;
+    QSet<QString> seen;
     for (const auto &entry : document.array()) {
         if (const auto error = context.interruption()) return *error;
         const auto object = entry.toObject();
         const auto id = identifier(object.value(QStringLiteral("category_id")));
         if (id.isEmpty()) return Error{ErrorCode::InvalidResponse, context.operationId};
+        if (seen.contains(id)) continue;
+        seen.insert(id);
         auto categoryScope = scope; categoryScope.categoryId.reset();
         VodCategory category{categoryScope, id, safeText(object.value(QStringLiteral("category_name")), source), {}};
         const auto parent = identifier(object.value(QStringLiteral("parent_id")));
@@ -260,21 +267,20 @@ Result<CatalogBatch> XtreamVodProvider::fetchCatalog(const SourceContext &source
 {
     if (!matches(source, scope)) return Error{ErrorCode::ContentUnavailable, context.operationId};
     if ((scope.kind != CatalogKind::Movies && (scope.kind != CatalogKind::Series || !m_seriesEnabled)) || cursor) return Error{ErrorCode::UnsupportedCapability, context.operationId};
-    // Always fetch the full list and filter locally: do not assume category_id
-    // filtering is honored by this server dialect.
+    // Request the scope, and still validate membership locally.
     const bool series = scope.kind == CatalogKind::Series;
-    const auto response = api(source, series ? QStringLiteral("get_series") : QStringLiteral("get_vod_streams"), {}, context);
+    const auto response = api(source, series ? QStringLiteral("get_series") : QStringLiteral("get_vod_streams"),
+        scope.categoryId ? QMap<QString, QString>{{QStringLiteral("category_id"), *scope.categoryId}} : QMap<QString, QString>{}, context);
     if (const auto *error = std::get_if<Error>(&response)) return *error;
     const auto document = std::get<QJsonDocument>(response);
     if (!document.isArray()) return Error{ErrorCode::InvalidResponse, context.operationId};
     CatalogBatch batch{scope, {}, true, {}};
-    QSet<QString> identities;
+    QHash<QString, qsizetype> identities;
     for (const auto &entry : document.array()) {
         if (const auto error = context.interruption()) return *error;
         const auto object = entry.toObject();
         const auto id = identifier(object.value(series ? QStringLiteral("series_id") : QStringLiteral("stream_id")));
-        if (id.isEmpty() || identities.contains(id) || !object.value(QStringLiteral("name")).isString()) return Error{ErrorCode::InvalidResponse, context.operationId};
-        identities.insert(id);
+        if (id.isEmpty() || !object.value(QStringLiteral("name")).isString()) return Error{ErrorCode::InvalidResponse, context.operationId};
         MovieSummary movie;
         movie.ref = {scope.profileId, scope.catalogNamespace, series ? ContentKind::Series : ContentKind::Movie, id, {}};
         movie.title = safeText(object.value(QStringLiteral("name")), source);
@@ -287,15 +293,25 @@ Result<CatalogBatch> XtreamVodProvider::fetchCatalog(const SourceContext &source
             const auto extra = identifier(value);
             if (!extra.isEmpty() && !movie.categoryIds.contains(extra)) movie.categoryIds.append(extra);
         }
-        if (scope.categoryId && !movie.categoryIds.contains(*scope.categoryId)) continue;
-        if (!series && registerArtwork) {
-            const auto art = registerArtwork(source, QUrl(object.value(QStringLiteral("stream_icon")).toString()), context);
+        if (registerArtwork) {
+            const auto art = registerArtwork(source, QUrl(object.value(series ? QStringLiteral("cover") : QStringLiteral("stream_icon")).toString()), context);
             if (art) movie.artwork.append(*art);
         }
         movie.availability = Availability::Available;
-        if (series) batch.items.append(SeriesSummary{movie.ref, movie.title, movie.year, {}, movie.categoryIds, movie.availability});
+        const auto existing = identities.constFind(id);
+        if (existing != identities.cend()) {
+            std::visit([&](auto &summary) {
+                for (const auto &categoryId : movie.categoryIds) if (!summary.categoryIds.contains(categoryId)) summary.categoryIds.append(categoryId);
+            }, batch.items[*existing]);
+            continue;
+        }
+        identities.insert(id, batch.items.size());
+        if (series) batch.items.append(SeriesSummary{movie.ref, movie.title, movie.year, movie.artwork, movie.categoryIds, movie.availability});
         else batch.items.append(movie);
     }
+    if (scope.categoryId) batch.items.removeIf([&](const CatalogItem &item) {
+        return std::visit([&](const auto &summary) { return !summary.categoryIds.contains(*scope.categoryId); }, item);
+    });
     return batch;
 }
 Result<VodDetails> XtreamVodProvider::fetchDetails(const SourceContext &source, const ContentRef &ref, const RequestContext &context)
@@ -312,7 +328,20 @@ Result<VodDetails> XtreamVodProvider::fetchDetails(const SourceContext &source, 
         const auto parsed = parseSeries(source, series, std::get<QJsonDocument>(response).object(), context);
         if (const auto *error = std::get_if<Error>(&parsed)) return *error;
         const auto &value = std::get<SeriesData>(parsed);
-        if (ref.kind == ContentKind::Series) return value.details;
+        if (ref.kind == ContentKind::Series) {
+            auto details = value.details;
+            if (registerArtwork) {
+                const auto info = std::get<QJsonDocument>(response).object().value(QStringLiteral("info")).toObject();
+                const auto art = registerArtwork(source, QUrl(info.value(QStringLiteral("cover")).toString()), context);
+                if (art) details.artwork.append(*art);
+                for (auto &episode : details.episodes) {
+                    const auto media = value.media.value(episode.ref.providerItemId).value(QStringLiteral("info")).toObject();
+                    const auto thumbnail = registerArtwork(source, QUrl(media.value(QStringLiteral("movie_image")).toString()), context);
+                    if (thumbnail) episode.artwork.append(*thumbnail);
+                }
+            }
+            return details;
+        }
         if (!value.media.contains(ref.providerItemId)) return Error{ErrorCode::ContentUnavailable, context.operationId};
         return describe(source, ref, value.media.value(ref.providerItemId).value(QStringLiteral("info")).toObject());
     }

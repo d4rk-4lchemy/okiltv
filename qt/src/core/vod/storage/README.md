@@ -9,7 +9,7 @@ into the application; B4 integration is still undergoing verification.
 contract, never an application fallback. The logical table inventory is in
 `.project/OKILTV_ARCHITEKTURA_VOD.md`, section 8.
 
-## Identity and schema version 8
+## Identity and schema version 10
 
 Use the existing application database, additive `vod_*` tables, and an independent
 `vod_schema_migrations(version INTEGER PRIMARY KEY)` marker. Migration runs on a
@@ -18,7 +18,39 @@ unavailable secret protection disables VOD without resetting Live data. Repeated
 prepare calls are idempotent and serialized. Back up consistently before B2
 migration and test rollback/restart with the real database service.
 
-Schema 8 adds `vod_movie_lists`, keyed by full content identity, with independent
+Schema 10 adds `vod_series_state`, keyed by full series identity with profile,
+namespace, `continue_hidden` and `blocked_session`. It has no catalogue foreign
+key; refresh/eviction and credential edits retain it, source removal deletes it.
+`setSeriesWatched(SeriesWatchedChange, RequestContext)` writes every supplied known
+episode (including Specials and unavailable items) atomically with suppression
+and Series To Watch removal for Watched. Unwatched resets positions, preserves
+track preferences and leaves suppression/list choices intact. Manual writes never
+move `vod_series_history`; current-session writes use its established token and
+sequence, other episodes get fresh manual tokens. Invalid/stale writes roll back
+all changes. `SeriesProgress.continuationHidden` fences the domain projection and
+SQL filters it before pagination. A confirmed playback checkpoint from a token
+other than `blocked_session` clears suppression; beginning a session or changing
+manual status alone does not. Migration recreates the continuation view while
+preserving existing history, lists, tracks and catalogues.
+
+Series Watched is derived from all known ordinary episodes; Specials are excluded
+and at least one ordinary episode is required. The domain helper `seriesWatched`
+and episode-completion SQL use the same strict 95%/manual completion criterion.
+
+Schema 9 adds `vod_series_history`: full Series identity plus source/namespace,
+provider series ID, last-played episode ID and playback update time. Checkpoints
+update this pointer atomically with episode progress only when
+`VodProgress.playbackCheckpoint` is true. Manual status edits set it false.
+Migration backfills prior episode histories without altering movie data.
+`readSeriesProgress` returns episode progress in one transaction, the remembered
+episode and its projected continuation. `vod_series_continue` projects an
+incomplete remembered episode or its immediate ordinary successor, using the
+same season/episode/provider ordering as the domain queue. It excludes completed
+Specials and series with no successor. SQL applies this projection, category,
+search and list filters before keyset pagination. Artwork for Series follows the
+same staged/published protected references as Movie.
+
+Schema 8 adds `vod_movie_lists`, keyed by full content identity, for both Movie and Series with independent
 `to_watch` and `favourite` flags and a source lookup index. There is no foreign key
 to catalogue rows: refresh, provider disappearance, eviction and credential edits
 retain the flags. Explicit source removal deletes them. Queries return membership
@@ -27,7 +59,9 @@ No provider or media requests are needed to change a list.
 
 `checkpoint(..., completed=true)` clears To Watch in the progress transaction only
 for a Movie whose effective status is Watched, after session/sequence validation.
-Failure rolls back both changes. The application supplies a completion event once
+An Episode completion clears the parent Series To Watch only when all known
+ordinary episodes have Watched status. Season zero Specials do not block it.
+Favourites remains. Failure rolls back progress, pointer and membership together. The application supplies a completion event once
 per automatic playback session, or for an explicit Mark as watched action. Re-adding
 an already completed movie is allowed and does not reset progress; later checkpoints
 without a new completion event preserve it. Favourites is never auto-cleared.
@@ -98,6 +132,15 @@ updates only existing details using local repository reads/writes and no extra
 provider/media connection; actual duration replaces the provider hint. Signed
 artwork URLs require secret protection; playback descriptors and headers are never persisted.
 
+`readSeasonMediaMetadata(series, seasonId, context)` reads episode details in one
+local read transaction using the existing seven-day detail-cache validity. It
+returns the newest measured `mediaProbe` by observation time, breaking ties by
+episode number/provider order within that series and season. It includes known
+unavailable episodes as possible metadata donors. Source/namespace fences,
+cancellation and deadlines apply; no provider, artwork or media request is made.
+The result is presentation-only and must not be persisted as another episode's
+measurement or track preference. This read requires no schema migration.
+
 ## Publication and local queries
 
 A refresh token binds scope (source/namespace/movies-or-series/optional category),
@@ -165,3 +208,18 @@ URLs are serialized in staged/published catalogue rows.
 `CatalogQuery.titleContains` adds normalized substring matching on worker SQL
 queries; the existing title-prefix contract and generation-tagged keyset pages
 remain available.
+
+## Source policy and filtered queries
+
+`CatalogQuery.allowedCategories` optionally restricts category membership before
+search, ordering, special-list filters and pagination; an explicit empty list
+returns no rows. `identity` permits bounded admission checks for a selected movie.
+Source-scoped movie/series group preferences live in SettingsManager, keyed by
+UUID plus `|movies`/`|series`, rather than a second catalogue schema.
+
+Policy changes use a process-local generation in `RequestContext.policyCurrent`.
+`publishIfCurrent` and category snapshot publication lock `policyMutex` through
+final validation/commit, so disabled/obsolete selections cannot publish. A disabled
+source can still produce a storage snapshot: network/new playback admission is in
+VodController, while active-session progress remains writable. Credential/removal
+fences and durable namespace/revision behavior are unchanged.

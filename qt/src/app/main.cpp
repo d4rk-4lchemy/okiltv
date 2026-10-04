@@ -577,7 +577,7 @@ int main(int argc, char *argv[])
                 appServices.uiTestBridge->setPlayerController(appServices.multiViewController->primaryController());
             });
 
-        // Production adapters remain dormant unless globally and individually enabled.
+        // Per-source availability controls VOD independently of the legacy technical flag.
         OKILTV::Vod::VodRuntime vodRuntime(coreServices.settings.get(), appServices.multiViewController.get(),
             appServices.dvrController.get(), appServices.timeshiftController.get());
         QObject::connect(appServices.settingsController.get(), &OKILTV::App::SettingsController::saved,
@@ -587,7 +587,38 @@ int main(int argc, char *argv[])
         QObject::connect(&vodRuntime, &OKILTV::Vod::VodRuntime::sourcesReconciled,
             appServices.profilesModel.get(), &OKILTV::App::ProfilesModel::reload);
 
+        QObject::connect(appController.get(), &OKILTV::App::AppController::sourceRefreshRequested,
+            &vodRuntime, &OKILTV::Vod::VodRuntime::synchronizeSource);
+        OKILTV::App::SourceGroupsModel movieSourceGroups(coreServices.settings.get(), coreServices.database.get(), nullptr,
+            QStringLiteral("movies"), [&vodRuntime](const QUuid &id) { return vodRuntime.sourceCategories(id, OKILTV::Vod::CatalogKind::Movies); });
+        OKILTV::App::SourceGroupsModel seriesSourceGroups(coreServices.settings.get(), coreServices.database.get(), nullptr,
+            QStringLiteral("series"), [&vodRuntime](const QUuid &id) { return vodRuntime.sourceCategories(id, OKILTV::Vod::CatalogKind::Series); });
+        for (auto *groups : {&movieSourceGroups, &seriesSourceGroups}) {
+            groups->setAutoPersist(false);
+            const auto updateSyncState = [&vodRuntime, groups]() {
+                const QUuid id(groups->profileId());
+                groups->setSyncState(vodRuntime.syncing(id), vodRuntime.syncError(id));
+            };
+            QObject::connect(&vodRuntime, &OKILTV::Vod::VodRuntime::sourceSyncChanged, groups,
+                [updateSyncState](const QUuid &) { updateSyncState(); });
+            QObject::connect(groups, &OKILTV::App::SourceGroupsModel::profileIdChanged, groups, updateSyncState);
+            QObject::connect(&vodRuntime, &OKILTV::Vod::VodRuntime::categoriesUpdated, groups, [groups](const QUuid &id) {
+                if (QUuid(groups->profileId()) == id) groups->reload();
+            });
+            QObject::connect(&vodRuntime, &OKILTV::Vod::VodRuntime::sourcesReconciled, groups, &OKILTV::App::SourceGroupsModel::reload);
+        }
+        QObject::connect(&seriesSourceGroups, &OKILTV::App::SourceGroupsModel::groupsSaved, &vodRuntime,
+            [&vodRuntime](const QString &id, bool selectionChanged) { if (selectionChanged) vodRuntime.policyChanged(QUuid(id)); else emit vodRuntime.sourceUpdated(QUuid(id)); });
+        QObject::connect(&movieSourceGroups, &OKILTV::App::SourceGroupsModel::groupsSaved, &vodRuntime,
+            [&vodRuntime](const QString &id, bool selectionChanged) {
+                if (selectionChanged) vodRuntime.policyChanged(QUuid(id));
+                else emit vodRuntime.sourceUpdated(QUuid(id));
+            });
         OKILTV::Vod::VodCatalogModel vodCatalog(&vodRuntime, coreServices.settings.get());
+        OKILTV::Vod::VodCatalogModel vodSeriesCatalog(&vodRuntime, coreServices.settings.get(), nullptr,
+            OKILTV::Vod::VodCatalogModel::Purpose::Library, OKILTV::Vod::CatalogKind::Series);
+        QObject::connect(&vodRuntime, &OKILTV::Vod::VodRuntime::seriesReturnRequested,
+            &vodSeriesCatalog, &OKILTV::Vod::VodCatalogModel::openSeries);
         OKILTV::Vod::VodCatalogModel vodPlaybackCatalog(&vodRuntime, coreServices.settings.get(), nullptr,
             OKILTV::Vod::VodCatalogModel::Purpose::PlaybackSidebar);
         QObject::connect(appServices.settingsController.get(), &OKILTV::App::SettingsController::saved,
@@ -600,8 +631,11 @@ int main(int argc, char *argv[])
                 appController.get(), &OKILTV::App::AppController::dismissGroupAutoEnableNotice);
         }
         registerQmlContextProperties(engine, appController.get(), appServices);
+        engine.rootContext()->setContextProperty(QStringLiteral("movieSourceGroupsModel"), &movieSourceGroups);
+        engine.rootContext()->setContextProperty(QStringLiteral("seriesSourceGroupsModel"), &seriesSourceGroups);
         engine.rootContext()->setContextProperty(QStringLiteral("vodRuntime"), &vodRuntime);
         engine.rootContext()->setContextProperty(QStringLiteral("vodCatalog"), &vodCatalog);
+        engine.rootContext()->setContextProperty(QStringLiteral("vodSeriesCatalog"), &vodSeriesCatalog);
         engine.rootContext()->setContextProperty(QStringLiteral("vodPlaybackCatalog"), &vodPlaybackCatalog);
         startupStep(QStringLiteral("QML context properties registered."));
 

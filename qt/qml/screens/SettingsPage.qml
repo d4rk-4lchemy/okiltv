@@ -15,6 +15,7 @@ Item {
     // qmllint enable unqualified
 
     property bool overlayMode: false
+    property real navigationTopInset: 0
     // qmllint disable unqualified
     readonly property var shell: shellController
     readonly property var settings: settingsController
@@ -209,8 +210,8 @@ Item {
     function requestClose() {
         root.pendingSectionAfterDiscard = ""
         if (root.activeSection === "sources"
-            && root.groups.hasGroups
-            && root.groups.selectedCount === 0) {
+            && root.sourcesPaneRef
+            && root.sourcesPaneRef.emptyGroupSelection) {
             root.pendingSectionAfterGroupWarning = ""
             root.closeAfterGroupWarning = true
             root.confirmNoGroupsSelectedVisible = true
@@ -230,8 +231,8 @@ Item {
         }
 
         if (root.activeSection === "sources"
-            && root.groups.hasGroups
-            && root.groups.selectedCount === 0) {
+            && root.sourcesPaneRef
+            && root.sourcesPaneRef.emptyGroupSelection) {
             root.pendingSectionAfterGroupWarning = normalizedSection
             root.closeAfterGroupWarning = false
             root.confirmNoGroupsSelectedVisible = true
@@ -333,6 +334,7 @@ Item {
 
             Loader {
                 anchors.fill: parent
+                anchors.topMargin: root.navigationTopInset
                 sourceComponent: root.activeSection === "sources" ? sourcesSection : standardSettingsSection
             }
         }
@@ -347,7 +349,7 @@ Item {
 
             ColumnLayout {
                 anchors.fill: parent
-                anchors.topMargin: Theme.spacingM
+                anchors.topMargin: Theme.spacingM + root.navigationTopInset
                 anchors.bottomMargin: Theme.spacingM
                 anchors.leftMargin: 8
                 anchors.rightMargin: 8

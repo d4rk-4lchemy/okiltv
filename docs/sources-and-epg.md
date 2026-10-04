@@ -34,6 +34,10 @@ decimal channel numbers to integers or conflate them with database IDs.
 
 ## Import and group contracts
 
+Live TV source requests (Xtream authentication, categories and streams, and remote
+M3U playlists) use a 90-second total HTTP request timeout. Sequential requests
+each receive their own limit, so a complete source refresh can take longer.
+
 - Xtream category/stream endpoints must return arrays. Reject malformed shapes
   with bounded, redacted diagnostics. Persist human-readable category names.
 - M3U supports header defaults and per-entry overrides, relative stream/logo/XMLTV
@@ -53,6 +57,22 @@ decimal channel numbers to integers or conflate them with database IDs.
 M3U is a catalogue format and HLS is a transport; do not infer transport features
 from the source type. The [source feature matrix](../.project/source-feature-parity.md)
 contains the detailed parity and archive-template rules.
+
+## VOD source refresh
+
+Xtream’s saved Enable VOD setting controls library availability and defaults to
+true after a per-profile protected migration. The shared source-refresh entrypoint
+emits `sourceRefreshRequested` to `VodRuntime`; movie/series category import and
+selected movie synchronization run independently of channel and EPG work. Adding
+or enabling a source also starts this flow. Series import is category-only and
+independent of the global series playback flag. M3U VOD remains unsupported.
+
+Settings group editors retain independent media/source selection, order, search
+and Hide Unchecked drafts, including provider categories without cached titles.
+Category reconciliation uses Live’s up-to-50 auto-enable rule. Selected movie
+categories determine the sequential category requests below 30% or full catalogue
+request at/above 30%; local membership filtering and a single atomic publication
+protect against ignored server filters and partial failures. See [VOD](vod.md).
 
 ## EPG pipeline
 

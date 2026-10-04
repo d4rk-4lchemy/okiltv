@@ -10,6 +10,7 @@ FocusScope {
     property int uiTransparency: 100
     property bool shown: false
     property bool inputAllowed: true
+    property real topContentInset: 0
     property bool searchPending: false
     property bool listPending: false
     readonly property bool searchActive: searchHeader.field.activeFocus
@@ -66,7 +67,7 @@ FocusScope {
         anchors.fill: parent
         anchors.leftMargin: 4
         anchors.rightMargin: 8
-        anchors.topMargin: Theme.spacingM
+        anchors.topMargin: Theme.spacingM + root.topContentInset
         anchors.bottomMargin: Theme.spacingM
         spacing: 12
         PlaybackSearchHeader {
@@ -74,7 +75,7 @@ FocusScope {
             Layout.fillWidth: true
             searchObjectName: "ui.vod.playback.search"
             switchActionObjectName: "ui.vod.playback.openGroups"
-            placeholderText: "Search movies"
+            placeholderText: root.catalog.series ? "Search series" : "Search movies"
             switchText: "← Groups"
             text: root.catalog ? root.catalog.searchText : ""
             uiTransparency: root.uiTransparency
@@ -115,7 +116,9 @@ FocusScope {
             model: root.catalog
             currentIndex: -1
             spacing: 2
-            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+            ScrollBar.vertical: VodScrollBar {
+                id: listScrollBar
+            }
             onAtYEndChanged: Qt.callLater(root.fetchMore)
             onCountChanged: Qt.callLater(root.fetchMore)
             onContentYChanged: { if (moving) root.interaction("pointer") }
@@ -133,7 +136,7 @@ FocusScope {
                 readonly property bool playing: root.catalog !== null && movieKey === root.catalog.playingMovieKey
                 readonly property bool inViewport: y + height > list.contentY && y < list.contentY + list.height
                 objectName: "ui.vod.playback.row." + index
-                width: list.width
+                width: Math.max(0, list.width - listScrollBar.width - Theme.vodScrollBarGap)
                 height: 124
                 color: list.currentIndex === index ? Theme.uiBackground(Theme.overlaySurfaceInteractive, root.uiTransparency) : "transparent"
                 Rectangle { anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom; width: 3; visible: row.playing; color: Theme.accent }

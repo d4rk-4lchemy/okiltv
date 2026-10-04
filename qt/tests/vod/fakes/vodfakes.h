@@ -6,6 +6,7 @@
 #include <QMutexLocker>
 #include <QThread>
 #include <algorithm>
+#include <climits>
 
 namespace OKILTV::Vod::Test {
 inline SourceContext makeSource()
@@ -178,6 +179,23 @@ public:
         if (!m_details.contains(ref.key())) return std::optional<VodDetails>{};
         return std::optional<VodDetails>{m_details.value(ref.key())};
     }
+    Result<std::optional<VodMediaProbe>> readSeasonMediaMetadata(const ContentRef &series, const QString &seasonId, const RequestContext &context) override
+    {
+        QMutexLocker lock(&m_mutex);
+        if (const auto error = check(context)) return *error;
+        auto episodes = m_details.value(series.key()).episodes;
+        std::stable_sort(episodes.begin(), episodes.end(), [](const EpisodeSummary &a, const EpisodeSummary &b) {
+            if (a.number != b.number) return a.number.value_or(INT_MAX) < b.number.value_or(INT_MAX);
+            return a.order < b.order;
+        });
+        std::optional<VodMediaProbe> newest;
+        for (const auto &episode : episodes) {
+            if (episode.seasonId.value_or(QString{}) != seasonId) continue;
+            const auto metadata = m_details.value(episode.ref.key()).mediaProbe;
+            if (metadata && (!newest || metadata->observedAtUtc > newest->observedAtUtc)) newest = metadata;
+        }
+        return newest;
+    }
     Outcome storeDetails(const VodDetails &details, const RequestContext &context) override
     {
         QMutexLocker lock(&m_mutex);
@@ -190,6 +208,15 @@ public:
         QMutexLocker lock(&m_mutex);
         if (const auto error = check(context)) return *error;
         m_pages.remove(scopeKey(scope)); m_categories.remove(scopeKey(scope)); m_categoryRequests.remove(scopeKey(scope)); m_details.clear(); return Success{};
+    }
+    Result<SeriesProgress> readSeriesProgress(const ContentRef &series,const RequestContext &context) override {
+        QMutexLocker lock(&m_mutex);
+        if (const auto error=check(context)) return *error;
+        SeriesProgress result;result.lastEpisode=m_seriesLast.value(series.key());
+        result.continuationHidden = m_seriesHidden.contains(series.key());
+        for (const auto &episode : m_details.value(series.key()).episodes)
+            if (m_progress.contains(episode.ref.key())) result.episodes.insert(episode.ref.key(),m_progress.value(episode.ref.key()));
+        return result;
     }
     Result<std::optional<VodProgress>> read(const ContentRef &ref, const RequestContext &context) override
     {
@@ -214,8 +241,44 @@ public:
             || progress.positionMs < 0) return Error{ErrorCode::Cancelled, context.operationId};
         m_sequences[ref.key()] = progress.sequence;
         m_progress[ref.key()] = progress;
-        if (completed && progress.status == WatchStatus::Watched) m_lists[ref.key()].toWatch = false;
+        if (ref.kind==ContentKind::Episode && progress.playbackCheckpoint) {
+            const auto series = parentSeries(ref).key();
+            m_seriesLast[series]=ref;
+            if (m_seriesHidden.contains(series) && m_seriesHidden.value(series) != progress.sessionToken) m_seriesHidden.remove(series);
+        }
+        if (completed && progress.status == WatchStatus::Watched) {
+            if (ref.kind == ContentKind::Episode) {
+                const auto series = parentSeries(ref);
+                const auto history = std::get<SeriesProgress>(readSeriesProgress(series, context));
+                if (seriesWatched(m_details.value(series.key()), history)) m_lists[series.key()].toWatch = false;
+            } else m_lists[ref.key()].toWatch = false;
+        }
         ++checkpoints;
+        return Success{};
+    }
+    Outcome setSeriesWatched(const SeriesWatchedChange &change, const RequestContext &context) override {
+        QMutexLocker lock(&m_mutex);
+        if (const auto error = check(context)) return *error;
+        QSet<QByteArray> seen;
+        if (change.series.kind != ContentKind::Series || change.episodes.isEmpty()) return Error{ErrorCode::InvalidResponse, context.operationId};
+        for (const auto &ref : change.episodes) {
+            if (!ref.valid() || ref.kind != ContentKind::Episode || parentSeries(ref) != change.series || seen.contains(ref.key())) return Error{ErrorCode::InvalidResponse, context.operationId};
+            seen.insert(ref.key());
+            if (ref == change.activeEpisode && (change.blockedSession.isNull() || change.activeSequence == 0 || m_sessions.value(ref.key()) != change.blockedSession || m_sequences.value(ref.key()) >= change.activeSequence))
+                return Error{ErrorCode::Cancelled, context.operationId};
+        }
+        for (const auto &ref : change.episodes) {
+            auto progress = m_progress.value(ref.key());
+            if (ref == change.activeEpisode) {
+                if (change.activeProgress) progress = *change.activeProgress;
+                progress.sessionToken = change.blockedSession; progress.sequence = change.activeSequence;
+            } else { progress.sessionToken = QUuid::createUuid(); progress.sequence = 1; }
+            progress.status = change.watched ? WatchStatus::Watched : WatchStatus::InProgress;
+            if (!change.watched) progress.positionMs = 0;
+            progress.playbackCheckpoint = false; progress.updatedAtUtc = QDateTime::currentDateTimeUtc();
+            m_progress[ref.key()] = progress; m_sessions[ref.key()] = progress.sessionToken; m_sequences[ref.key()] = progress.sequence;
+        }
+        if (change.watched) { m_seriesHidden[change.series.key()] = change.blockedSession; m_lists[change.series.key()].toWatch = false; }
         return Success{};
     }
     Result<MovieListState> readMovieLists(const ContentRef &ref, const RequestContext &context) override
@@ -228,7 +291,7 @@ public:
     {
         QMutexLocker lock(&m_mutex);
         if (const auto error = check(context)) return *error;
-        if (ref.kind != ContentKind::Movie || (list != MovieList::ToWatch && list != MovieList::Favourites))
+        if ((ref.kind != ContentKind::Movie && ref.kind != ContentKind::Series) || (list != MovieList::ToWatch && list != MovieList::Favourites))
             return Error{ErrorCode::InvalidResponse, context.operationId};
         auto &state = m_lists[ref.key()];
         if (list == MovieList::ToWatch) state.toWatch = enabled;
@@ -239,7 +302,7 @@ public:
     {
         QMutexLocker lock(&m_mutex);
         if (!m_removing || id != m_source.revision.profileId) return Error{ErrorCode::StorageUnavailable, {}};
-        m_lists.clear(); m_pages.clear(); m_categories.clear(); m_categoryRequests.clear(); m_details.clear(); m_progress.clear(); m_sessions.clear(); m_sequences.clear(); m_staging.clear();
+        m_lists.clear(); m_pages.clear(); m_categories.clear(); m_categoryRequests.clear(); m_details.clear(); m_progress.clear(); m_seriesLast.clear(); m_seriesHidden.clear(); m_sessions.clear(); m_sequences.clear(); m_staging.clear();
         return Success{};
     }
 private:
@@ -261,6 +324,8 @@ private:
     QHash<QByteArray, CategorySnapshot> m_categories;
     QHash<QByteArray, QUuid> m_categoryRequests;
     QHash<QByteArray, VodProgress> m_progress;
+    QHash<QByteArray,std::optional<ContentRef>> m_seriesLast;
+    QHash<QByteArray, QUuid> m_seriesHidden;
     QHash<QByteArray, MovieListState> m_lists;
     QHash<QByteArray, QUuid> m_sessions;
     QHash<QByteArray, quint64> m_sequences;

@@ -23,8 +23,23 @@ ApplicationWindow {
     color: Theme.window
     property bool allowWindowClose: false
     property string pendingCloseSource: ""
-    readonly property bool topBarVisible: livePage.topBarVisible
-    readonly property int topBarReservedHeight: windowChromeBar.occupiedHeight
+    readonly property bool topBarVisible: windowChromeBar.visible
+    readonly property int topBarReservedHeight: window.visibility === Window.FullScreen
+        ? 0 : windowChromeBar.occupiedHeight
+    readonly property int mediaNavigationHeight: mediaModeChrome.occupiedHeight
+    readonly property real mediaNavigationWidth: mediaModeChrome.navigationWidth
+    readonly property bool modeNavigationFocused: mediaModeChrome.navigationFocused
+    readonly property bool chromeAnimationsRunning: livePage.chromeAnimationsRunning
+        || windowChromeBar.animating || mediaModeChrome.animating
+    readonly property string selectedMediaMode: window.vodOpen ? window.vodLibraryKind
+        : window.vod && (window.vod.active || window.vod.episodeTransition)
+            ? (window.vod.activeSeries ? "series" : "movies") : "live"
+    property bool pendingLiveNavigation: false
+    readonly property bool modeNavigationEnabled: window.shell.activeOverlay !== "settings"
+        && !window.vodTransitioning && !livePage.chromeAnimationsRunning
+        && !window.pendingLiveNavigation && !(window.vod && window.vod.liveTransition)
+        && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible
+        && !window.downloads.shuttingDown && !window.multiView.degradePromptVisible
 
     FontLoader {
         id: plexRegular
@@ -45,6 +60,8 @@ ApplicationWindow {
     readonly property var vod: typeof vodRuntime !== "undefined" ? vodRuntime : null
     // qmllint enable unqualified
     readonly property bool vodOpen: window.shell.activeOverlay === "vod"
+    property string vodLibraryKind: "movies"
+    readonly property var vodPage: vodLibraryKind === "series" ? seriesPage : moviesPage
     property bool vodMounted: false
     property bool vodClosing: false
     property real vodSlideProgress: 0
@@ -80,6 +97,7 @@ ApplicationWindow {
             { sequence: "J", key: Qt.Key_J, scope: "live" },
             { sequence: "L", key: Qt.Key_L, scope: "live" },
             { sequence: "Home", key: Qt.Key_Home, scope: "live" },
+            { sequence: "Backspace", key: Qt.Key_Backspace, scope: "vodBack" },
             { sequence: "Up", key: Qt.Key_Up, scope: "live" },
             { sequence: "Down", key: Qt.Key_Down, scope: "live" },
             { sequence: "Left", key: Qt.Key_Left, scope: "live" },
@@ -188,17 +206,46 @@ ApplicationWindow {
         window.requestAppClose("window")
     }
 
-    function toggleVod() {
+    function toggleVod(kind = "movies") {
         if (window.vodTransitioning) return true
         if (window.textEditorFocused || window.shell.activeOverlay === "settings"
             || downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
             return false
-        if (window.vodOpen) closeVod()
-        else window.shell.openOverlay("vod")
+        if (window.vodOpen && window.vodLibraryKind === kind) closeVod()
+        else window.openVodLibrary(kind)
         return true
+    }
+    function openVodLibrary(kind) {
+        if (window.vodOpen && window.vodLibraryKind === kind) return
+        const switching = window.vodOpen
+        if (switching) window.vodPage.catalog.close()
+        window.vodLibraryKind = kind
+        if (switching) window.vodPage.prepareForOpen()
+        else window.shell.openOverlay("vod")
+    }
+    function selectMediaMode(mode) {
+        if (!window.modeNavigationEnabled) return
+        if (mode !== "live") {
+            window.openVodLibrary(mode)
+            return
+        }
+        if (window.vod) window.vod.finishLibraryBrowsing(false)
+        if (window.vodOpen) {
+            window.pendingLiveNavigation = true
+            window.closeVod()
+        } else window.activateLiveSection()
+    }
+    function activateLiveSection() {
+        window.shell.clearOverlay()
+        livePage.forceActiveFocus()
+        if (window.vod) window.vod.returnToLive()
+        else window.app.returnToLive()
+        window.pendingLiveNavigation = false
+        livePage.revealUi("pointer")
     }
     onVodOpenChanged: {
         if (window.vodOpen) {
+            if (window.vod) window.vod.beginLibraryBrowsing()
             vodSlideAnimation.stop()
             window.vodClosing = false
             window.vodSlideProgress = 0
@@ -224,11 +271,17 @@ ApplicationWindow {
         window.vodMounted = false
         window.vodClosing = false
         window.vodSlideProgress = 0
+        if (!clearOverlay) window.pendingLiveNavigation = false
+        if (window.pendingLiveNavigation && clearOverlay) {
+            window.activateLiveSection()
+            return
+        }
         if (clearOverlay && window.vodOpen) {
             window.shell.clearOverlay()
             window.shell.overlaysVisible = false
             livePage.forceActiveFocus()
         }
+        if (window.shell.activeOverlay === "none" && window.vod) window.vod.finishLibraryBrowsing()
     }
     function dispatchShortcut(key, modifiers, text) {
         if (downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
@@ -245,9 +298,16 @@ ApplicationWindow {
     }
 
     function shortcutEnabled(scope) {
+        if (window.modeNavigationFocused && scope !== "always") return false
+        if (livePage.vodSeasonFocused && (scope === "live" || scope === "overlay")) return false
         if (downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
             return false
         if (window.vodOpen) return false
+        if (scope === "vodBack") {
+            return livePage.vodActive && window.shell.activeOverlay === "none"
+                && !window.shell.overlaysVisible && !window.textEditorFocused
+                && !livePage.leftPickerOpen && !livePage.chromeAnimationsRunning
+        }
         if (scope === "grid" || scope === "guideOrGrid") {
             return livePage.multiviewSelectionAvailable
                 || (scope === "guideOrGrid" && window.shell.activeOverlay === "guide")
@@ -278,6 +338,7 @@ ApplicationWindow {
 
             sequence: modelData.sequence
             autoRepeat: modelData.sequence !== "Ctrl+O"
+                && modelData.sequence !== "Backspace"
                 && modelData.sequence !== "Ctrl+Return" && modelData.sequence !== "Ctrl+Enter"
             enabled: window.shortcutEnabled(modelData.scope)
             onActivated: window.dispatchShortcut(
@@ -291,9 +352,19 @@ ApplicationWindow {
         sequence: "V"
         autoRepeat: false
         enabled: !window.textEditorFocused && window.shell.activeOverlay !== "settings"
+            && !window.pendingLiveNavigation && !(window.vod && window.vod.liveTransition)
             && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
         onActivated: window.toggleVod()
     }
+    Shortcut {
+        sequence: "B"
+        autoRepeat: false
+        enabled: !window.textEditorFocused && window.shell.activeOverlay !== "settings"
+            && !window.pendingLiveNavigation && !(window.vod && window.vod.liveTransition)
+            && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
+        onActivated: window.toggleVod("series")
+    }
+
 
     Shortcut {
         sequence: "M"
@@ -315,8 +386,12 @@ ApplicationWindow {
 
     Shortcut {
         sequence: "Tab"
-        enabled: window.overlayShortcutsEnabled
-        onActivated: window.dispatchShortcut(Qt.Key_Tab)
+        enabled: window.overlayShortcutsEnabled && !window.modeNavigationFocused
+        onActivated: {
+            if (livePage.searchFieldActive && mediaModeChrome.visible && window.modeNavigationEnabled)
+                mediaModeChrome.focusNavigation()
+            else window.dispatchShortcut(Qt.Key_Tab)
+        }
     }
 
     LiveTvPage {
@@ -324,7 +399,11 @@ ApplicationWindow {
         anchors.fill: parent
         mainWindow: window
         downloadIndicatorVisible: downloadUi.indicatorVisible
-        topBarExternalHideLock: windowChromeBar.interactionActive || windowResizeHandles.interactionActive || downloadUi.interactionActive
+        topBarExternalHideLock: windowChromeBar.interactionActive || mediaModeChrome.interactionActive
+            || windowResizeHandles.interactionActive || downloadUi.interactionActive
+        onTopBarExternalHideLockChanged: {
+            if (topBarExternalHideLock) livePage.revealUi("pointer")
+        }
     }
 
     NumberAnimation {
@@ -355,10 +434,11 @@ ApplicationWindow {
         }
 
         VodMoviesPage {
-            id: vodPage
+            id: moviesPage
             objectName: "ui.vod.page"
             anchors.fill: parent
-            enabled: window.vodOpen && !window.vodTransitioning
+            visible: window.vodLibraryKind === "movies"
+            enabled: visible && window.vodOpen && !window.vodTransitioning
                 && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible
             transform: Translate { y: (1 - window.vodSlideProgress) * vodOverlayFrame.height }
             // qmllint disable unqualified
@@ -366,16 +446,57 @@ ApplicationWindow {
             // qmllint enable unqualified
             uiTransparency: window.settings.uiTransparency
             windowWidth: window.width
+            navigationTopInset: Theme.mediaModeChromeHeight
             preferredSidebarWidth: window.shell.vodLibrarySidebarWidth
             onSidebarWidthCommitted: newWidth => window.shell.setVodLibrarySidebarWidth(newWidth)
             onCloseRequested: window.closeVod()
             Connections {
-                target: vodPage.catalog
+                target: moviesPage.catalog
+                function onPlaybackStarted() { window.closeVod() }
+            }
+        }
+        VodMoviesPage {
+            id: seriesPage
+            objectName: "ui.vod.seriesPage"
+            anchors.fill: parent
+            visible: window.vodLibraryKind === "series"
+            enabled: visible && window.vodOpen && !window.vodTransitioning
+                && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible
+            transform: Translate { y: (1 - window.vodSlideProgress) * vodOverlayFrame.height }
+            // qmllint disable unqualified
+            catalog: vodSeriesCatalog
+            // qmllint enable unqualified
+            uiTransparency: window.settings.uiTransparency
+            windowWidth: window.width
+            navigationTopInset: Theme.mediaModeChromeHeight
+            preferredSidebarWidth: window.shell.vodLibrarySidebarWidth
+            onSidebarWidthCommitted: newWidth => window.shell.setVodLibrarySidebarWidth(newWidth)
+            onCloseRequested: window.closeVod()
+            Connections {
+                target: seriesPage.catalog
                 function onPlaybackStarted() { window.closeVod() }
             }
         }
     }
 
+    Timer {
+        interval: 100
+        repeat: true
+        running: window.vod && window.vod.libraryReturnPending
+        onTriggered: {
+            if (window.shell.activeOverlay !== "settings" && !window.vodTransitioning && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible)
+                window.vod.deliverLibraryReturn()
+        }
+    }
+    Connections {
+        target: window.vod
+        function onLiveRequested() { window.app.returnToLive() }
+        function onLibraryRequested() {
+            window.vodLibraryKind = "series"
+            if (!window.vodOpen) window.shell.openOverlay("vod")
+            else window.vodPage.prepareForOpen()
+        }
+    }
     CatchupDownloads {
         dateTimePattern: window.dateTime.dateTimePattern
         id: downloadUi
@@ -413,7 +534,36 @@ ApplicationWindow {
         window: window
         livePage: livePage
         targetVisible: livePage.topBarVisible
+        uiTransparency: window.settings.uiTransparency
         z: 30
+    }
+
+    MediaModeChrome {
+        id: mediaModeChrome
+        parent: window.contentItem
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.topMargin: window.topBarReservedHeight
+        // Navigation stays fixed above the library and through the Live reveal.
+        targetVisible: livePage.showHoverUi || window.vodMounted || window.pendingLiveNavigation
+            || (window.vod && window.vod.liveTransition) || livePage.chromeAnimationsRunning
+        selectedMode: window.selectedMediaMode
+        navigationEnabled: window.modeNavigationEnabled
+        uiTransparency: window.settings.uiTransparency
+        onModeRequested: mode => window.selectMediaMode(mode)
+        onNavigationDismissed: livePage.forceActiveFocus()
+        z: 30
+    }
+
+    Connections {
+        target: window.shell
+        function onActiveOverlayChanged() {
+            Qt.callLater(function() {
+                if (window.shell.activeOverlay === "none" && !window.vodMounted
+                    && !window.pendingLiveNavigation && window.vod) window.vod.finishLibraryBrowsing()
+            })
+        }
     }
 
     BusyIndicator {

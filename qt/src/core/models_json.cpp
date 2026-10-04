@@ -226,6 +226,7 @@ QJsonObject toJson(const ServerProfile &profile)
     object.insert(QStringLiteral("catchupSafetyMinutes"), std::clamp(profile.catchupSafetyMinutes, 0, 30));
     object.insert(QStringLiteral("vodEnabled"), profile.vodEnabled);
     object.insert(QStringLiteral("vodCredentialRevision"), QString::number(profile.vodCredentialRevision));
+    object.insert(QStringLiteral("vodDefaultsVersion"), profile.vodDefaultsVersion);
     object.insert(QStringLiteral("m3UUrl"), profile.m3uUrl);
     object.insert(QStringLiteral("m3UFilePath"), profile.m3uFilePath);
     object.insert(QStringLiteral("xmltvUrl"), profile.xmltvUrl);
@@ -253,7 +254,8 @@ ServerProfile serverProfileFromJson(const QJsonObject &object)
     profile.xtreamPassword = object.value(QStringLiteral("xtreamPassword")).toString();
     profile.xtreamServerTimezone = object.value(QStringLiteral("xtreamServerTimezone")).toString().trimmed();
     profile.catchupSafetyMinutes = std::clamp(object.value(QStringLiteral("catchupSafetyMinutes")).toInt(3), 0, 30);
-    profile.vodEnabled = object.value(QStringLiteral("vodEnabled")).toBool(false);
+    profile.vodEnabled = object.value(QStringLiteral("vodEnabled")).toBool(true);
+    profile.vodDefaultsVersion = object.value(QStringLiteral("vodDefaultsVersion")).toInt(0);
     profile.vodCredentialRevision = std::max(quint64(1), object.value(QStringLiteral("vodCredentialRevision")).toVariant().toULongLong());
     profile.m3uUrl = object.value(QStringLiteral("m3UUrl")).toString();
     profile.m3uFilePath = object.value(QStringLiteral("m3UFilePath")).toString();

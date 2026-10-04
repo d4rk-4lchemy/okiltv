@@ -18,6 +18,7 @@ public:
     [[nodiscard]] PlaybackOwner owner() const { return m_owner; }
     [[nodiscard]] Player::IPlaybackEngine *activeEngine() const;
     [[nodiscard]] bool playing() const;
+    [[nodiscard]] const SessionSnapshot &sessionSnapshot() const { return m_session.snapshot(); }
     std::function<void(const SessionSnapshot &, bool)> changed;
     std::function<bool(const SourceRevision &)> sourceIsCurrent;
 private:

@@ -10,17 +10,21 @@ Item {
     property var window
     property var livePage
     property bool targetVisible: false
-    property int barHeight: 33
+    property int barHeight: Theme.titleBarHeight
+    property int uiTransparency: 100
     property int edgeThickness: 8
     property int topResizeThickness: 3
-    property int buttonSize: 30
+    property int buttonSize: Theme.titleBarButtonSize
     property color barFillColor: "#82070d12"
 
     implicitHeight: barHeight
     height: barHeight
-    visible: root.window !== undefined && root.window !== null && root.window.visibility !== Window.FullScreen && (root.targetVisible || root.opacity > 0.01)
-    enabled: root.window !== undefined && root.window !== null && root.window.visibility !== Window.FullScreen && root.opacity > 0.01
-    opacity: root.window !== undefined && root.window !== null && root.window.visibility !== Window.FullScreen && root.targetVisible ? 1.0 : 0.0
+    readonly property bool allowedInWindow: root.window !== undefined && root.window !== null
+        && root.window.visibility !== Window.FullScreen
+    readonly property bool animating: opacityAnimation.running || slideAnimation.running
+    visible: root.allowedInWindow && (root.targetVisible || root.opacity > 0.01)
+    enabled: root.allowedInWindow && root.targetVisible && root.opacity > 0.01 && !root.animating
+    opacity: root.allowedInWindow && root.targetVisible ? 1.0 : 0.0
     readonly property int occupiedHeight: root.visible ? root.barHeight : 0
 
     readonly property bool canResize: root.window !== undefined && root.window !== null && root.window.visibility !== Window.FullScreen && root.window.visibility !== Window.Maximized
@@ -46,6 +50,7 @@ Item {
 
     Behavior on opacity {
         NumberAnimation {
+            id: opacityAnimation
             duration: Theme.transitionMs * 0.8
             easing.type: Easing.OutCubic
         }
@@ -56,6 +61,7 @@ Item {
 
         Behavior on y {
             NumberAnimation {
+                id: slideAnimation
                 duration: Theme.transitionMs
                 easing.type: Easing.OutCubic
             }
@@ -71,6 +77,7 @@ Item {
     GlassPanel {
         anchors.fill: parent
         fillColor: root.barFillColor
+        uiTransparency: root.uiTransparency
         strokeColor: "transparent"
         radiusSize: 0
     }
@@ -220,17 +227,16 @@ Item {
 
         RowLayout {
             anchors.left: parent.left
-            anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             anchors.leftMargin: 5
-            anchors.rightMargin: 0
+            width: Math.max(0, root.width - windowButtons.width - 20)
             height: root.barHeight
             spacing: Theme.spacingS
 
             Image {
                 Layout.alignment: Qt.AlignVCenter
-                Layout.preferredWidth: 18
-                Layout.preferredHeight: 18
+                Layout.preferredWidth: Theme.titleBarIconSize
+                Layout.preferredHeight: Theme.titleBarIconSize
                 source: "qrc:/resources/icons/app.png"
                 fillMode: Image.PreserveAspectFit
                 smooth: true
@@ -242,80 +248,83 @@ Item {
                 Layout.fillWidth: true
                 text: "OKILTV"
                 color: Theme.textPrimary
-                font.pixelSize: 13
+                font.pixelSize: Theme.titleBarFontSize
                 font.bold: true
                 elide: Text.ElideRight
                 renderType: Text.NativeRendering
             }
 
-            Item {
-                Layout.fillWidth: true
+        }
+
+        RowLayout {
+            id: windowButtons
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 1
+
+            IconActionButton {
+                id: minimizeButton
+                objectName: "ui.window.minimize"
+                compact: true
+                borderless: true
+                barMode: true
+                implicitWidth: root.buttonSize
+                implicitHeight: root.buttonSize
+                iconName: "windowMinimize"
+                iconInset: 3
+                caption: "Minimize"
+                onClicked: {
+                    root.revealChrome();
+                    if (root.window) {
+                        root.window.showMinimized();
+                    }
+                }
             }
 
-            RowLayout {
-                Layout.alignment: Qt.AlignVCenter
-                spacing: 1
-
-                IconActionButton {
-                    id: minimizeButton
-                    compact: true
-                    borderless: true
-                    barMode: true
-                    implicitWidth: root.buttonSize
-                    implicitHeight: root.buttonSize
-                    iconName: "windowMinimize"
-                    iconInset: 3
-                    caption: "Minimize"
-                    onClicked: {
-                        root.revealChrome();
-                        if (root.window) {
-                            root.window.showMinimized();
-                        }
+            IconActionButton {
+                id: maximizeButton
+                objectName: "ui.window.maximize"
+                compact: true
+                borderless: true
+                barMode: true
+                implicitWidth: root.buttonSize
+                implicitHeight: root.buttonSize
+                iconName: root.window && root.window.visibility === Window.Maximized ? "windowRestore" : "windowMaximize"
+                iconInset: 3
+                caption: root.window && root.window.visibility === Window.Maximized ? "Restore down" : "Maximize"
+                onClicked: {
+                    root.revealChrome();
+                    if (!root.window) {
+                        return;
+                    }
+                    if (root.window.visibility === Window.Maximized) {
+                        root.window.showNormal();
+                    } else {
+                        root.window.showMaximized();
                     }
                 }
+            }
 
-                IconActionButton {
-                    id: maximizeButton
-                    compact: true
-                    borderless: true
-                    barMode: true
-                    implicitWidth: root.buttonSize
-                    implicitHeight: root.buttonSize
-                    iconName: root.window && root.window.visibility === Window.Maximized ? "windowRestore" : "windowMaximize"
-                    iconInset: 3
-                    caption: root.window && root.window.visibility === Window.Maximized ? "Restore down" : "Maximize"
-                    onClicked: {
-                        root.revealChrome();
-                        if (!root.window) {
-                            return;
-                        }
-                        if (root.window.visibility === Window.Maximized) {
-                            root.window.showNormal();
-                        } else {
-                            root.window.showMaximized();
-                        }
-                    }
-                }
-
-                IconActionButton {
-                    id: closeButton
-                    compact: true
-                    borderless: true
-                    barMode: true
-                    implicitWidth: root.buttonSize
-                    implicitHeight: root.buttonSize
-                    iconName: "windowClose"
-                    iconInset: 3
-                    iconColor: Theme.danger
-                    caption: "Close"
-                    onClicked: {
-                        root.revealChrome();
-                        if (root.window && root.window.requestAppClose) {
-                            root.window.requestAppClose("window");
-                        }
+            IconActionButton {
+                id: closeButton
+                objectName: "ui.window.close"
+                compact: true
+                borderless: true
+                barMode: true
+                implicitWidth: root.buttonSize
+                implicitHeight: root.buttonSize
+                iconName: "windowClose"
+                iconInset: 3
+                iconColor: Theme.danger
+                caption: "Close"
+                onClicked: {
+                    root.revealChrome();
+                    if (root.window && root.window.requestAppClose) {
+                        root.window.requestAppClose("window");
                     }
                 }
             }
         }
     }
+
 }

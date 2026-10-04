@@ -125,6 +125,21 @@ void SettingsManager::load()
             throw std::runtime_error("A saved source is missing; migration stopped without removing legacy settings.");
         }
     }
+    // Each protected profile commits its own marker. A failed migration can be
+    // retried without overwriting a later explicit opt-out in another profile.
+    for (const auto &summary : m_sourceSummaries) {
+        if (summary.type != ProfileType::Xtream) continue;
+        try {
+            auto profile = m_sourceStore.loadDetail(summary.id);
+            if (!profile || profile->vodDefaultsVersion >= 1) continue;
+            profile->vodEnabled = true;
+            profile->vodDefaultsVersion = 1;
+            QString error;
+            if (!m_sourceStore.saveDetail(*profile, &error)) m_lastLoadError = error;
+        } catch (const std::exception &) {
+            m_lastLoadError = QStringLiteral("VOD source defaults could not be migrated; unlock the source secret store and retry.");
+        }
+    }
     m_current.profiles.clear();
     rebuildSummaryMirrorFromSourceSummaries();
     syncProfileActivityFlagsAndMirror();
@@ -348,6 +363,7 @@ bool SettingsManager::addProfile(const ServerProfile &profile)
         normalized.id = QUuid::createUuid();
     }
     normalized.autoRefreshIntervalHours = normalizeAutoRefreshIntervalHours(normalized.autoRefreshIntervalHours);
+    normalized.vodDefaultsVersion = 1;
 
     if (!m_sourceStore.saveDetail(normalized, &m_lastSaveError)) {
         return false;
@@ -361,6 +377,7 @@ bool SettingsManager::addProfile(const ServerProfile &profile)
     }
 
     save();
+    if (m_lastSaveError.isEmpty() && vodPolicyChanged) vodPolicyChanged(normalized.id);
     return m_lastSaveError.isEmpty();
 }
 
@@ -390,8 +407,8 @@ bool SettingsManager::replaceProfile(const QUuid &id, const ServerProfile &profi
     const bool accessChanged = !previous || previous->type != normalized.type
         || previous->xtreamBaseUrl != normalized.xtreamBaseUrl
         || previous->xtreamUsername != normalized.xtreamUsername
-        || previous->xtreamPassword != normalized.xtreamPassword
-        || previous->vodEnabled != normalized.vodEnabled;
+        || previous->xtreamPassword != normalized.xtreamPassword;
+    normalized.vodDefaultsVersion = 1;
     normalized.vodCredentialRevision = previous ? previous->vodCredentialRevision : 1;
     if (accessChanged) {
         if (normalized.vodCredentialRevision >= quint64(std::numeric_limits<qint64>::max())) {
@@ -425,6 +442,13 @@ bool SettingsManager::replaceProfile(const QUuid &id, const ServerProfile &profi
         || previous->xtreamPassword != normalized.xtreamPassword)
         DatabaseService::beginChannelImport(id);
     m_profileDetailCache.insert(id, normalized);
+    const auto notifyPolicy = qScopeGuard([&]() {
+        if (vodPolicyChanged && previous && previous->vodEnabled != normalized.vodEnabled) {
+            const auto saveError = m_lastSaveError;
+            vodPolicyChanged(id);
+            m_lastSaveError = saveError;
+        }
+    });
     auto updatedSummary = toSummary(normalized);
     updatedSummary.groupCount = m_sourceSummaries.at(index).groupCount;
     updatedSummary.isActive = m_sourceSummaries.at(index).isActive;
@@ -475,6 +499,12 @@ bool SettingsManager::removeProfile(const QUuid &id)
     m_sourceSummaries.removeAt(index);
     m_current.dvrSchedules.removeIf([&id](const DvrScheduleEntry &entry) { return entry.profileId == guidToString(id); });
     m_current.channelTrackPreferences.remove(guidToString(id));
+    for (const auto &type : {QStringLiteral("|movies"), QStringLiteral("|series")}) {
+        const auto key = guidToString(id) + type;
+        m_current.hiddenGroupsByProfile.remove(key);
+        m_current.groupOrderByProfile.remove(key);
+        m_current.hideUncheckedGroupsByProfile.remove(key);
+    }
     clearProfileDetailCache(id);
     if (!m_sourceStore.removeDetail(id, &m_lastSaveError)) {
         return false;

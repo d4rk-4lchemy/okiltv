@@ -64,7 +64,7 @@ void VodProgressService::flush()
             if (failed) failed(*error);
         } else {
             m_writeErrors.remove(profile); emit persisted(ref);
-            if (completed && ref.kind == ContentKind::Movie) emit movieListsChanged(ref);
+            if (completed) emit movieListsChanged(ref.kind == ContentKind::Episode ? parentSeries(ref) : ref);
         }
     });
 }
@@ -87,6 +87,9 @@ VodProgress VodProgressService::observedProgress(const SessionSnapshot &snapshot
 void VodProgressService::setWatched(const ContentRef &ref, bool watched, std::function<void(Result<VodProgress>)> completion)
 {
     if (m_stopped || !ref.playable()) { completion(Error{ErrorCode::Cancelled, {}}); return; }
+    if (statusWritePending(ref)) { completion(Error{ErrorCode::Cancelled, {}}); return; }
+    const auto statusKey = parentSeries(ref).valid() ? parentSeries(ref).key() : ref.key();
+    m_statusWrites.insert(statusKey); emit statusWritePendingChanged(ref);
     flush();
     const bool current = m_currentRef == ref && !m_session.isNull();
     const auto previous = m_manualStatus;
@@ -113,11 +116,13 @@ void VodProgressService::setWatched(const ContentRef &ref, bool watched, std::fu
         progress.sequence = sequence;
         progress.status = watched ? WatchStatus::Watched : WatchStatus::InProgress;
         if (!watched) progress.positionMs = 0;
+        progress.playbackCheckpoint = false;
         progress.updatedAtUtc = QDateTime::currentDateTimeUtc();
         auto written = deps.progress->checkpoint(ref, progress, context, watched);
         if (const auto *error = std::get_if<Error>(&written)) return *error;
         return JobReply{context.source, std::optional<VodProgress>{progress}, {}};
-    }, [this, ref, current, previous, previousCompletion, watched, session, completion = std::move(completion)](Result<JobReply> result) {
+    }, [this, ref, statusKey, current, previous, previousCompletion, watched, session, completion = std::move(completion)](Result<JobReply> result) {
+        m_statusWrites.remove(statusKey); emit statusWritePendingChanged(ref);
         if (const auto *error = std::get_if<Error>(&result)) {
             if (current && session == m_session) { m_manualStatus = previous; m_completionQueued = previousCompletion; m_dirty = true; }
             completion(*error);
@@ -125,14 +130,61 @@ void VodProgressService::setWatched(const ContentRef &ref, bool watched, std::fu
             const auto saved = std::get<std::optional<VodProgress>>(std::get<JobReply>(result).value);
             completion(saved.value());
             emit persisted(ref);
-            if (watched && ref.kind == ContentKind::Movie) emit movieListsChanged(ref);
+            if (watched) emit movieListsChanged(ref.kind == ContentKind::Episode ? parentSeries(ref) : ref);
+        }
+        flush();
+    });
+}
+void VodProgressService::setSeriesWatched(const VodDetails &details, bool watched, std::function<void(Outcome)> completion)
+{
+    const auto ref = details.ref;
+    if (m_stopped || ref.kind != ContentKind::Series || !ref.valid() || details.episodes.isEmpty() || statusWritePending(ref)) {
+        completion(Error{ErrorCode::Cancelled, {}}); return;
+    }
+    flush();
+    SeriesWatchedChange change; change.series = ref; change.watched = watched;
+    for (const auto &episode : details.episodes) change.episodes.append(episode.ref);
+    const bool current = parentSeries(m_currentRef) == ref && change.episodes.contains(m_currentRef) && !m_session.isNull();
+    const auto previous = m_manualStatus;
+    const bool previousCompletion = m_completionQueued;
+    const auto session = m_session;
+    if (current) {
+        change.blockedSession = session;
+        m_manualStatus = watched;
+        if (watched) m_completionQueued = true;
+        change.activeEpisode = m_currentRef;
+        change.activeSequence = ++m_sequence;
+        if (m_snapshot) {
+            change.activeProgress = observedProgress(*m_snapshot);
+            change.activeProgress->sequence = change.activeSequence;
+            change.activeProgress->playbackCheckpoint = false;
+        }
+    }
+    m_statusWrites.insert(ref.key()); emit statusWritePendingChanged(ref);
+    const auto deps = m_deps;
+    m_jobs.submit(ref.profileId, {}, [deps, change](RequestContext context) -> Result<JobReply> {
+        const auto source = deps.sources->snapshot(change.series.profileId);
+        if (const auto *error = std::get_if<Error>(&source)) return *error;
+        context.source = std::get<SourceContext>(source).revision;
+        const auto written = deps.progress->setSeriesWatched(change, context);
+        if (const auto *error = std::get_if<Error>(&written)) return *error;
+        return JobReply{context.source, Success{}, {}};
+    }, [this, ref, current, previous, previousCompletion, session, watched, completion = std::move(completion)](Result<JobReply> result) {
+        m_statusWrites.remove(ref.key()); emit statusWritePendingChanged(ref);
+        if (const auto *error = std::get_if<Error>(&result)) {
+            if (current && session == m_session) { m_manualStatus = previous; m_completionQueued = previousCompletion; m_dirty = true; }
+            completion(*error);
+        } else {
+            emit persisted(ref);
+            if (watched) emit movieListsChanged(ref);
+            completion(Success{});
         }
         flush();
     });
 }
 void VodProgressService::setMovieList(const ContentRef &ref, MovieList list, bool enabled, std::function<void(Result<MovieListState>)> completion)
 {
-    if (m_stopped || !ref.valid() || ref.kind != ContentKind::Movie) { completion(Error{ErrorCode::Cancelled, {}}); return; }
+    if (m_stopped || !ref.valid() || (ref.kind != ContentKind::Movie && ref.kind != ContentKind::Series)) { completion(Error{ErrorCode::Cancelled, {}}); return; }
     if (m_listWrites.contains(ref.key())) { completion(Error{ErrorCode::Cancelled, {}}); return; }
     m_listWrites.insert(ref.key()); emit movieListWritePendingChanged(ref);
     const auto deps = m_deps;

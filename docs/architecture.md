@@ -6,7 +6,7 @@ OKILTV is a desktop IPTV application for Xtream Codes and M3U sources. Qt Quick
 renders its interface; libmpv renders video through an OpenGL surface. SQLite
 stores channel data, programme generations and VOD state. The application also
 provides catch-up playback, local timeshift, recording, PiP/multiview and an
-experimental Xtream movie library.
+experimental Xtream movie and series libraries.
 
 ## Layers and entry points
 
@@ -37,7 +37,7 @@ signals, slots and invokable methods; controllers do not manipulate QML objects.
 | `SettingsManager` / `SourceStore` | Persisted settings and source summaries/protected details |
 | `DvrController` / `TimeshiftController` | Scheduled recording and rolling local media sessions respectively |
 | `CatchupDownloadController` | Independent finite archive download queue, owned by `AppController` |
-| `VodRuntime` / `VodCatalogModel` | VOD integration, movie library and independent playback sidebar presentation |
+| `VodRuntime` / `VodCatalogModel` | Source policy/category synchronization, VOD session integration, movie/series libraries, independent playback sidebar and episode autoplay |
 | `UpdateCheckController` | One asynchronous startup release check and user notification actions |
 
 `ChannelListModel`, `ProfilesModel`, `SourceGroupsModel`, `EpgGridModel` and
@@ -47,9 +47,22 @@ instances: `nowNextModel` follows browse selection, while
 
 The QML player context property is `appPlayerController`, not `playerController`.
 Other important names include `appController`, `shellController`, `vodRuntime`,
-`vodCatalog`, `vodPlaybackCatalog`, `settingsController`, `dateTimeFormatter`, `dvrController` and
+`vodCatalog`, `vodSeriesCatalog`, `vodPlaybackCatalog`, `movieSourceGroupsModel`, `seriesSourceGroupsModel`, `settingsController`, `dateTimeFormatter`, `dvrController` and
 `multiViewController`. Verify the full list in `main.cpp` before adding bindings.
 `MpvVideoItem` is registered in the `OKILTV 1.0` QML module.
+
+`VodEpisodesModel` owns independent library and runtime episode selections and
+stable list models; row data updates preserve viewport and focus. The shared
+domain `seriesWatched` function derives completion from all known ordinary
+episodes, excluding Specials. Bulk manual status changes use the serial progress
+lane and one repository transaction.
+Domain queue functions in `vodmodels.cpp` serve continuation, Previous/Next and
+autoplay. `VodRuntime` owns transition cancellation and deferred return to series
+details; autoplay never depends on the library being mounted. Playback stays in
+one `VodPlaybackSession` and the existing controller/coordinator. Schema 9 updates
+series continuation alongside confirmed episode progress in one SQLite transaction.
+Schema 10 adds durable suppression after bulk Watched, without changing playback
+history; a confirmed checkpoint of a new session clears it.
 
 ## Startup and shutdown
 
@@ -81,6 +94,9 @@ late callbacks and writes into destroyed services.
 
 ## Asynchronous work
 
+- VOD library models wait for runtime storage readiness for up to 15 seconds,
+  retrying initialization asynchronously during that window. Closing/source changes
+  cancel the wait; successful reconciliation resumes catalogue requests.
 - `AppController` generation counters reject obsolete profile, EPG and programme
   detail results. Check identity/generation again when publishing a result.
 - Cancellation alone is insufficient: already completed callbacks may still be

@@ -9,6 +9,19 @@ executes decisions from independent policy components in
 [app/playback](../qt/src/app/playback). `isPlaying` follows observed mpv state;
 QML must never flip it optimistically. Browse selection does not tune a stream.
 
+The media-switch Live TV action uses `VodRuntime::returnToLive` to cancel pending VOD
+starts/autoplay, wait for matching stop acknowledgement and flush serial progress
+writes before emitting `liveRequested`. `AppController::returnToLive` then resolves
+the last primary channel identity against the current source/model or durable
+channel cache. It never substitutes the browsed/first channel. Without in-session
+history it uses the saved last channel of the active Live source. Missing channels
+leave Live idle; active Live/multiview avoids a duplicate retune. Buffered Live and
+timeshift keep their existing position, pause state and refill policy during library
+return, without a seek or reload. GO LIVE remains a separate transport action.
+Catch-up uses its existing return-to-live control, with engine-bound catch-up
+recordings kept protected. Opening Movies/Series leaves Live/catch-up/multiview running; only VOD
+gets a session-owned temporary library pause.
+
 | Component | Policy responsibility |
 |---|---|
 | `PlaybackBuffering` | Startup reserve, Live adaptation, cache budgets and refill holds |
@@ -47,6 +60,55 @@ mpv timing adjustments fighting the host's vsync.
 Global picture presets and smoothing apply to Live, catch-up, standby, multiview
 and retained VOD backends. Standard removes only the application-owned shader;
 user-provided mpv shaders/options remain independent.
+
+## Buffer telemetry and Live recovery
+
+`MpvPlayer::playbackBufferSnapshot()` reports the forward reserve from the current
+playback position to the observed continuous media end. It uses the minimum known
+active audio/video end from `demuxer-cache-state/ts-per-stream`, translated into
+the aggregate cache/playback clock before subtraction; subtitles do not limit
+reserve. Some mpv versions rebase only the aggregate timestamps, leaving stream
+timestamps in the original MPEG-TS epoch. The translation is inferred from
+matching stream/aggregate duration and endpoint observations in the same cache
+state. Missing or ambiguous correspondence uses the already rebased aggregate
+clock as an explicit estimate; raw stream PTS must never enter display or Live
+recovery as forward seconds. Overlapping seekable ranges are merged, and a later disconnected
+range is excluded. The final GOP may extend beyond the seekable range's last
+keyframe. There is no display cap at the configured reserve or download ceiling.
+The raw `demuxer-cache-duration` remains available for existing startup/refill and
+archive transport policies, separately from the playback-relative observation.
+
+Fast telemetry samples the position and cache state together approximately every
+100 ms. Buffer observations expire after one second and are fenced by load
+generation; stop, retune, MPEG-TS period replacement and seek invalidate them.
+Seek observations resume after backend playback restart. Slow metadata publication
+does not overwrite the fast clock/cache sample. Inconsistent clocks produce no
+reserve; duration-only or aggregate-clock fallbacks are marked as estimates.
+
+F3 uses this observation for Live, catch-up and VOD, displays one decimal place,
+prefixes estimates with `≈`, and displays `N/A` for unavailable/stale observations.
+Catch-up diagnostics no longer clamp an observation to 90 seconds. Timeshift's
+separate distance to the live edge retains its meaning.
+
+Live reconnect stabilization requires 12 seconds of observed progressing playback
+with healthy backend/frame state and fresh buffer observations. A high stable
+reserve (within 0.25 seconds of the effective configured/learned Live reserve)
+qualifies without requiring net buffer growth. Growth, advancing cache end and
+positive input rate provide delivery evidence over a five-second window, allowing
+normal provider bursts and brief reserve dips above 0.5 seconds. Sustained draining
+without delivery does not finish stabilization, but playable cached media drains
+before reconnect. Stabilization/total deadlines do not stop freshly observed
+progressing playback with usable reserve. Missing observations/manual pause do
+not count toward healthy time; real backend/frame failures and exhausted reserve
+retain recovery. Catch-up keeps its independent playback-based stabilization and
+does not adopt Live reserve thresholds.
+
+Deterministic playback tests cover plateaus, bursts, lost delivery, pauses, stale
+observations, A/V clocks, rebased MPEG-TS epochs, subtitles and disconnected ranges.
+App tests cover F3 formatting/generation/age gates and real mpv reserve/seek
+behavior for WAV and MPEG-TS with a 40,000-second timestamp origin, with rebasing
+enabled and disabled. Windows hardware
+display and buffering acceptance remains a manual check.
 
 ## Provider catch-up
 

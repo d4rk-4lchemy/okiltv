@@ -33,7 +33,8 @@ class LocalRunner(module.Runner):
         settings = {"activeProfileId": live, "profiles": [
             {"id": live, "name": "Local Live", "type": 2, "m3UFilePath": str(playlist), "isActive": True},
             {"id": vod, "name": "Local Cinema", "type": 0, "xtreamBaseUrl": f"http://127.0.0.1:{self.http_port}",
-             "xtreamUsername": "synthetic-user", "xtreamPassword": "synthetic-password", "vodEnabled": False}],
+             "xtreamUsername": "synthetic-user", "xtreamPassword": "synthetic-password", "vodEnabled": True,
+             "autoRefreshIntervalHours": 0}],
             "vodEnabled": False, "autoRefreshEpg": False, "minimizeToTrayOnMinimize": False,
             "mpvOptions": {"ao": "null", "hwdec": "no"}}
         for path in self.settings_path_candidates:
@@ -84,8 +85,10 @@ def main():
                 result = [{"category_id": "1", "category_name": "Local films"},
                           {"category_id": "2", "category_name": "Other films"},
                           {"category_id": "3", "category_name": "Empty group"}]
+            elif action == "get_series_categories":
+                result = [{"category_id": "s1", "category_name": "Local series"}]
             elif action == "get_vod_streams":
-                result = [{"stream_id": i, "name": f"Local Movie {i:02}", "year": 2024, "category_id": "1" if i % 2 else "2"} for i in range(1, 41)]
+                result = [{"stream_id": i, "name": f"Local Movie {i:02}" + (" with a deliberately long title for continuous scrolling" if i == 40 else ""), "year": 2024, "category_id": "1" if i % 2 else "2"} for i in range(1, 41)]
             elif action == "get_vod_info":
                 result = {"info": {"plot": "A local movie for automated testing.", "duration_secs": 120},
                           "movie_data": {"stream_id": query.get("vod_id", ["1"])[0], "container_extension": "mp4"}}
@@ -153,8 +156,64 @@ def main():
         raise AssertionError(label)
 
     def key(value):
+        if value in ("Left", "Right", "Up", "Down", "Return", "Escape", "Tab", "f"):
+            wait("Chrome settles before " + value, lambda s: not s["window"]["chromeAnimationsRunning"])
         runner.xdotool("key", "--window", runner.window_id, value)
         time.sleep(.25)
+
+    def click_text(label, prop="text"):
+        state = wait("Control available: " + label, lambda s: any(
+            i.get("text") == label and i.get("property") == prop and i.get("enabled")
+            and i.get("bounds", {}).get("y", -1) >= 0 for i in s["inventory"]))
+        item = next(i for i in state["inventory"] if i.get("text") == label
+                    and i.get("property") == prop and i.get("enabled") and i.get("bounds", {}).get("y", -1) >= 0)
+        bounds = item["bounds"]
+        runner.xdotool("mousemove", "--window", runner.window_id,
+                       str(round(bounds["x"] + bounds["width"] / 2)), str(round(bounds["y"] + bounds["height"] / 2)))
+        runner.xdotool("click", "1")
+        time.sleep(.3)
+
+    def select_source(label):
+        click_text(label)
+        last_click = time.monotonic()
+        def selected(state):
+            nonlocal last_click
+            if any(i.get("text") == label and i.get("className", "").startswith("FormTextField")
+                   and i.get("enabled") for i in state["inventory"]):
+                return True
+            # Selecting Sources can still be sliding when its labels appear.
+            # Confirm the editable form rather than trusting the first click.
+            if time.monotonic() - last_click > 1:
+                row = next((i for i in state["inventory"] if i.get("text") == label
+                            and i.get("enabled") and i.get("className", "").startswith("QQuickText")
+                            and 0 < i.get("bounds", {}).get("x", -1) < state["window"]["width"] / 2
+                            and 70 < i.get("bounds", {}).get("y", -1) < state["window"]["height"] - 60), None)
+                if row:
+                    bounds = row["bounds"]
+                    runner.xdotool("mousemove", "--window", runner.window_id,
+                                   str(round(bounds["x"] + bounds["width"] / 2)),
+                                   str(round(bounds["y"] + bounds["height"] / 2)))
+                    runner.xdotool("click", "1")
+                    last_click = time.monotonic()
+            return False
+        return wait("Source form selects " + label, selected)
+
+    def scroll_to(name):
+        for _ in range(20):
+            state = runner.read_state()
+            item = named(state, name)
+            if item:
+                bounds = item["bounds"]
+                if 70 < bounds["y"] < state["window"]["height"] - 100:
+                    return state
+                direction = "5" if bounds["y"] > state["window"]["height"] - 100 else "4"
+            else:
+                direction = "5"
+            runner.xdotool("mousemove", "--window", runner.window_id,
+                           str(state["window"]["width"] - 160), str(round(state["window"]["height"] / 2)))
+            runner.xdotool("click", "--repeat", "2", "--delay", "70", direction)
+            time.sleep(.15)
+        raise AssertionError("Source control could not be scrolled into view: " + name)
 
     def reveal_button(name):
         def reveal(state):
@@ -165,15 +224,71 @@ def main():
             return False
         return wait("Button enabled: " + name, reveal)
 
-    def click(name):
-        state = reveal_button(name)
-        item = named(state, name)
-        assert item, name
-        bounds = item["bounds"]
-        runner.xdotool("mousemove", "--window", runner.window_id,
-                       str(round(bounds["x"] + bounds["width"] / 2)), str(round(bounds["y"] + bounds["height"] / 2)))
-        wait("Button ready: " + name, lambda s: (named(s, name) or {}).get("enabled", False))
-        runner.xdotool("click", "1")
+    def click(name, instant=False):
+        reveal_button(name)
+        last_bounds = None
+        def ready(state):
+            nonlocal last_bounds
+            item = named(state, name) or {}
+            if not item.get("enabled", False):
+                return False
+            if item.get("hovered", False):
+                return True
+            bounds = item["bounds"]
+            if "hovered" not in item and bounds == last_bounds:
+                return True
+            # Probe completion/layout changes can move details controls between
+            # reading their bounds and clicking; follow the current hit target.
+            runner.xdotool("mousemove", "--window", runner.window_id,
+                           str(round(bounds["x"] + bounds["width"] / 2)),
+                           str(round(bounds["y"] + bounds["height"] / 2)))
+            last_bounds = bounds
+            return False
+        wait("Button ready: " + name, ready)
+        if instant:
+            # xdotool click waits 100 ms after release, obscuring short animations.
+            runner.xdotool("mousedown", "1", "mouseup", "1")
+        else:
+            runner.xdotool("click", "1")
+
+    def click_mode_and_check_transition(name, closing=False):
+        before = wait("Media navigation is ready", lambda s:
+                      (named(s, name) or {}).get("enabled", False))
+        expected = named(before, name)["bounds"]
+        live_position = before["multiview"]["tiles"][0]["position"]
+        click(name, instant=True)
+        saw_library_transition = False
+        saw_live_reveal = False
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            state = runner.read_state(3)
+            assert state["multiview"]["isPlaying"], "Background Live paused during library navigation"
+            position = state["multiview"]["tiles"][0]["position"]
+            assert position >= live_position - .15, "Background Live rewound during library navigation"
+            live_position = position
+            item = named(state, name)
+            assert item, "Media switch disappeared during the mode transition"
+            assert all(abs(item["bounds"][axis] - expected[axis]) < 1 for axis in ("x", "y")), \
+                "Media switch moved with the library"
+            if state["window"]["vodTransitioning"]:
+                saw_library_transition = True
+                assert not item["enabled"], "Navigation accepted input during the library animation"
+                if closing:
+                    for region in state["regions"]:
+                        if region["name"] == "left_pane":
+                            assert region["x"] + region["width"] <= 1, "Live list opened before the library closed"
+                        elif region["name"] == "right_pane":
+                            assert region["x"] >= state["window"]["width"] - 1, "Live EPG opened before the library closed"
+            elif closing and state["window"]["chromeAnimationsRunning"]:
+                saw_live_reveal = True
+            elif item.get("enabled", False):
+                if closing:
+                    assert saw_library_transition, "The library close animation was not observed"
+                    assert saw_live_reveal, "The subsequent Live panel animation was not observed"
+                checks.append("Fixed media navigation and sequential library/Live animations: " + name)
+                return state
+            time.sleep(.02)
+        raise AssertionError("Media transition did not finish: " + name)
 
     try:
         runner.seed_settings()
@@ -184,7 +299,66 @@ def main():
         runner.tune_channel(1)
         initial = runner.wait_for_playback_ready()
         channel = initial["playback"]["currentChannel"]
+        key("f")
+        reveal_button("ui.live.guideButton")
+        state = wait("Fullscreen Live panels reach the top edge", lambda s:
+                     (named(s, "ui.live.guideButton") or {}).get("enabled", False)
+                     and all(abs(r["y"]) < 1 for r in s["regions"]
+                             if r["name"] in ("left_pane", "right_pane")))
+        navigation = named(state, "ui.navigation.live")["bounds"]
+        assert named(state, "ui.live.guideButton")["bounds"]["y"] > navigation["y"] + navigation["height"]
+        runner.request_capture_wait("fullscreen-live-panels")
+        click("ui.live.guideButton")
+        wait("Fullscreen Guide frame reaches the top without covering navigation", lambda s:
+             any(r["name"] == "guide_overlay" and r["visible"] and abs(r["y"]) < 1 for r in s["regions"])
+             and any(i.get("text") == "Collapse Guide" and i.get("enabled")
+                     and i["bounds"]["y"] > navigation["y"] + navigation["height"] for i in s["inventory"]))
+        click_text("Collapse Guide", "caption")
+        wait("Fullscreen Guide finishes closing", lambda s:
+             not any(r["name"] == "guide_overlay" and r["visible"] for r in s["regions"]))
+        click("ui.live.settingsButton")
+        wait("Fullscreen Settings frame reaches the top edge", lambda s:
+             s["window"]["visibleOverlay"] == "settings"
+             and any(r["name"] == "settings_overlay" and abs(r["y"]) < 1 for r in s["regions"]))
         key("Escape")
+        wait("Fullscreen Settings closes", lambda s: s["window"]["visibleOverlay"] == "none")
+        click_mode_and_check_transition("ui.navigation.movies")
+        state = wait("Fullscreen library contains navigation above its toolbar", lambda s:
+                     library_ready(s) and named(s, "ui.vod.all")["bounds"]["y"] < 100
+                     and named(s, "ui.vod.search")["bounds"]["y"] > navigation["y"] + navigation["height"])
+        runner.request_capture_wait("fullscreen-library-navigation")
+        click("ui.navigation.series")
+        wait("Fullscreen navigation follows the Series library", lambda s: library_ready(s)
+             and named(s, "ui.vod.all")["text"] == "All series")
+        click_mode_and_check_transition("ui.navigation.live", closing=True)
+        wait("Fullscreen navigation returns to Live", lambda s: s["window"]["visibleOverlay"] == "none")
+        key("f")
+        key("ctrl+f")
+        key("Tab")
+        wait("Tab from Live search focuses media navigation", lambda s: s["window"]["navigationFocused"])
+        key("Right")
+        assert runner.read_state()["window"]["visibleOverlay"] == "none"
+        checks.append("Navigation arrows preview without opening a library")
+        key("Return")
+        wait("Enter confirms Series without tuning TV", lambda s: library_ready(s)
+             and (named(s, "ui.vod.all") or {}).get("text") == "All series"
+             and s["playback"]["currentChannel"] == channel)
+        click("ui.navigation.live")
+        wait("Keyboard-selected Series returns to Live", lambda s: s["window"]["visibleOverlay"] == "none")
+        key("Escape")
+        click("ui.navigation.movies")
+        wait("Title switch opens Movies", library_ready)
+        click("ui.navigation.movies")
+        wait("Repeated Movies click retains the library", library_ready)
+        click("ui.navigation.series")
+        wait("Title switch opens Series", lambda s: library_ready(s)
+             and (named(s, "ui.vod.all") or {}).get("text") == "All series")
+        click("ui.navigation.movies")
+        wait("Title switch restores Movies", lambda s: library_ready(s)
+             and (named(s, "ui.vod.all") or {}).get("text") == "All movies")
+        click("ui.navigation.live")
+        wait("Live TV closes the library and retains the current channel", lambda s:
+             not named(s, "ui.vod.close") and s["playback"]["currentChannel"] == channel)
         key("v")
         state = wait("V opens real catalog after sliding in", lambda s:
                      library_ready(s) and any(i.get("text") == "Local Movie 01" for i in s["inventory"]))
@@ -209,6 +383,30 @@ def main():
         wait("Library sidebar stops at 208 pixels", lambda s:
              sidebar_right(s) == 208)
         runner.request_capture_wait("vod-catalog")
+        # Long provider titles use the packaged QML marquee without touching playback.
+        key("ctrl+f"); key("ctrl+a"); runner.xdotool("type", "Local Movie 40")
+        state = wait("Long title is available in the grid", lambda s:
+                     bool(named(s, "ui.vod.gridTitle.0"))
+                     and "Local Movie 40" in named(s, "ui.vod.gridTitle.0")["text"])
+        key("Down")
+        wait("Keyboard indication scrolls the long grid title", lambda s:
+             bool(named(s, "ui.vod.gridTitle.0.marqueeText"))
+             and named(s, "ui.vod.gridTitle.0.marqueeText")["bounds"]["x"]
+                 < named(s, "ui.vod.gridTitle.0")["bounds"]["x"] - 5)
+        key("ctrl+f")
+        state = wait("Search focus stops the grid title", lambda s:
+                     not named(s, "ui.vod.gridTitle.0.marqueeText"))
+        bounds = named(state, "ui.vod.gridTitle.0")["bounds"]
+        runner.xdotool("mousemove", "--window", runner.window_id,
+                       str(round(bounds["x"] + 30)), str(round(bounds["y"] + 10)))
+        wait("Pointer indication scrolls the long grid title", lambda s:
+             bool(named(s, "ui.vod.gridTitle.0.marqueeText"))
+             and named(s, "ui.vod.gridTitle.0.marqueeText")["bounds"]["x"]
+                 < named(s, "ui.vod.gridTitle.0")["bounds"]["x"] - 5)
+        runner.request_capture_wait("vod-title-marquee")
+        key("ctrl+f"); key("ctrl+a"); key("BackSpace")
+        wait("Clearing marquee search restores the grid", lambda s:
+             any(item.get("text") == "Local Movie 01" for item in s["inventory"]))
         key("ctrl+f")
         key("v")
         wait("V types in search", lambda s: (named(s, "ui.vod.search") or {}).get("text") == "v")
@@ -243,9 +441,9 @@ def main():
         wait("Escape returns to library", lambda s: bool(named(s, "ui.vod.search")))
         # Send repeats within the animation; reading the full state can itself
         # take longer than 240 ms on a software-rendered desktop.
-        runner.xdotool("key", "--window", runner.window_id, "v", "v", "Escape", "ctrl+f", "space", "1")
+        runner.xdotool("key", "--delay", "1", "--window", runner.window_id, "v", "v", "Escape", "ctrl+f", "space", "1")
         wait("V closes library without retuning", lambda s: not named(s, "ui.vod.close") and s["playback"]["currentChannel"] == channel)
-        runner.xdotool("key", "--window", runner.window_id, "v", "v", "Escape", "ctrl+f", "Return")
+        runner.xdotool("key", "--delay", "1", "--window", runner.window_id, "v", "v", "Escape", "ctrl+f", "Return")
         wait("Repeated keys during opening preserve the library", lambda s:
              library_ready(s) and not named(s, "ui.vod.play"))
         click("ui.vod.close")
@@ -265,6 +463,27 @@ def main():
                      (named(s, "ui.transport.title") or {}).get("text", "").startswith("Local Movie")
                      and (named(s, "ui.transport.duration") or {}).get("text") == "02:00")
         title = named(state, "ui.transport.title")["text"]
+        click("ui.navigation.movies")
+        wait("Movie library opens during VOD", library_ready)
+        time.sleep(1)
+        click("ui.vod.close")
+        wait("Closing the library resumes its VOD pause", lambda s:
+             not named(s, "ui.vod.close") and (named(s, "ui.live.playPause") or {}).get("text") == "Pause")
+        runner.xdotool("mousemove", "--window", runner.window_id, "600", "450")
+        state = wait("Movie remains active after browsing", lambda s:
+                     (named(s, "ui.transport.title") or {}).get("text") == title)
+        click("ui.navigation.live")
+        wait("Live TV switches from VOD to the remembered TV channel", lambda s:
+             s["playback"]["currentChannel"] == channel and not named(s, "ui.vod.backToCatalog"))
+        click("ui.navigation.movies")
+        state = wait("Movies can reopen after returning to TV", library_ready)
+        if not named(state, "ui.vod.play"):
+            key("Return")
+        wait("Remembered movie details are available", lambda s: bool(named(s, "ui.vod.play")))
+        click("ui.vod.play")
+        state = wait("VOD can start again after the Live handoff", lambda s:
+                     (named(s, "ui.transport.title") or {}).get("text") == title
+                     and not named(s, "ui.vod.close"))
         assert not named(state, "ui.live.guideButton")
         assert all(not r["visible"] for r in state["regions"] if r["name"] in ("left_pane", "right_pane"))
         checks.append("VOD hides channel/EPG rails and Guide button")
@@ -276,7 +495,18 @@ def main():
         wait("Movie advances before browsing groups", lambda s:
              (named(s, "ui.transport.position") or {}).get("text", "00:00") not in ("00:00", "--:--"))
         key("space")
+        wait("Pause is confirmed before group browsing", lambda s:
+             (named(s, "ui.live.playPause") or {}).get("text") == "Play")
+        # mpv acknowledges pause asynchronously; let its final position telemetry
+        # reach the label before pinning the long group-browsing assertion.
+        time.sleep(0.6)
         paused_position = named(runner.read_state(), "ui.transport.position")["text"]
+        click("ui.navigation.series")
+        wait("Series can be browsed while a movie is manually paused", library_ready)
+        click("ui.vod.close")
+        wait("Closing Series preserves the manual movie pause", lambda s:
+             not named(s, "ui.vod.close") and (named(s, "ui.live.playPause") or {}).get("text") == "Play")
+        reveal_button("ui.vod.backToCatalog")
         requests_before_groups = len(movie_requests)
         state = wait("Back arrow sits outside the movie panel with shared margins", lambda s:
                      back_outside_panel(s, "ui.vod.playback.openGroups", "ui.vod.playback.search"))
@@ -302,7 +532,8 @@ def main():
         checks.append("Back hover keeps playback chrome visible beyond auto-hide")
         key("Escape")
         wait("Escape hides chrome under the stationary Back cursor", lambda s:
-             not named(s, "ui.vod.backToCatalog") and not named(s, "ui.vod.playback.search"))
+             not named(s, "ui.vod.backToCatalog") and not named(s, "ui.vod.playback.search")
+             and not s["window"]["chromeAnimationsRunning"])
         key("Left")
         wait("First Left focuses movies", lambda s:
              bool(named(s, "ui.vod.playback.search")) and not named(s, "ui.player.groupSearch"))
@@ -422,10 +653,20 @@ def main():
         wait("Back arrow fits the minimum window", lambda s:
              back_outside_panel(s, "ui.vod.playback.openGroups", "ui.vod.playback.search")
              and named(s, "ui.vod.backToCatalog")["bounds"]["x"] + 40 <= 426)
+        state = runner.read_state()
+        mode = named(state, "ui.navigation.series")["bounds"]
+        close_bounds = named(state, "ui.window.minimize")["bounds"]
+        assert mode["y"] > close_bounds["y"] + close_bounds["height"]
+        assert close_bounds["height"] == 30
+        assert mode["x"] + mode["width"] <= 426
+        assert mode["height"] == 28
+        checks.append("Standalone navigation fits below the restored title bar at minimum size")
         key("f")
-        wait("Back arrow reserves the correct fullscreen top margin", lambda s:
+        wait("Fullscreen movie panels reclaim the title-bar space", lambda s:
              back_outside_panel(s, "ui.vod.playback.openGroups", "ui.vod.playback.search")
-             and abs(named(s, "ui.vod.backToCatalog")["bounds"]["y"] - 24) < 1)
+             and abs(named(s, "ui.vod.backToCatalog")["bounds"]["y"] - 24) < 1
+             and abs(named(s, "ui.vod.playback.settingsButton")["bounds"]["y"] - 14) < 1
+             and bool(named(s, "ui.navigation.movies")) and not named(s, "ui.window.close"))
         key("f")
         runner.xdotool("windowsize", runner.window_id, "800", "600")
         key("Escape")
@@ -509,16 +750,36 @@ def main():
              library_ready(s)
              and not named(s, "ui.transport.duration"))
         key("Escape")
+        # Start a fourth film so the responsive posters ensure the
+        # horizontal-wheel regression exercises actual shelf overflow.
+        key("ctrl+f"); key("ctrl+a"); runner.xdotool("type", "Local Movie 04")
+        wait("Fourth movie is available for shelf overflow", lambda s: any(
+            i.get("text") == "Local Movie 04" for i in s["inventory"]))
+        key("Down"); key("Return")
+        wait("Fourth movie details open", lambda s: bool(named(s, "ui.vod.play")))
+        click("ui.vod.play")
+        wait("Fourth movie starts", lambda s:
+             (named(s, "ui.transport.title") or {}).get("text") == "Local Movie 04"
+             and (named(s, "ui.transport.duration") or {}).get("text") == "02:00")
+        reveal_button("ui.live.stopPlayback");key("space")
+        timeline = next(r for r in runner.read_state()["regions"] if r["name"] == "timeshift_timeline")
+        seek(30);key("Left");key("Escape")
+        wait("Fourth movie panels hide before keyboard Back", lambda s:
+             not named(s, "ui.vod.backToCatalog") and not (named(s, "ui.live.stopPlayback") or {}).get("enabled"))
+        time.sleep(.3) # Off-screen transport objects remain in the bridge inventory.
+        key("BackSpace")
+        wait("Fourth movie progress returns to the library", lambda s: library_ready(s) and not named(s, "ui.transport.duration"))
+        key("Escape")
         key("ctrl+f"); key("ctrl+a"); key("BackSpace")
         click("ui.vod.all")
         runner.xdotool("windowsize", runner.window_id, "800", "600")
         key("ctrl+f"); key("Down"); key("Up")
-        wait("Continue watching has three films in progress", lambda s:
-                     bool(named(s, "ui.vod.continueTitle.2")))
+        wait("Continue watching has four films in progress", lambda s:
+                     bool(named(s, "ui.vod.continueTitle.3")))
         key("Right"); key("Down"); key("Up")
         wait("Shelf keyboard browsing does not open details", lambda s:
              bool(named(s, "ui.vod.continueHeading")) and not named(s, "ui.vod.play"))
-        key("Left"); key("Left")
+        for _ in range(4): key("Left")
         state = wait("Keyboard returns to the first shelf poster", lambda s:
                      abs((named(s, "ui.vod.continueTitle.0") or {}).get("bounds", {}).get("x", -1000)
                          - (named(s, "ui.vod.allHeading") or {}).get("bounds", {}).get("x", 0)) < 1)
@@ -539,15 +800,15 @@ def main():
         runner.xdotool("windowsize", runner.window_id, "1600", "900")
         state = wait("Resize during opening settles the library below the title bar", lambda s:
                      library_ready(s) and s["window"]["width"] == 1600
-                     and named(s, "ui.vod.close")["bounds"]["y"] < 100)
+                     and named(s, "ui.vod.close")["bounds"]["y"] < 120)
         click("ui.vod.close")
         wait("Resized library finishes closing", lambda s: not named(s, "ui.vod.close"))
         key("f")
         fullscreen_height = runner.read_state()["window"]["height"]
-        runner.xdotool("key", "--window", runner.window_id, "v", "Escape")
+        runner.xdotool("key", "--delay", "1", "--window", runner.window_id, "v", "Escape")
         wait("Escape during opening preserves fullscreen and the library", lambda s:
              library_ready(s) and s["window"]["height"] == fullscreen_height)
-        runner.xdotool("key", "--window", runner.window_id, "v", "Escape")
+        runner.xdotool("key", "--delay", "1", "--window", runner.window_id, "v", "Escape")
         wait("Escape during closing preserves fullscreen", lambda s:
              not named(s, "ui.vod.close") and s["window"]["height"] == fullscreen_height)
         key("f")
@@ -577,10 +838,66 @@ def main():
         for path in runner.settings_path_candidates:
             if path.exists():
                 assert not json.loads(path.read_text()).get("vodEnabled", False)
-        checks.append("Global activation remains session-only")
+        checks.append("The legacy global technical flag stays unchanged")
         assert any(json.loads(path.read_text()).get("vodLibrarySidebarWidth") == 208
                    for path in runner.settings_path_candidates if path.exists())
         checks.append("Library sidebar preference remains persisted after browsing and playback")
+        key("Left")
+        click_text("Settings", "caption")
+        wait("Settings opens over VOD", lambda s: s["window"]["visibleOverlay"] == "settings")
+        state = wait("Title navigation is disabled in Settings", lambda s:
+             named(s, "ui.navigation.live") and not named(s, "ui.navigation.live").get("enabled"))
+        bounds = named(state, "ui.navigation.live")["bounds"]
+        settings_size = (state["window"]["width"], state["window"]["height"])
+        runner.xdotool("mousemove", "--window", runner.window_id,
+                       str(round(bounds["x"] + bounds["width"] / 2)), str(round(bounds["y"] + bounds["height"] / 2)))
+        runner.xdotool("click", "--repeat", "2", "--delay", "80", "1")
+        state = runner.read_state()
+        assert state["window"]["visibleOverlay"] == "settings"
+        assert (state["window"]["width"], state["window"]["height"]) == settings_size
+        checks.append("Disabled navigation does not maximize or leave Settings")
+        click_text("Sources", "caption")
+        select_source("Local Cinema")
+        state = scroll_to("ui.sources.enableVod")
+        switch = named(state, "ui.sources.enableVod")
+        margin = next(i for i in state["inventory"] if i.get("text") == "Archive safety margin (minutes)")
+        assert switch["enabled"] and switch["bounds"]["y"] > margin["bounds"]["y"]
+        checks.append("Enable VOD follows the archive margin for a saved Xtream source")
+        scroll_to("ui.sources.media.1")
+        click("ui.sources.media.1")
+        wait("Movie settings contain provider categories without cached titles", lambda s: any(
+            i.get("text") == "Empty group" for i in s["inventory"]))
+        click("ui.sources.media.2")
+        wait("Series categories configure independently", lambda s: any(
+            i.get("text") == "Local series" for i in s["inventory"]))
+        runner.request_capture_wait("vod-source-media-groups")
+        scroll_to("ui.sources.enableVod")
+        click("ui.sources.enableVod")
+        select_source("Local Live")
+        state = scroll_to("ui.sources.enableVod")
+        assert not named(state, "ui.sources.enableVod")["enabled"]
+        select_source("Local Cinema")
+        scroll_to("ui.sources.enableVod")
+        assert not named(runner.read_state(), "ui.sources.media.1")
+        checks.append("Switching sources retains the disabled Xtream draft and disables M3U VOD")
+        key("Escape")
+        click_text("Discard")
+        wait("Discard closes source settings", lambda s: s["window"]["visibleOverlay"] == "none")
+        key("Left")
+        click_text("Settings", "caption")
+        click_text("Sources", "caption")
+        select_source("Local Cinema")
+        scroll_to("ui.sources.media.1")
+        assert named(runner.read_state(), "ui.sources.media.1")
+        checks.append("Discard restores the saved enabled flag and all media segments")
+        scroll_to("ui.sources.enableVod")
+        click("ui.sources.enableVod")
+        click_text("Save source changes", "caption")
+        key("Escape")
+        key("v")
+        wait("Saved VOD opt-out removes the source from the library", lambda s: any(
+            i.get("text") == "Enable VOD for an Xtream source in Settings to browse movies." for i in s["inventory"]))
+        runner.request_capture_wait("vod-source-disabled")
     finally:
         (runner.run_dir / "vod-result.json").write_text(json.dumps({"passed": checks}, indent=2))
         runner.cleanup()

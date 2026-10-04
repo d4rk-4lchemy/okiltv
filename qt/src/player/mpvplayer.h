@@ -17,6 +17,7 @@
 #include <QtGlobal>
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <thread>
@@ -46,6 +47,17 @@ public:
         qint64 maxBackBytes;
         std::optional<double> refillSeconds {};
     };
+
+    struct PlaybackBufferSnapshot
+    {
+        std::optional<double> seconds;
+        std::optional<double> endSeconds;
+        std::optional<double> inputBytesPerSecond;
+        bool estimated { true };
+        bool fresh { false };
+    };
+    static PlaybackBufferSnapshot playbackBufferForCacheState(double positionSeconds, const QVariantMap &state);
+    PlaybackBufferSnapshot playbackBufferSnapshot() const;
 
     explicit MpvPlayer(QObject *parent = nullptr);
     ~MpvPlayer() override;
@@ -209,6 +221,9 @@ private:
         std::optional<CacheReadState> cacheReadState;
         std::optional<std::pair<double, double>> demuxerSeekableRangeSeconds;
         std::optional<double> cacheSpeedBytesPerSecond;
+        PlaybackBufferSnapshot playbackBuffer;
+        std::chrono::steady_clock::time_point bufferSampledAt {};
+        quint64 bufferGeneration { 0 };
         std::optional<int> videoWidth;
         std::optional<int> videoHeight;
         std::optional<QString> videoCodec;
@@ -250,7 +265,10 @@ private:
     std::optional<bool> propertyFlag(const char *name) const;
     std::optional<bool> propertyNodeBoolField(const char *prop, const char *key) const;
     std::optional<double> propertyNodeDoubleField(const char *prop, const char *key) const;
-    std::optional<std::pair<double, double>> propertyDemuxerSeekableRangeSeconds(std::optional<CacheReadState> *readState = nullptr) const;
+    std::optional<std::pair<double, double>> propertyDemuxerSeekableRangeSeconds(
+        double positionSeconds, std::optional<CacheReadState> *readState, PlaybackBufferSnapshot *buffer) const;
+    void invalidatePlaybackBuffer();
+    std::atomic_bool m_bufferSeeking { false };
     std::optional<QString> propertyString(const char *name) const;
 
     static void *getProcAddress(void *ctx, const char *name);

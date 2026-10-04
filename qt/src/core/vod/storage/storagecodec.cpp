@@ -48,7 +48,7 @@ std::optional<VodMediaTrack> decodeTrack(const QJsonValue &entry, const QString 
 QByteArray encodeDetails(const VodDetails &details)
 {
     QJsonObject object{{QStringLiteral("version"), 1}, {QStringLiteral("ref"), encodeRef(details.ref)},
-        {QStringLiteral("description"), details.description}, {QStringLiteral("cast"), QJsonArray::fromStringList(details.cast)},
+        {QStringLiteral("title"), details.title}, {QStringLiteral("description"), details.description}, {QStringLiteral("cast"), QJsonArray::fromStringList(details.cast)},
         {QStringLiteral("genres"), QJsonArray::fromStringList(details.genres)}};
     if (const auto duration = details.declaredDurationMs) object.insert(QStringLiteral("duration"), *duration);
     if (details.declaredVideoWidth && details.declaredVideoHeight) {
@@ -81,6 +81,11 @@ QByteArray encodeDetails(const VodDetails &details)
             {QStringLiteral("title"), episode.title}, {QStringLiteral("order"), episode.order}, {QStringLiteral("availability"), int(episode.availability)}};
         if (const auto season = episode.seasonId) value.insert(QStringLiteral("season"), *season);
         if (const auto number = episode.number) value.insert(QStringLiteral("number"), *number);
+        if (episode.durationMs) value.insert(QStringLiteral("duration"), *episode.durationMs);
+        value.insert(QStringLiteral("description"), episode.description);
+        QJsonArray art;
+        for (const auto &image : episode.artwork) art.append(QJsonObject{{QStringLiteral("id"),image.id},{QStringLiteral("role"),image.role}});
+        value.insert(QStringLiteral("artwork"),art);
         episodes.append(value);
     }
     object.insert(QStringLiteral("seasons"), seasons);
@@ -99,6 +104,7 @@ std::optional<VodDetails> decodeDetails(const QByteArray &bytes)
     VodDetails details;
     details.ref = decodeRef(object.value(QStringLiteral("ref")).toObject());
     if (!details.ref.valid()) return {};
+    details.title = object.value(QStringLiteral("title")).toString();
     details.description = object.value(QStringLiteral("description")).toString();
     for (const auto &value : object.value(QStringLiteral("cast")).toArray()) details.cast.append(value.toString());
     for (const auto &value : object.value(QStringLiteral("genres")).toArray()) details.genres.append(value.toString());
@@ -154,6 +160,12 @@ std::optional<VodDetails> decodeDetails(const QByteArray &bytes)
         EpisodeSummary episode;
         episode.ref = decodeRef(value.value(QStringLiteral("ref")).toObject());
         episode.series = decodeRef(value.value(QStringLiteral("series")).toObject());
+        if (value.contains(QStringLiteral("duration"))) episode.durationMs = value.value(QStringLiteral("duration")).toInteger();
+        episode.description = value.value(QStringLiteral("description")).toString();
+        for (const auto &art : value.value(QStringLiteral("artwork")).toArray()) {
+            const auto image=art.toObject();
+            episode.artwork.append({image.value(QStringLiteral("id")).toString(),image.value(QStringLiteral("role")).toString(),{}});
+        }
         episode.title = value.value(QStringLiteral("title")).toString();
         episode.order = value.value(QStringLiteral("order")).toInt();
         episode.availability = Availability(value.value(QStringLiteral("availability")).toInt());

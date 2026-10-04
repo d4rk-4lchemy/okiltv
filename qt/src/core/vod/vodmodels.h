@@ -10,6 +10,8 @@
 #include <QUrl>
 #include <atomic>
 #include <memory>
+#include <functional>
+#include <mutex>
 
 namespace OKILTV::Vod {
 enum class ContentKind { Movie, Series, Episode };
@@ -52,6 +54,12 @@ struct SourceContext {
     QUrl endpoint;
     QString username;
     QString password;
+    std::optional<QStringList> allowedMovieCategories;
+    int movieCategoryCount = 0;
+    std::optional<QStringList> allowedSeriesCategories;
+    int seriesCategoryCount = 0;
+    std::function<bool()> policyCurrent;
+    std::shared_ptr<std::recursive_mutex> policyMutex;
 };
 struct RequestContext {
     QUuid operationId = QUuid::createUuid();
@@ -59,6 +67,8 @@ struct RequestContext {
     std::shared_ptr<std::atomic_bool> cancelled = std::make_shared<std::atomic_bool>(false);
     QDeadlineTimer deadline{30000};
     qint64 responseByteLimit = qint64(64) * 1024 * 1024;
+    std::function<bool()> policyCurrent;
+    std::shared_ptr<std::recursive_mutex> policyMutex;
     [[nodiscard]] std::optional<Error> interruption() const;
 };
 struct CatalogScope {
@@ -116,10 +126,14 @@ struct EpisodeSummary {
     int order = 0;
     QString title;
     Availability availability = Availability::Unknown;
+    std::optional<qint64> durationMs;
+    QString description;
+    QList<ArtworkRef> artwork;
 };
 using CatalogItem = std::variant<MovieSummary, SeriesSummary>;
 struct VodDetails {
     ContentRef ref;
+    QString title;
     QString description;
     QStringList cast;
     QStringList genres;
@@ -178,6 +192,8 @@ struct CatalogQuery {
     QString titleContains;
     bool continueWatchingOnly = false;
     MovieList movieList = MovieList::None;
+    std::optional<QStringList> allowedCategories;
+    std::optional<QByteArray> identity;
 };
 struct CatalogPage {
     CatalogScope scope;
@@ -186,6 +202,7 @@ struct CatalogPage {
     std::optional<LocalPageToken> next;
     QDateTime refreshedAtUtc;
     QHash<QByteArray, MovieListState> movieLists;
+    QHash<QByteArray,QString> continuationLabels;
 };
 struct ImportToken {
     QUuid id;
@@ -200,6 +217,7 @@ struct PlaybackPreferences {
     // happens only after the backend has loaded and matched the real tracks.
     std::optional<QJsonObject> trackPreferences;
     bool fromBeginning = false;
+    std::optional<QJsonObject> inheritedTracks; // Confirmed previous episode, only when the target has no saved preference.
 };
 // Trusted, ephemeral values: never part of a facade event or persisted record.
 struct PlaybackDescriptor {
@@ -209,6 +227,7 @@ struct PlaybackDescriptor {
     QMap<QByteArray, QByteArray> allowedHeaders;
     QDateTime expiresAtUtc;
     std::optional<QString> contentRevision;
+    std::function<bool()> admissionCurrent; // Checked immediately before a new session opens.
 };
 enum class WatchStatus { InProgress, Watched };
 inline bool watchedByPosition(qint64 position, std::optional<qint64> duration)
@@ -225,5 +244,28 @@ struct VodProgress {
     quint64 sequence = 0;
     QDateTime updatedAtUtc;
     QJsonObject trackPreferences; // Confirmed explicit audio/sub choices, including subtitles off.
+    bool playbackCheckpoint = true; // Manual status edits do not move the series pointer.
 };
+struct SeriesProgress {
+    std::optional<ContentRef> lastEpisode;
+    std::optional<ContentRef> continuationEpisode;
+    QHash<QByteArray, VodProgress> episodes;
+    bool continuationHidden = false;
+};
+// One manual series edit, committed atomically without moving playback history.
+struct SeriesWatchedChange {
+    ContentRef series;
+    QList<ContentRef> episodes;
+    bool watched = false;
+    QUuid blockedSession;
+    std::optional<VodProgress> activeProgress;
+    ContentRef activeEpisode;
+    quint64 activeSequence = 0;
+};
+ContentRef parentSeries(const ContentRef &);
+bool specialEpisode(const VodDetails &, const EpisodeSummary &);
+bool seriesWatched(const VodDetails &, const SeriesProgress &);
+QList<EpisodeSummary> orderedEpisodes(const VodDetails &, bool includeSpecials = false);
+std::optional<EpisodeSummary> adjacentEpisode(const VodDetails &, const ContentRef &, int direction);
+std::optional<EpisodeSummary> continueEpisode(const VodDetails &, const SeriesProgress &);
 }

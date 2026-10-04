@@ -13,6 +13,8 @@ public:
     virtual Outcome storeCategories(const CategorySnapshot &, const RequestContext &) = 0;
     virtual Result<CatalogPage> query(const CatalogQuery &, const RequestContext &) = 0;
     virtual Result<std::optional<VodDetails>> readDetails(const ContentRef &, const RequestContext &) = 0;
+    // Cache-only read: newest measured tracks in this series/season; never fetch media.
+    virtual Result<std::optional<VodMediaProbe>> readSeasonMediaMetadata(const ContentRef &, const QString &seasonId, const RequestContext &) = 0;
     virtual Outcome storeDetails(const VodDetails &, const RequestContext &) = 0;
     virtual Result<ImportToken> beginRefresh(const CatalogScope &, const RequestContext &) = 0;
     virtual Outcome stageBatch(const ImportToken &, const CatalogBatch &) = 0;

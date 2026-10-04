@@ -33,6 +33,7 @@ public:
     Outcome storeCategories(const CategorySnapshot &, const RequestContext &) override;
     Result<CatalogPage> query(const CatalogQuery &, const RequestContext &) override;
     Result<std::optional<VodDetails>> readDetails(const ContentRef &, const RequestContext &) override;
+    Result<std::optional<VodMediaProbe>> readSeasonMediaMetadata(const ContentRef &, const QString &, const RequestContext &) override;
     Outcome storeDetails(const VodDetails &, const RequestContext &) override;
     Result<ImportToken> beginRefresh(const CatalogScope &, const RequestContext &) override;
     Outcome stageBatch(const ImportToken &, const CatalogBatch &) override;
@@ -41,6 +42,8 @@ public:
     Outcome evictCache(const CatalogScope &, const RequestContext &) override;
     Outcome removeSourceState(const QUuid &) override;
     Result<std::optional<VodProgress>> read(const ContentRef &, const RequestContext &) override;
+    Result<SeriesProgress> readSeriesProgress(const ContentRef &, const RequestContext &) override;
+    Outcome setSeriesWatched(const SeriesWatchedChange &, const RequestContext &) override;
     Outcome beginSession(const ContentRef &, const QUuid &, const RequestContext &) override;
     Outcome checkpoint(const ContentRef &, const VodProgress &, const RequestContext &, bool completed = false) override;
     Result<MovieListState> readMovieLists(const ContentRef &, const RequestContext &) override;

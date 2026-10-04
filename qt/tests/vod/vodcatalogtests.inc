@@ -71,16 +71,16 @@ void AppModelTests::vodCatalogSessionLibrary()
     VodCatalogModel catalog(&runtime, &settings);
     VodCatalogModel sidebar(&runtime, &settings, nullptr, VodCatalogModel::Purpose::PlaybackSidebar);
     QVERIFY(!catalog.continueMoviesLoaded());
-    QVERIFY(!runtime.module()->enabled()); catalog.open();
+    QVERIFY(runtime.module()->enabled()); catalog.open();
     QTRY_COMPARE_WITH_TIMEOUT(catalog.count(), 100, 10000);
     QTRY_VERIFY(!catalog.busy());
     QTRY_VERIFY(catalog.continueMoviesLoaded());
     QVERIFY(catalog.continueMovies().isEmpty());
     QVERIFY(catalog.hasMore()); QCOMPARE(catalog.categories().size(), 5); QCOMPARE(catalogRequests, 1);
     QVERIFY(!runtime.active()); QVERIFY(!backend);
-    QVERIFY(!settings.current().vodEnabled); QVERIFY(!settings.profileById(profile.id)->vodEnabled);
+    QVERIFY(!settings.current().vodEnabled); QVERIFY(settings.profileById(profile.id)->vodEnabled);
     QCOMPARE(settings.current().activeProfileId, liveSource);
-    QVERIFY(settingsFile.open(QIODevice::ReadOnly)); QCOMPARE(settingsFile.readAll(), before); settingsFile.close();
+    QVERIFY(settingsFile.open(QIODevice::ReadOnly)); QVERIFY(settingsFile.readAll() != before); settingsFile.close();
     const QStringList resolutions{QStringLiteral("480p"), QStringLiteral("480p"), QStringLiteral("720p"),
         QStringLiteral("1080p"), QStringLiteral("1440p"), QStringLiteral("4K")};
     for (int row = 0; row < resolutions.size(); ++row) {
@@ -383,9 +383,11 @@ void AppModelTests::vodCatalogSessionLibrary()
         QTRY_VERIFY(!progressRead.isEmpty());
         QCOMPARE(restored.data(restored.index(0), VodCatalogModel::ProgressRole).toDouble(), 0.0);
         restored.selectMovie(0); QTRY_VERIFY(!restored.busy());
+        QTRY_VERIFY(restored.movie().value(QStringLiteral("progressLoaded")).toBool());
         restored.toggleWatched(); QTRY_VERIFY(!restored.busy());
         QCOMPARE(std::get<std::optional<VodProgress>>(runtime.store()->read(savedRef, request))->status, WatchStatus::Watched);
         restored.back(); restored.selectMovie(0); QTRY_VERIFY(!restored.busy());
+        QTRY_VERIFY(restored.movie().value(QStringLiteral("progressLoaded")).toBool());
         QVERIFY(restored.movie().value(QStringLiteral("watched")).toBool());
         restored.toggleWatched(); QTRY_VERIFY(!restored.busy());
         const auto reset = std::get<std::optional<VodProgress>>(runtime.store()->read(savedRef, request));
@@ -516,4 +518,70 @@ void AppModelTests::vodArtworkInvalidAndRemoved()
     QCOMPARE(std::get<Error>(cache.resolve(source.revision.profileId, *ref, request)).code, ErrorCode::Cancelled);
     QVERIFY(!cache.remember(source, QUrl(QStringLiteral("https://poster.invalid/p.jpg")), request));
     QVERIFY(!QDir(dir.filePath(source.revision.profileId.toString(QUuid::WithoutBraces))).exists());
+}
+
+void AppModelTests::vodLibraryWaitsForStorage_data()
+{
+    QTest::addColumn<bool>("series");
+    QTest::addColumn<QString>("scenario");
+    QTest::newRow("movies-retry") << false << QStringLiteral("retry");
+    QTest::newRow("series-retry") << true << QStringLiteral("retry");
+    QTest::newRow("series-timeout") << true << QStringLiteral("timeout");
+    QTest::newRow("movies-close") << false << QStringLiteral("close");
+}
+void AppModelTests::vodLibraryWaitsForStorage()
+{
+    using namespace OKILTV::Vod;
+    QFETCH(bool, series);
+    QFETCH(QString, scenario);
+    QTemporaryDir dir;
+    QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));
+    connect(&server, &QTcpServer::newConnection, &server, [&]() {
+        while (auto *socket = server.nextPendingConnection()) {
+            auto bytes = std::make_shared<QByteArray>();
+            connect(socket, &QTcpSocket::readyRead, socket, [socket, bytes]() {
+                bytes->append(socket->readAll()); if (!bytes->contains("\r\n\r\n")) return;
+                socket->write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]");
+                socket->disconnectFromHost();
+            });
+            connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+        }
+    });
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json"))); settings.load();
+    ServerProfile profile; profile.xtreamBaseUrl = QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort());
+    profile.xtreamUsername = QStringLiteral("synthetic"); profile.xtreamPassword = QStringLiteral("synthetic");
+    QVERIFY(settings.addProfile(profile));
+    const auto name = guidToString(QUuid::createUuid());
+    const auto removeConnection = qScopeGuard([&]() { QSqlDatabase::removeDatabase(name); });
+    auto writer = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), name);
+    writer.setDatabaseName(dir.filePath(QStringLiteral("iptv.db"))); QVERIFY(writer.open());
+    QSqlQuery lock(writer); QVERIFY(lock.exec(QStringLiteral("CREATE TABLE fixture(id INTEGER)")));
+    QVERIFY(lock.exec(QStringLiteral("BEGIN EXCLUSIVE"))); // Reproduce contention during startup migration.
+    PlayerController player; DvrController dvr(&settings, &player);
+    MultiViewController multiview(&settings, nullptr, &player); TimeshiftController timeshift(&settings, &player, &dvr, &multiview);
+    VodRuntime runtime(&settings, &multiview, &dvr, &timeshift, nullptr, []() { return std::make_unique<Test::Engine>(); });
+    QSignalSpy errors(&runtime, &VodRuntime::errorOccurred);
+    VodCatalogModel catalog(&runtime, &settings, nullptr, VodCatalogModel::Purpose::Library, series ? CatalogKind::Series : CatalogKind::Movies);
+    QElapsedTimer waiting; waiting.start(); catalog.open();
+    QVERIFY(catalog.busy()); QVERIFY(catalog.errorText().isEmpty());
+    QTRY_VERIFY_WITH_TIMEOUT(!errors.isEmpty(), 5000);
+    QVERIFY(!runtime.ready()); QVERIFY(catalog.busy()); QVERIFY(catalog.errorText().isEmpty());
+    if (scenario == QStringLiteral("timeout")) {
+        QTRY_VERIFY_WITH_TIMEOUT(!catalog.busy(), 17000);
+        QVERIFY(waiting.elapsed() >= 15000); QVERIFY(waiting.elapsed() < 17000);
+        QVERIFY(catalog.errorText().contains(QStringLiteral("15 seconds")));
+        QVERIFY(lock.exec(QStringLiteral("COMMIT")));
+        catalog.refresh(); QVERIFY(catalog.busy()); QVERIFY(catalog.errorText().isEmpty());
+    } else {
+        if (scenario == QStringLiteral("close")) {
+            catalog.close(); QVERIFY(!catalog.busy());
+        }
+        QVERIFY(lock.exec(QStringLiteral("COMMIT")));
+        if (scenario == QStringLiteral("close")) catalog.open();
+    }
+    QTRY_VERIFY_WITH_TIMEOUT(runtime.ready(), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(catalog.continueMoviesLoaded(), 5000);
+    QTRY_VERIFY(!catalog.busy()); QVERIFY(catalog.errorText().isEmpty());
+    QVERIFY(!runtime.active());
+    catalog.close(); runtime.shutdown();
 }

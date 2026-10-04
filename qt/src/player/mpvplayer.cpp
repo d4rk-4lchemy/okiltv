@@ -171,6 +171,33 @@ struct mpv_node
     int format;
 };
 
+QVariant variantFromMpvNode(const mpv_node &node)
+{
+    switch (node.format) {
+    case kMpvFormatDouble: return node.u.double_;
+    case kMpvFormatInt64: return node.u.int64;
+    case kMpvFormatFlag: return node.u.flag != 0;
+    case kMpvFormatString: return QString::fromUtf8(node.u.string ? node.u.string : "");
+    case kMpvFormatNodeArray: {
+        QVariantList values;
+        if (node.u.list) {
+            for (int i = 0; i < node.u.list->num; ++i) values.append(variantFromMpvNode(node.u.list->values[i]));
+        }
+        return values;
+    }
+    case kMpvFormatNodeMap: {
+        QVariantMap values;
+        if (node.u.list && node.u.list->keys) {
+            for (int i = 0; i < node.u.list->num; ++i) {
+                if (node.u.list->keys[i]) values.insert(QString::fromUtf8(node.u.list->keys[i]), variantFromMpvNode(node.u.list->values[i]));
+            }
+        }
+        return values;
+    }
+    default: return {};
+    }
+}
+
 QString escapeArg(QString value)
 {
     value.replace(QStringLiteral("\\"), QStringLiteral("\\\\"));
@@ -1411,6 +1438,8 @@ void MpvPlayer::seekRelative(const double seconds)
         return;
     }
 
+    m_bufferSeeking.store(true);
+    invalidatePlaybackBuffer();
     const auto command = QStringLiteral("no-osd seek %1 relative").arg(seconds, 0, 'f', 1);
     m_api->commandString(m_state->handle, command.toUtf8().constData());
 }
@@ -1421,6 +1450,8 @@ void MpvPlayer::seekAbsolute(const double seconds)
         return;
     }
 
+    m_bufferSeeking.store(true);
+    invalidatePlaybackBuffer();
     const auto command = QStringLiteral("no-osd seek %1 absolute").arg(seconds, 0, 'f', 3);
     m_api->commandString(m_state->handle, command.toUtf8().constData());
 }
@@ -1431,6 +1462,8 @@ void MpvPlayer::seekAbsoluteFast(const double seconds)
         return;
     }
 
+    m_bufferSeeking.store(true);
+    invalidatePlaybackBuffer();
     const auto command = QStringLiteral("no-osd seek %1 absolute+keyframes").arg(seconds, 0, 'f', 3);
     m_api->commandString(m_state->handle, command.toUtf8().constData());
 }
@@ -1440,6 +1473,8 @@ void MpvPlayer::seekAbsoluteExact(const double seconds)
     if (!ensureInitialized()) {
         return;
     }
+    m_bufferSeeking.store(true);
+    invalidatePlaybackBuffer();
     const auto command = QStringLiteral("no-osd seek %1 absolute+exact").arg(seconds, 0, 'f', 3);
     m_api->commandString(m_state->handle, command.toUtf8().constData());
 }
@@ -1506,6 +1541,8 @@ bool MpvPlayer::setRuntimeInt64Option(const char *name, const qint64 value)
 
 void MpvPlayer::refreshCachedTelemetryFast()
 {
+    const auto generation = m_trackGeneration.load();
+    const auto sampledAt = std::chrono::steady_clock::now();
     CachedTelemetry telemetry;
     {
         QMutexLocker locker(&m_state->mutex);
@@ -1519,10 +1556,15 @@ void MpvPlayer::refreshCachedTelemetryFast()
     telemetry.bufferingState = propertyFlag("paused-for-cache");
     telemetry.volumePercent = propertyDouble("volume");
     telemetry.demuxerCacheDurationSeconds = propertyDouble("demuxer-cache-duration");
-    telemetry.demuxerSeekableRangeSeconds = propertyDemuxerSeekableRangeSeconds(&telemetry.cacheReadState);
+    telemetry.demuxerSeekableRangeSeconds = propertyDemuxerSeekableRangeSeconds(
+        telemetry.positionSeconds, &telemetry.cacheReadState, &telemetry.playbackBuffer);
     telemetry.cacheSpeedBytesPerSecond = propertyDouble("cache-speed");
+    telemetry.bufferGeneration = generation;
+    telemetry.bufferSampledAt = sampledAt;
+    if (m_bufferSeeking.load() || propertyFlag("seeking").value_or(false)) telemetry.playbackBuffer = {};
 
     QMutexLocker locker(&m_state->mutex);
+    if (generation != m_trackGeneration.load()) return;
     m_cachedTelemetry = std::move(telemetry);
 }
 
@@ -1564,7 +1606,19 @@ void MpvPlayer::refreshCachedTelemetrySlow(const bool refreshTracks)
     const auto path = publishTracks ? propertyString("path").value_or(QString {}) : QString {};
     {
         QMutexLocker locker(&m_state->mutex);
-        m_cachedTelemetry = std::move(telemetry);
+        if (trackGeneration != m_trackGeneration.load()) return;
+        // Slow metadata must not overwrite a newer clock/cache sample or a seek invalidation.
+        m_cachedTelemetry.videoWidth = telemetry.videoWidth;
+        m_cachedTelemetry.videoHeight = telemetry.videoHeight;
+        m_cachedTelemetry.videoCodec = std::move(telemetry.videoCodec);
+        m_cachedTelemetry.audioCodec = std::move(telemetry.audioCodec);
+        m_cachedTelemetry.videoBitrateBitsPerSecond = telemetry.videoBitrateBitsPerSecond;
+        m_cachedTelemetry.audioBitrateBitsPerSecond = telemetry.audioBitrateBitsPerSecond;
+        m_cachedTelemetry.displayedVideoFramePtsSeconds = telemetry.displayedVideoFramePtsSeconds;
+        m_cachedTelemetry.estimatedFrameRateFps = telemetry.estimatedFrameRateFps;
+        m_cachedTelemetry.sourceFrameRateFps = telemetry.sourceFrameRateFps;
+        m_cachedTelemetry.droppedFrameCount = telemetry.droppedFrameCount;
+        if (refreshTracks) m_cachedTelemetry.trackList = std::move(telemetry.trackList);
     }
     if (publishTracks) {
         QMetaObject::invokeMethod(this, [this, trackGeneration, path, tracks]() {
@@ -1670,6 +1724,26 @@ std::optional<double> MpvPlayer::demuxerCacheDurationSeconds() const
 {
     QMutexLocker locker(&m_state->mutex);
     return m_cachedTelemetry.demuxerCacheDurationSeconds;
+}
+
+MpvPlayer::PlaybackBufferSnapshot MpvPlayer::playbackBufferSnapshot() const
+{
+    QMutexLocker locker(&m_state->mutex);
+    const auto age = std::chrono::steady_clock::now() - m_cachedTelemetry.bufferSampledAt;
+    if (m_bufferSeeking.load() || m_cachedTelemetry.bufferGeneration != m_trackGeneration.load()
+        || m_tracksLoadedGeneration.load() != m_trackGeneration.load()
+        || m_cachedTelemetry.bufferSampledAt == std::chrono::steady_clock::time_point {}
+        || age > std::chrono::seconds(1)) return {};
+    auto result = m_cachedTelemetry.playbackBuffer;
+    result.fresh = true;
+    return result;
+}
+
+void MpvPlayer::invalidatePlaybackBuffer()
+{
+    QMutexLocker locker(&m_state->mutex);
+    m_cachedTelemetry.playbackBuffer = {};
+    m_cachedTelemetry.bufferSampledAt = {};
 }
 
 std::optional<std::pair<double, double>> MpvPlayer::demuxerSeekableRangeSeconds() const
@@ -1807,6 +1881,8 @@ bool MpvPlayer::managesTrackPreferences() const
 void MpvPlayer::beginTrackLoad(const QString &url)
 {
     ++m_trackGeneration;
+    m_bufferSeeking.store(false);
+    invalidatePlaybackBuffer();
     m_tracksLoadedGeneration.store(0);
     m_readyTrackGeneration = 0;
     m_trackExpectedPath = url;
@@ -2488,11 +2564,15 @@ void MpvPlayer::processEvents()
             m_slowTelemetryRefreshPending.store(true);
             break;
         case kMpvEventSeek: {
+            m_bufferSeeking.store(true);
+            invalidatePlaybackBuffer();
             QMutexLocker lock(&m_loadMutex);
             m_typedSeekInProgress = !m_activeLoadToken.isNull();
             break;
         }
         case kMpvEventPlaybackRestart:
+            m_bufferSeeking.store(false);
+            refreshCachedTelemetryFast();
             {
                 QUuid token;
                 {
@@ -2701,8 +2781,10 @@ std::optional<double> MpvPlayer::propertyNodeDoubleField(const char *prop, const
     return result;
 }
 
-std::optional<std::pair<double, double>> MpvPlayer::propertyDemuxerSeekableRangeSeconds(std::optional<CacheReadState> *readState) const
+std::optional<std::pair<double, double>> MpvPlayer::propertyDemuxerSeekableRangeSeconds(
+    const double positionSeconds, std::optional<CacheReadState> *readState, PlaybackBufferSnapshot *buffer) const
 {
+    *buffer = {};
     if (readState != nullptr) {
         readState->reset();
     }
@@ -2749,7 +2831,8 @@ std::optional<std::pair<double, double>> MpvPlayer::propertyDemuxerSeekableRange
         }
     }
 
-    const auto currentPositionSeconds = m_cachedTelemetry.positionSeconds;
+    *buffer = playbackBufferForCacheState(positionSeconds, variantFromMpvNode(stateNode).toMap());
+    const auto currentPositionSeconds = positionSeconds;
     if (!std::isfinite(currentPositionSeconds) || currentPositionSeconds < 0.0) {
         return freeAndReturn(std::nullopt);
     }

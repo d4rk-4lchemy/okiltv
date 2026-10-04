@@ -44,6 +44,37 @@ Linux release helper.
 
 ## Select validation by affected contract
 
+`OKILTVQtMediaModeSwitchTests` covers segment order, confirmed selection versus
+requests, animated geometry, minimum width, keyboard confirmation, disabled
+input and visible stationary chrome while navigation is gated. App cases
+`vodRuntimeLibraryPause`, `vodRuntimeExplicitLiveWaitsForProgress` and `appControllerReturnsToLastPlayedChannel` verify session-owned pause/resume,
+manual pause preservation, explicit-action invalidation, matching stop
+acknowledgement, durable progress before Live, playback/browse independence and
+preservation of a buffered Live position/refill hold during library return.
+`vodRuntimeExplicitLiveFailure` covers stop timeouts, cancellation and late replies.
+The local movie UI scenario verifies fullscreen Live/VOD rails and Guide/Settings
+frames at the top edge, Guide clearance and fixed switch geometry above both
+libraries, including toolbar clearance and movie Back/Settings geometry. It
+exercises the standalone switch in windowed/fullscreen
+mode, library pause/resume, fixed navigation throughout library animations and
+library-close-before-Live-panel-reveal ordering during VOD-to-Live handoff, with
+background Live still playing and its observed position advancing without rewind.
+The UI bridge window snapshot exposes `chromeAnimationsRunning`, `vodTransitioning`
+and `navigationFocused` for transition/focus
+arbitration. It verifies standalone navigation below the restored 33 px bar and
+30 px window actions at the minimum window size. Windows title-bar appearance, Snap and actual
+animation smoothness remain manual acceptance checks after the cross-build.
+
+Buffer telemetry/recovery changes are covered by `OKILTVQtPlaybackTests` (A/V
+clocks, raw versus rebased MPEG-TS timestamps, continuous ranges, high plateaus, provider bursts, lost delivery and
+pause/stale observations) and App cases `playerControllerDebugBufferRejectsStaleLoadsAndSeeks`,
+`playerControllerCatchupDebugSnapshotUsesEffectiveBufferMetric`,
+`playerControllerLiveReconnectAllowsFullStabilizationWindow` and
+`mpvLiveContinuouslyRefillsBeyondReserve` (real libmpv, generated local WAV and
+MPEG-TS with a 40,000-second timestamp origin, rebasing enabled/disabled).
+The VOD Mpv/Runtime tests validate shared backend load/seek telemetry. Windows
+visual acceptance still needs hardware testing after the cross-build.
+
 Test definitions and labels live in [qt/tests/CMakeLists.txt](../qt/tests/CMakeLists.txt).
 Inspect registered tests rather than relying on a fixed suite count:
 
@@ -67,6 +98,23 @@ ctest --preset qt-linux-debug -L vod --output-on-failure
 | QML controls/interaction | Timeline, source group, channel number, transparency, update, download, VOD library and VOD playback-panel suites |
 | Windows process ownership | Windows process-job and DVR cases, registered on Windows |
 
+VOD source tests use protected temporary profiles and a local Xtream HTTP fixture.
+`vodDefaultsMigrationRetriesAndPreservesOptOut` checks default/migration retry and
+later false values. `vodSourceGroupDrafts` checks independent source/media drafts,
+refresh reconciliation, large-category defaults and failed Save rollback.
+`vodSourceSynchronizationAndDisable` checks below/equal/above-30% request strategy,
+ignored server category filters, duplicates, zero selections, failed-category
+snapshot retention, cancellation, active-session transport/recovery/checkpoints
+and rejected subsequent playback after disablement. Storage tests verify allowed
+categories before pagination and every special list, plus late-publication fencing.
+Contract tests reject policy changes during delayed Legacy resource release.
+`OKILTVQtSourceMediaUiTests` covers switch position, media segments, independent
+filters, cross-source Save/Discard/errors, safe retry after partial source creation
+and narrow geometry. The local
+`UI-12-vod-movies` scenario also exercises real source controls, Series categories,
+unsupported M3U, retained drafts, Discard and a saved opt-out in the library.
+Windows visual/hardware acceptance remains manual even after the cross-build.
+
 VOD contract tests cover confirmed probe teardown, the subsequent two-second
 cooldown, cancellation, replacement, source changes and shutdown. The application
 catalogue test uses real ffprobe against a stalled local HTTP response to verify
@@ -83,6 +131,19 @@ All movies, cancellation/reopening, narrow layout and track pickers using a loca
 provider. It checks that group browsing preserves the paused position and media
 request count; the Live channel-selection scenario covers the shared picker’s
 existing behavior.
+
+`OKILTVQtVodMarqueeTests` covers the full one-second delay, early cancellation,
+short titles, constant scrolling speed, continuous wrapping and reset on
+text/identity/font/width/visibility/input changes. Library and playback-panel QML
+tests verify only the indicated title scrolls, last-input ownership, stationary
+pointer behavior, movie/series grid and shelf focus transfers, retained shelf
+animation through progress updates, and unchanged episode row geometry/actions.
+Responsive poster tests retain the original minimum and enforce the reduced
+maximum area, column thresholds, shared shelf sizes and preserved browsing.
+`UI-12-vod-movies` verifies moving long provider titles through both keyboard
+and hover indication in the packaged QML, plus reset when focusing search.
+`UI-13-vod-series` verifies right-panel episode scrolling and keyboard takeover
+from a stationary pointer without changing playback. These use local fixtures.
 
 `OKILTVQtVodUiTests` covers first-visit history selection, empty/error fallback,
 user-interaction cancellation, reopening, shelf/grid focus transfers, identity-based
@@ -157,6 +218,56 @@ in the module before validating packaged behavior.
 For documentation-only edits, check links, commands and whitespace; a full C++
 rebuild is unnecessary. For code changes, run relevant tests and the repository's
 required checks, broadening to full regression when affected boundaries warrant it.
+
+`OKILTVQtVodSeriesTests` uses a local Xtream fixture and the production runtime
+with generated multi-track media to verify pre-play episode probing, fresh cache
+reuse, stale-cache refresh, no probes for later episodes/Specials, track preferences
+and suppression while VOD is active. `OKILTVQtVodStorageStartupTests` holds a local
+SQLite lock to verify both libraries' startup loading/retries, the real 15-second
+timeout, Retry and cancellation on close. The library QML suite checks the loading
+spinner and enabled pre-play episode track selectors. Series runtime tests also run
+with a fake engine for natural-end autoplay, season gaps, repeated/stale EOF,
+Stop, asynchronous Back, restart resume, replacement, disabled policy,
+resolver/storage errors, early EOF, unknown duration,
+Specials, confirmed track fallback, final return, DVR and shutdown. Domain tests
+cover queue ordering, the exact 95% threshold and series completion excluding
+Specials (including known unavailable ordinary episodes). Storage tests cover
+schema 10 migration, atomic bulk status rollback, track/history preservation,
+continuation suppression through restart/cache eviction and release on a new
+confirmed playback session, alongside schema 9,
+series artwork/history/list durability, manual pointer isolation, Continue
+projection and category/list filtering before pagination. QML tests reuse the
+movie library fixtures for bounded series details with long descriptions and
+compact/resized windows, stable episode scrolling after status/progress changes,
+bulk status controls and row buttons that never select/start playback. Keyboard
+regressions verify automatic details focus, one-row arrow movement, clamped
+boundaries, visible selection and Enter/Return on the selected episode, plus
+Left/Right season changes, first-row selection and unchanged playback-panel keys.
+Scrollbar tests cover empty/exact-fit/overflowing content on both axes, resize
+visibility and preserved poster geometry. Series runtime/storage tests verify
+newest cache-only season track fallback, timestamp ties, season isolation,
+restart/expiry/cancellation, own-data precedence, rejected borrowed-track edits,
+stable series information and rapid selection replacement without media probes.
+The QML suite also checks that pending status writes/history refreshes keep movie
+Play and movie/episode icons visually stable while duplicate input stays blocked.
+Playback-panel tests verify compact episode status buttons/icons and progress bars
+extending beneath them at wide/narrow panel widths for both watched states.
+Runtime status tests verify independent list synchronization, stable model row updates,
+manual active-session overrides and bulk Watched/unwatched across all seasons.
+`13-vod-series.py` exercises B/V, independent libraries, both playback panels,
+pre-play audio/subtitle availability from the first episode's probe, cached episode
+metadata reuse, and preservation of Live playback during detail probing and status
+edits. It also covers
+Settings, Back, video-only Escape/Backspace return and narrow/wide layouts through local media. It also exercises
+the playback Stop button returning to the owning series/episode, persisting a
+resumable position and restoring it on Resume without starting another episode.
+Desktop UI scenarios must run serially and separately from native Xvfb playback
+tests because both reserve X displays. UI-12 follows current button bounds until
+hover is confirmed before clicking (or bounds stay stable for controls without
+hover telemetry), and sends transition-key bursts with an
+explicit short delay so the burst remains within the animation window. Provider credentials
+are restricted to separate local manual integration, never automated tests.
+Windows hardware playback/rendering acceptance remains pending.
 
 ## Linux UI automation
 

@@ -12,6 +12,7 @@ Item {
     // qmllint enable unqualified
     property var rows: []
     property string profileId: ""
+    property bool showCounts: true
     property bool reorderEnabled: true
     property string filterKey: ""
     readonly property bool dragActive: draggedId.length > 0
@@ -141,6 +142,7 @@ Item {
                 }
                 Text {
                     Layout.fillWidth: true
+                    visible: root.showCounts
                     text: (card.rowData.channelCount || 0) + " channels"
                     color: Theme.textSecondary
                     font.pixelSize: 11
