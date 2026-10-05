@@ -49,7 +49,7 @@ Endpoints:
 - `regions`: named regions with absolute + normalized geometry
 - `elements`: semantic UI elements/state
 - `playback`: current channel/playback/timeshift/debug overlay snapshot
-- `inventory`: visible text-bearing controls/labels; visual items include effective `enabled`, and controls with a `hovered` property include that state. Wait for enabled/hovered before clicking an animated control.
+- `inventory`: visible text-bearing controls/labels; visual items include effective `enabled` and `scrollMoving` (whether a visual ancestor is scrolling). Controls expose `hovered`, `pinned` and `checked` when those properties exist. Wait for enabled input, settled scrolling/geometry and hover before clicking. Use `checked` to confirm selector changes; hover alone does not acknowledge a click. Source/group picker labels use `ui.player.source.<profileId>` / `ui.player.group.<groupId>` so typed search text cannot be mistaken for a result.
 - `networkMap`: layered network observations
 
 Core region names:

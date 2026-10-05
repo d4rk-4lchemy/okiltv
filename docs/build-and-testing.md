@@ -85,6 +85,20 @@ exercises the standalone switch in windowed/fullscreen
 mode, library pause/resume, fixed navigation throughout library animations and
 library-close-before-Live-panel-reveal ordering during VOD-to-Live handoff, with
 background Live still playing and its observed position advancing without rewind.
+The external runner validates animation ordering in sampled states and requires
+the intended settled overlay and enabled target controls. It does not require
+each short animation phase to appear in HTTP polling: a slow CI read can span
+the entire 240 ms library slide. An ignored click or an unfinished transition
+still fails, and background Live must retain its channel and position continuity.
+Pointer tests identify source/group picker rows by stable object names; a search
+field containing the same text is not a result row. UI-12 waits for settled
+scrolling and unchanged target bounds before clicking, including hovered controls.
+It confirms the source media segment with `checked` before checking its categories,
+and waits for Series provider categories before leaving that library so Settings
+does not depend on a request cancelled by an earlier navigation step.
+The bridge exposes ancestor `scrollMoving` and supported control `checked` states
+so failures distinguish a missed selection from missing category data.
+
 The UI bridge window snapshot exposes `chromeAnimationsRunning`, `vodTransitioning`
 and `navigationFocused` for transition/focus
 arbitration. It verifies standalone navigation below the restored 33 px bar and
@@ -112,6 +126,12 @@ ctest --preset qt-linux-debug -L '^playback$' --output-on-failure
 ctest --preset qt-linux-debug -L '^qml$' --output-on-failure
 ctest --preset qt-linux-debug -L vod --output-on-failure
 ```
+
+`OKILTVQtVodRuntimeTests` retains a 90-second CTest budget for its movie and
+episode render cases. Its two-minute local fixture checkpoints beyond the
+60-second resume threshold and verifies the restored position, including the
+five-second rewind, within ten seconds. Ordinary playback from zero cannot
+satisfy the resume assertion; the test does not wait for media time to catch up.
 
 | Area | Main coverage |
 |---|---|
@@ -287,10 +307,20 @@ edits. It also covers
 Settings, Back, video-only Escape/Backspace return and narrow/wide layouts through local media. It also exercises
 the playback Stop button returning to the owning series/episode, persisting a
 resumable position and restoring it on Resume without starting another episode.
+UI-13 waits for both chrome and library animations before ordinary key input.
+Panel readiness uses the requested control after animation settles, independently
+of the Previous episode button; reveal retries do not send keys during a slide.
+Its Escape/Backspace sequence confirms visible playback controls before hiding
+them, then requires settled video-only playback before returning to details.
+Details readiness requires an enabled Play control; episode titles alone also
+occur on Continue watching cards. Restarting the same episode must produce a
+new media request and a populated playback timeline before the next navigation.
 Desktop UI scenarios must run serially and separately from native Xvfb playback
 tests because both reserve X displays. UI-12 follows current button bounds until
 hover is confirmed before clicking (or bounds stay stable for controls without
-hover telemetry), and sends transition-key bursts with an
+hover telemetry). Its playback-list reveal retries wait for settled chrome so
+a repeated Left does not open Groups after the list has already begun opening.
+It sends transition-key bursts with an
 explicit short delay so the burst remains within the animation window. Provider credentials
 are restricted to separate local manual integration, never automated tests.
 Windows hardware playback/rendering acceptance remains pending.
@@ -310,6 +340,11 @@ generated local media; setup is documented in
 [scripts/ci/README.md](../scripts/ci/README.md). CTest serializes desktop scenarios.
 Each harness invocation keeps a unique appdata/artifact directory; do not reuse
 encrypted fixture data with a new keyring.
+
+All desktop UI scenarios have a 600-second CTest limit to accommodate CI software
+rendering, including the full movie library, playback, responsive-layout and
+source settings flow. Individual readiness waits remain bounded by each
+scenario; the total budget does not extend stalled steps.
 
 The [scenario directory](../ui-tests/tests) covers channel selection, inactivity,
 Guide groups, stationary pointer behavior, transparency, downloads, multiview and

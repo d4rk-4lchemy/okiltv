@@ -1146,6 +1146,17 @@ QJsonArray UiTestBridge::buildVisibleTextInventory() const
                 if (object->metaObject()->indexOfProperty("pinned") >= 0) {
                     record.insert(QStringLiteral("pinned"), object->property("pinned").toBool());
                 }
+                if (object->metaObject()->indexOfProperty("checked") >= 0) {
+                    record.insert(QStringLiteral("checked"), object->property("checked").toBool());
+                }
+                bool scrollMoving = false;
+                for (auto *ancestor = item->parentItem(); ancestor; ancestor = ancestor->parentItem()) {
+                    if (ancestor->property("moving").toBool()) {
+                        scrollMoving = true;
+                        break;
+                    }
+                }
+                record.insert(QStringLiteral("scrollMoving"), scrollMoving);
                 const auto scenePosition = item->mapToScene(QPointF(0.0, 0.0));
                 record.insert(
                     QStringLiteral("bounds"),

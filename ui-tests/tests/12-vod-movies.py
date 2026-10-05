@@ -122,6 +122,10 @@ def main():
         return (named(state, "ui.vod.close") or {}).get("enabled", False)
 
     def reveal_movies(state):
+        # A disabled search field can belong to a panel already sliding in.
+        # Waiting inside key() and then sending another Left would open Groups.
+        if state["window"]["chromeAnimationsRunning"]:
+            return False
         if (named(state, "ui.vod.playback.search") or {}).get("enabled", False):
             return True
         key("Left")
@@ -230,15 +234,16 @@ def main():
         def ready(state):
             nonlocal last_bounds
             item = named(state, name) or {}
-            if not item.get("enabled", False):
+            if (not item.get("enabled", False) or item["scrollMoving"]
+                    or state["window"]["chromeAnimationsRunning"]):
+                last_bounds = None
                 return False
-            if item.get("hovered", False):
-                return True
             bounds = item["bounds"]
-            if "hovered" not in item and bounds == last_bounds:
+            if bounds == last_bounds and item.get("hovered", True):
                 return True
-            # Probe completion/layout changes can move details controls between
-            # reading their bounds and clicking; follow the current hit target.
+            # Hover can remain true while a ScrollView moves under the pointer.
+            # Wait for scrolling/layout to settle and recenter on the target;
+            # the first press during a flick may only stop scrolling.
             runner.xdotool("mousemove", "--window", runner.window_id,
                            str(round(bounds["x"] + bounds["width"] / 2)),
                            str(round(bounds["y"] + bounds["height"] / 2)))
@@ -251,18 +256,26 @@ def main():
         else:
             runner.xdotool("click", "1")
 
+    def select_source_media(index):
+        name = f"ui.sources.media.{index}"
+        scroll_to(name)
+        click(name)
+        wait("Source media selected: " + name, lambda s:
+             (named(s, name) or {}).get("checked", False))
+
     def click_mode_and_check_transition(name, closing=False):
         before = wait("Media navigation is ready", lambda s:
                       (named(s, name) or {}).get("enabled", False))
         expected = named(before, name)["bounds"]
+        live_channel = before["multiview"]["tiles"][0]["channelId"]
         live_position = before["multiview"]["tiles"][0]["position"]
         click(name, instant=True)
-        saw_library_transition = False
-        saw_live_reveal = False
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             state = runner.read_state(3)
             assert state["multiview"]["isPlaying"], "Background Live paused during library navigation"
+            assert state["multiview"]["tiles"][0]["channelId"] == live_channel, \
+                "Background Live changed channel during library navigation"
             position = state["multiview"]["tiles"][0]["position"]
             assert position >= live_position - .15, "Background Live rewound during library navigation"
             live_position = position
@@ -271,7 +284,6 @@ def main():
             assert all(abs(item["bounds"][axis] - expected[axis]) < 1 for axis in ("x", "y")), \
                 "Media switch moved with the library"
             if state["window"]["vodTransitioning"]:
-                saw_library_transition = True
                 assert not item["enabled"], "Navigation accepted input during the library animation"
                 if closing:
                     for region in state["regions"]:
@@ -279,15 +291,21 @@ def main():
                             assert region["x"] + region["width"] <= 1, "Live list opened before the library closed"
                         elif region["name"] == "right_pane":
                             assert region["x"] >= state["window"]["width"] - 1, "Live EPG opened before the library closed"
-            elif closing and state["window"]["chromeAnimationsRunning"]:
-                saw_live_reveal = True
-            elif item.get("enabled", False):
-                if closing:
-                    assert saw_library_transition, "The library close animation was not observed"
-                    assert saw_live_reveal, "The subsequent Live panel animation was not observed"
-                checks.append("Fixed media navigation and sequential library/Live animations: " + name)
+            # HTTP reads and process scheduling can outlast the 240 ms slide.
+            # Validate every sampled transition, but require the settled target
+            # rather than requiring the external runner to observe each phase.
+            # Enabled navigation alone could also mean the click was ignored.
+            elif item.get("enabled", False) and not state["window"]["chromeAnimationsRunning"] and (
+                    (closing and state["window"]["visibleOverlay"] == "none"
+                     and not named(state, "ui.vod.close")
+                     and (named(state, "ui.live.guideButton") or {}).get("enabled", False)
+                     and (named(state, "ui.live.settingsButton") or {}).get("enabled", False))
+                    or (not closing and state["window"]["visibleOverlay"] == "vod"
+                        and library_ready(state))):
+                checks.append("Fixed media navigation and completed library/Live transition: " + name)
                 return state
             time.sleep(.02)
+        runner.save_state_snapshot("media-transition-failure", state)
         raise AssertionError("Media transition did not finish: " + name)
 
     try:
@@ -330,6 +348,10 @@ def main():
         click("ui.navigation.series")
         wait("Fullscreen navigation follows the Series library", lambda s: library_ready(s)
              and named(s, "ui.vod.all")["text"] == "All series")
+        # Settings later reads persisted provider categories. The library slide
+        # can finish before its request does; closing cancels pending requests.
+        wait("Series provider categories load before leaving the library", lambda s: any(
+            i.get("text") == "Local series" for i in s["inventory"]))
         click_mode_and_check_transition("ui.navigation.live", closing=True)
         wait("Fullscreen navigation returns to Live", lambda s: s["window"]["visibleOverlay"] == "none")
         key("f")
@@ -863,11 +885,10 @@ def main():
         margin = next(i for i in state["inventory"] if i.get("text") == "Archive safety margin (minutes)")
         assert switch["enabled"] and switch["bounds"]["y"] > margin["bounds"]["y"]
         checks.append("Enable VOD follows the archive margin for a saved Xtream source")
-        scroll_to("ui.sources.media.1")
-        click("ui.sources.media.1")
+        select_source_media(1)
         wait("Movie settings contain provider categories without cached titles", lambda s: any(
             i.get("text") == "Empty group" for i in s["inventory"]))
-        click("ui.sources.media.2")
+        select_source_media(2)
         wait("Series categories configure independently", lambda s: any(
             i.get("text") == "Local series" for i in s["inventory"]))
         runner.request_capture_wait("vod-source-media-groups")

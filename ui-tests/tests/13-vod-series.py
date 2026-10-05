@@ -94,21 +94,29 @@ def main():
         runner.save_state_snapshot("failure", state)
         raise AssertionError(label)
 
+    def chrome_settled(state):
+        return not state["window"]["chromeAnimationsRunning"] and not state["window"]["vodTransitioning"]
+
     def key(value):
+        # Ordinary navigation is intentionally ignored during chrome/library
+        # slides. A fixed delay after the previous key does not prove readiness.
+        wait("Chrome settles before " + value, chrome_settled)
         runner.xdotool("key", "--window", runner.window_id, value)
         time.sleep(.25)
 
     def playback_ready(state, name):
+        # Do not queue another navigation key from a snapshot taken mid-slide:
+        # a second Left on an already revealed list opens the group picker.
+        if not chrome_settled(state):
+            return False
+        if (named(state, name) or {}).get("enabled", False):
+            return True
         if name in ("ui.live.playPause", "ui.live.stopPlayback"):
-            if (named(state, name) or {}).get("enabled", False):
-                return True
             x = state["window"]["width"] // 2
             y = state["window"]["height"] // 2
             runner.xdotool("mousemove", "--window", runner.window_id, str(x), str(y))
             runner.xdotool("mousemove", "--window", runner.window_id, str(x + 1), str(y))
             return False
-        if (named(state, name) or {}).get("enabled", False) and (named(state, "ui.live.previousChannel") or {}).get("enabled", False):
-            return True
         right = name.startswith("ui.vod.episode") or name == "ui.vod.playback.settingsButton"
         key("Right" if right else "Left")
         return False
@@ -133,6 +141,22 @@ def main():
 
     def text_present(state, text):
         return any(text in item.get("text", "") for item in state["inventory"])
+
+    def series_details_ready(state):
+        # Continue watching also contains the series and episode titles. Only
+        # the details view has Play; its enabled state also waits for the slide.
+        return (state["window"]["visibleOverlay"] == "vod" and chrome_settled(state)
+                and (named(state, "ui.vod.close") or {}).get("enabled", False)
+                and (named(state, "ui.vod.play") or {}).get("enabled", False)
+                and text_present(state, "Local Series") and text_present(state, "S03E04 · Last"))
+
+    def playback_panels_hidden(state):
+        # Disabled/off-screen controls can also belong to a closing playback
+        # view or be covered by the library. Require video-only playback.
+        return (state["window"]["visibleOverlay"] == "none" and chrome_settled(state)
+                and (named(state, "ui.transport.duration") or {}).get("text") == "02:00"
+                and not named(state, "ui.vod.backToCatalog")
+                and not (named(state, "ui.live.stopPlayback") or {}).get("enabled", False))
 
     def preplay_tracks_ready(state):
         # ComboBox exposes its caption through child Labels in the text bridge.
@@ -257,9 +281,10 @@ def main():
         wait("Settings opens while the episode plays", lambda s: s["window"]["visibleOverlay"] == "settings")
         key("Escape"); key("Left")
         click("ui.vod.backToCatalog")
-        wait("Back stops VOD and opens the correct series details", lambda s: s["window"]["visibleOverlay"] == "vod" and (named(s, "ui.vod.close") or {}).get("enabled") and text_present(s, "Local Series") and text_present(s, "S03E04 · Last"))
+        wait("Back stops VOD and opens the correct series details", series_details_ready)
+        restart_requests = len(media_requests)
         click("ui.vod.play")
-        wait("Last episode restarts for Stop regression", lambda s: s["window"]["visibleOverlay"] == "none" and (named(s, "ui.transport.duration") or {}).get("text") == "02:00" and media_requests[-1] == "304.mp4")
+        wait("Last episode restarts for Stop regression", lambda s: s["window"]["visibleOverlay"] == "none" and (named(s, "ui.transport.duration") or {}).get("text") == "02:00" and len(media_requests) > restart_requests and media_requests[-1] == "304.mp4")
         key("Left")
         wait("Episode is playing before pause", lambda s: playback_ready(s, "ui.live.playPause") and (named(s, "ui.live.playPause") or {}).get("text") == "Pause")
         click("ui.live.playPause")
@@ -269,7 +294,7 @@ def main():
         runner.xdotool("click", "1")
         wait("Episode seeks to a resumable position", lambda s: (named(s, "ui.transport.position") or {}).get("text") in ("01:09", "01:10", "01:11"))
         click("ui.live.stopPlayback")
-        state = wait("Stop opens the playing series and retains the selected episode and progress", lambda s: s["window"]["visibleOverlay"] == "vod" and (named(s, "ui.vod.play") or {}).get("enabled") and text_present(s, "Local Series") and text_present(s, "S03E04 · Last") and "Resume" in (named(s, "ui.vod.play") or {}).get("text", ""))
+        state = wait("Stop opens the playing series and retains the selected episode and progress", lambda s: series_details_ready(s) and "Resume" in named(s, "ui.vod.play")["text"])
         assert "00:01" in named(state, "ui.vod.play")["text"], "Stop must persist the episode's resume position"
         stopped_requests = len(media_requests)
         time.sleep(.5)
@@ -279,17 +304,21 @@ def main():
         key("Left")
         wait("Resume restores the saved episode position", lambda s: playback_ready(s, "ui.live.stopPlayback") and (named(s, "ui.transport.position") or {}).get("text") in tuple(f"01:{second:02}" for second in range(4, 14)))
         key("Escape")
-        wait("Escape hides playback panels before returning", lambda s: not named(s, "ui.vod.backToCatalog") and not (named(s, "ui.live.stopPlayback") or {}).get("enabled"))
-        time.sleep(.3)
+        wait("Escape hides playback panels before returning", playback_panels_hidden)
         key("BackSpace")
-        wait("Backspace returns to details after resumed playback", lambda s: s["window"]["visibleOverlay"] == "vod" and (named(s, "ui.vod.close") or {}).get("enabled") and text_present(s, "S03E04 · Last"))
+        wait("Backspace returns to details after resumed playback", series_details_ready)
+        restart_requests = len(media_requests)
         key("Return")
-        wait("Enter in returned details restarts the selected episode", lambda s: s["window"]["visibleOverlay"] == "none" and media_requests[-1] == "304.mp4")
-        key("Left"); key("Escape")
-        wait("Playback panels hide again", lambda s: not named(s, "ui.vod.backToCatalog") and not (named(s, "ui.live.stopPlayback") or {}).get("enabled"))
-        time.sleep(.3)
+        wait("Enter in returned details restarts the selected episode", lambda s: s["window"]["visibleOverlay"] == "none" and (named(s, "ui.transport.duration") or {}).get("text") == "02:00" and len(media_requests) > restart_requests and media_requests[-1] == "304.mp4")
+        key("Left")
+        wait("Playback panels are ready before Escape", lambda s:
+             s["window"]["visibleOverlay"] == "none" and chrome_settled(s)
+             and (named(s, "ui.vod.backToCatalog") or {}).get("enabled", False)
+             and (named(s, "ui.live.stopPlayback") or {}).get("enabled", False))
         key("Escape")
-        wait("Escape on video returns to owning series details", lambda s: s["window"]["visibleOverlay"] == "vod" and (named(s, "ui.vod.close") or {}).get("enabled") and text_present(s, "S03E04 · Last"))
+        wait("Playback panels hide again", playback_panels_hidden)
+        key("Escape")
+        wait("Escape on video returns to owning series details", series_details_ready)
         runner.request_capture_wait("series-details-wide")
         key("Escape")
         wait("Escape returns from series details to browsing", lambda s: not named(s, "ui.vod.play") and (named(s, "ui.vod.close") or {}).get("enabled"))
