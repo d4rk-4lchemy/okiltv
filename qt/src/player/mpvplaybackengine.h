@@ -17,6 +17,8 @@ public:
     void stop(EndReason) override;
     void setVolume(double) override;
     void *renderHandle() const override { return m_player.get(); }
+    void updateExternalSubtitles(const QVariantList &, const QJsonObject &, const QUuid &) override;
+    void removeExternalSubtitle(const QString &, const QUuid &, std::function<void(bool)>) override;
     MpvPlayer *player() const { return m_player.get(); }
 private:
     void startLoad(const PlaybackRequest &request);
@@ -32,6 +34,9 @@ private:
     std::optional<std::pair<PlaybackRequest, QUuid>> m_pending;
     PlaybackEvent m_last;
     QJsonObject m_trackPreferences;
+    QVariantList m_externalSubtitles;
+    QJsonObject m_requestedSubtitleSelection;
+    bool m_subtitleSelectionConfirmed = true;
     bool m_requireRenderSurface = false;
     std::optional<PlaybackRequest> m_waitingForRender;
     VodRangeStream::Ptr m_rangeStream;

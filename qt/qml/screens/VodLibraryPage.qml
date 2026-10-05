@@ -1114,11 +1114,22 @@ FocusScope {
                                                 model: root.catalog.movie.subtitleTrackOptions || []
                                                 textRole: "label"
                                                 currentIndex: root.catalog.movie.subtitleTrackIndex === undefined ? 0 : root.catalog.movie.subtitleTrackIndex
-                                                enabled: Boolean(root.catalog.movie.trackOptionsEditable) && Boolean(root.catalog.movie.progressLoaded)
-                                                    && model.length > 2 && !root.catalog.startingPlayback
-                                                onActivated: index => root.catalog.selectSubtitleOption(index)
+                                                enabled: Boolean(root.catalog.movie.subtitleOptionsEnabled) && !root.catalog.startingPlayback
+                                                optionActionsEnabled: true
+                                                onRemoveOption: index => root.catalog.removeSubtitleOption(index)
+                                                onActivated: index => {
+                                                    root.catalog.selectSubtitleOption(index)
+                                                    currentIndex = Qt.binding(() => root.catalog.movie.subtitleTrackIndex === undefined ? 0 : root.catalog.movie.subtitleTrackIndex)
+                                                }
                                             }
                                         }
+                                    }
+                                    Label {
+                                        Layout.fillWidth: true
+                                        visible: Boolean(root.catalog.movie.subtitleError)
+                                        text: root.catalog.movie.subtitleError || ""
+                                        color: Theme.overlayTextSecondary
+                                        wrapMode: Text.WordWrap
                                     }
                                     Label {
                                         Layout.fillWidth: true
@@ -1155,8 +1166,8 @@ FocusScope {
                                                     renderType: Text.NativeRendering
                                                 }
                                             }
-                                            enabled: Boolean(root.playbackChoice.available) && !root.catalog.busy && !(root.episodes && root.episodes.busy) && !root.catalog.probePlayBlocked
-                                            retainEnabledAppearance: Boolean(root.playbackChoice.available) && Boolean(root.catalog.movie.progressLoaded) && !root.catalog.startingPlayback && !(root.episodes && root.episodes.busy) && !root.catalog.probePlayBlocked
+                                            enabled: Boolean(root.playbackChoice.available) && !root.catalog.busy && !(root.episodes && root.episodes.busy) && !root.catalog.probePlayBlocked && !Boolean(root.catalog.movie.subtitleBusy)
+                                            retainEnabledAppearance: Boolean(root.playbackChoice.available) && Boolean(root.catalog.movie.progressLoaded) && !root.catalog.startingPlayback && !(root.episodes && root.episodes.busy) && !root.catalog.probePlayBlocked && !Boolean(root.catalog.movie.subtitleBusy)
                                             onClicked: root.catalog.play(root.playbackChoice.resumeSeconds < 60)
                                         }
                                         VodMovieListButton {
@@ -1201,8 +1212,8 @@ FocusScope {
                                             caption: "Play from beginning"
                                             Accessible.name: caption
                                             visible: root.playbackChoice.resumeSeconds >= 60
-                                            enabled: Boolean(root.playbackChoice.available) && !root.catalog.busy && !(root.episodes && root.episodes.busy) && !root.catalog.probePlayBlocked
-                                            retainEnabledAppearance: Boolean(root.playbackChoice.available) && Boolean(root.catalog.movie.progressLoaded) && !root.catalog.startingPlayback && !(root.episodes && root.episodes.busy) && !root.catalog.probePlayBlocked
+                                            enabled: Boolean(root.playbackChoice.available) && !root.catalog.busy && !(root.episodes && root.episodes.busy) && !root.catalog.probePlayBlocked && !Boolean(root.catalog.movie.subtitleBusy)
+                                            retainEnabledAppearance: Boolean(root.playbackChoice.available) && Boolean(root.catalog.movie.progressLoaded) && !root.catalog.startingPlayback && !(root.episodes && root.episodes.busy) && !root.catalog.probePlayBlocked && !Boolean(root.catalog.movie.subtitleBusy)
                                             onClicked: root.catalog.play(true)
                                         }
                                     }

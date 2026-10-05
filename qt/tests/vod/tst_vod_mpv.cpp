@@ -114,6 +114,48 @@ private slots:
             QCOMPARE(ffmpeg.exitCode(), 0);
         }
     }
+    void uploadedSubtitlesAttachRestoreAndRemove() {
+        const auto firstPath = m_media.filePath(QStringLiteral("uploaded polski.srt"));
+        const auto secondPath = m_media.filePath(QStringLiteral("uploaded.vtt"));
+        QByteArray subtitleBytes = "1\n00:00:00,000 --> 00:00:20,000\nPolskie napisy\n";
+        if (const auto fixture = qEnvironmentVariable("OKILTV_SUBTITLE_FIXTURE"); !fixture.isEmpty()) {
+            QFile input(fixture); QVERIFY(input.open(QIODevice::ReadOnly)); subtitleBytes = input.readAll();
+        }
+        QFile first(firstPath); QVERIFY(first.open(QIODevice::WriteOnly)); first.write(subtitleBytes); first.close();
+        QFile second(secondPath); QVERIFY(second.open(QIODevice::WriteOnly)); second.write("WEBVTT\n\n00:00.000 --> 00:20.000\nSecond subtitles\n"); second.close();
+        const QVariantMap firstFile{{QStringLiteral("id"), QStringLiteral("first")}, {QStringLiteral("path"), firstPath}, {QStringLiteral("name"), QStringLiteral("polski.srt")}};
+        const QVariantMap secondFile{{QStringLiteral("id"), QStringLiteral("second")}, {QStringLiteral("path"), secondPath}, {QStringLiteral("name"), QStringLiteral("uploaded.vtt")}};
+        const QJsonObject selection{{QStringLiteral("mode"), QStringLiteral("external")}, {QStringLiteral("externalId"), QStringLiteral("first")}, {QStringLiteral("ordinal"), 0}};
+        for (int pass = 0; pass < 2; ++pass) {
+            MpvPlaybackEngine engine(backend()); PlaybackEvent last;
+            QSignalSpy errors(engine.player(), &MpvPlayer::externalSubtitleError);
+            engine.setListener([&](const PlaybackEvent &event) { last = event; });
+            const auto token = QUuid::createUuid();
+            PlaybackRequest request; request.mediaUri = QUrl::fromLocalFile(m_media.filePath(QStringLiteral("film.mkv"))); request.startPaused = true;
+            if (pass == 1) { request.externalSubtitles = {secondFile, firstFile}; request.trackPreferences.insert(QStringLiteral("sub"), selection); }
+            engine.load(request, token);
+            QTRY_VERIFY_WITH_TIMEOUT(last.state == EngineState::Paused, 5000);
+            if (pass == 0) engine.updateExternalSubtitles({firstFile, secondFile}, selection, token);
+            const auto selected = [&]() {
+                const auto tracks = engine.player()->trackList();
+                const auto id = OKILTV::Core::selectedTrackId(tracks, QStringLiteral("sub"));
+                return OKILTV::Core::makeTrackPreference(tracks, QStringLiteral("sub"), id);
+            };
+            QTRY_COMPARE_WITH_TIMEOUT(selected(), selection, 5000);
+            QTRY_VERIFY(last.trackPreferences && last.trackPreferences->value(QStringLiteral("sub")).toObject() == selection);
+            QCOMPARE(errors.size(), 0);
+            bool removed = false;
+            engine.removeExternalSubtitle(QStringLiteral("first"), token, [&](bool success) { removed = success; });
+            QTRY_VERIFY(removed);
+            QTRY_VERIFY(OKILTV::Core::matchTrackPreference(engine.player()->trackList(), QStringLiteral("sub"), selection) < 0);
+            const QJsonObject off{{QStringLiteral("mode"), QStringLiteral("off")}};
+            engine.updateExternalSubtitles({secondFile}, off, token);
+            QTRY_COMPARE(selected(), off);
+            engine.updateExternalSubtitles({firstFile}, selection, QUuid::createUuid());
+            QTest::qWait(150); QCOMPARE(selected(), off);
+            engine.stop(EndReason::UserStop); QTRY_VERIFY(last.end.has_value());
+        }
+    }
     void explicitTracksRestoreAcrossLoads()
     {
         const auto subtitlePath = m_media.filePath(QStringLiteral("tracks.srt"));
@@ -403,6 +445,112 @@ private slots:
         engine.load(request, QUuid::createUuid());
         QTRY_VERIFY(end.has_value());
         QCOMPARE(end, std::optional<EndReason>(EndReason::Error));
+    }
+    void subtitlesClearPlaybackControls_data()
+    {
+        QTest::addColumn<QSize>("windowSize");
+        QTest::newRow("wide") << QSize(640, 360);
+        QTest::newRow("letterboxed") << QSize(640, 480);
+    }
+    void subtitlesClearPlaybackControls()
+    {
+        QFETCH(QSize, windowSize);
+        // A different basename prevents mpv from also auto-loading the source
+        // SRT as an external third track when the generated MKV is reloaded.
+        const auto subtitlePath = m_media.filePath(QStringLiteral("caption-input.srt"));
+        QFile subtitles(subtitlePath); QVERIFY(subtitles.open(QIODevice::WriteOnly));
+        subtitles.write("1\n00:00:00,000 --> 00:00:20,000\nFirst subtitle line\nSecond subtitle line\n");
+        subtitles.close();
+        const auto path = m_media.filePath(QStringLiteral("position.mkv"));
+        QProcess ffmpeg;
+        ffmpeg.start(QStringLiteral("ffmpeg"), {QStringLiteral("-v"), QStringLiteral("error"),
+            QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"), QStringLiteral("color=c=red:s=640x360:r=10"),
+            QStringLiteral("-i"), subtitlePath, QStringLiteral("-map"), QStringLiteral("0:v"),
+            QStringLiteral("-map"), QStringLiteral("1:s"), QStringLiteral("-map"), QStringLiteral("1:s"),
+            QStringLiteral("-t"), QStringLiteral("20"), QStringLiteral("-c:v"), QStringLiteral("mpeg2video"),
+            QStringLiteral("-c:s:0"), QStringLiteral("srt"), QStringLiteral("-c:s:1"), QStringLiteral("ass"),
+            QStringLiteral("-y"), path});
+        QVERIFY(ffmpeg.waitForFinished(30000)); QCOMPARE(ffmpeg.exitCode(), 0);
+
+        auto player = backend(true);
+        player->configureOptions({{QStringLiteral("vo"), QStringLiteral("libmpv")},
+            {QStringLiteral("ao"), QStringLiteral("null")}, {QStringLiteral("hwdec"), QStringLiteral("no")},
+            {QStringLiteral("sub-pos"), QStringLiteral("95")}});
+        MpvPlaybackEngine engine(std::move(player), true);
+        QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+        QQuickWindow window;
+        window.resize(windowSize);
+        auto *surface = new VideoSurface;
+        surface->player = engine.player();
+        surface->setParentItem(window.contentItem());
+        surface->setSize(windowSize);
+        QTimer redraw;
+        connect(&redraw, &QTimer::timeout, surface, &QQuickItem::update);
+        redraw.start(16);
+        PlaybackRequest request; request.mediaUri = QUrl::fromLocalFile(path);
+        engine.load(request, QUuid::createUuid());
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        const auto textBottom = [&]() {
+            surface->update();
+            const auto frame = window.grabWindow();
+            for (int y = frame.height() - 1; y >= 0; --y) {
+                for (int x = 0; x < frame.width(); ++x) {
+                    const auto pixel = frame.pixelColor(x, y);
+                    if (pixel.red() > 200 && pixel.green() > 200 && pixel.blue() > 200)
+                        return y * window.height() / frame.height();
+                }
+            }
+            return -1;
+        };
+        QTRY_VERIFY(!engine.player()->trackList().isEmpty());
+        // Pause inside the cue, away from the decoder's time-zero boundary.
+        QTRY_VERIFY(engine.player()->position() >= 1.0);
+        engine.pause();
+        QTRY_VERIFY(engine.player()->pauseState().value_or(false));
+        engine.player()->selectSubtitleTrack(1);
+        int originalBottom = -1;
+        QTRY_VERIFY((originalBottom = textBottom()) > window.height() * 0.8);
+        engine.player()->setSubtitleBottomInset(0.30);
+        int raisedBottom = -1;
+        QTRY_VERIFY((raisedBottom = textBottom()) >= 0 && raisedBottom < window.height() * 0.70);
+        QVERIFY(raisedBottom < originalBottom - 30);
+        engine.player()->setSubtitleBottomInset(0);
+        QTRY_COMPARE(textBottom(), originalBottom);
+
+        // A taller window changes the reserved fraction for the same 120 px bar.
+        window.resize(window.width(), window.height() + 100);
+        surface->setSize(QSizeF(window.size()));
+        engine.player()->setSubtitleBottomInset(120.0 / window.height());
+        QTRY_VERIFY((raisedBottom = textBottom()) >= 0 && raisedBottom < window.height() - 120);
+        engine.player()->setSubtitleBottomInset(0);
+        QTRY_VERIFY(textBottom() > raisedBottom + 30);
+
+        // Authored ASS layout is retained even when selected under visible chrome.
+        engine.player()->selectSubtitleTrack(2);
+        QTRY_COMPARE(OKILTV::Core::selectedTrackId(engine.player()->trackList(), QStringLiteral("sub")), 2);
+        QTest::qWait(100);
+        const auto assBottom = textBottom();
+        QVERIFY(assBottom >= 0);
+        engine.player()->setSubtitleBottomInset(0.30);
+        QTest::qWait(100);
+        QCOMPARE(textBottom(), assBottom);
+        engine.player()->selectSubtitleTrack(1);
+        QTRY_VERIFY((raisedBottom = textBottom()) >= 0 && raisedBottom < window.height() * 0.70);
+        engine.player()->selectSubtitleTrack(2);
+        QTRY_COMPARE(textBottom(), assBottom);
+        engine.player()->selectSubtitleTrack(0);
+        QTRY_COMPARE(textBottom(), -1);
+        engine.player()->selectSubtitleTrack(1);
+        QTRY_VERIFY((raisedBottom = textBottom()) >= 0 && raisedBottom < window.height() * 0.70);
+        // A replacement file inherits visible chrome, but must use its own tracks.
+        QSignalSpy loaded(engine.player(), &MpvPlayer::mediaLoaded);
+        request.startPaused = true;
+        engine.load(request, QUuid::createUuid());
+        QTRY_COMPARE(loaded.size(), 1);
+        QTRY_COMPARE(OKILTV::Core::selectedTrackId(engine.player()->trackList(), QStringLiteral("sub")), 1);
+        QTRY_VERIFY((raisedBottom = textBottom()) >= 0 && raisedBottom < window.height() * 0.70);
+        engine.stop(EndReason::UserStop);
     }
     void rendererProducesVideoFrame()
     {

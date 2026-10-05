@@ -15,6 +15,7 @@ the developer's home directory or bypass portable overrides.
 | Channels, watch statistics and related state | [DatabaseService](../qt/src/core/database_service.h), application SQLite database |
 | EPG | [EpgCacheService](../qt/src/core/epgcache_service.h), per-profile manifest and immutable SQLite generations |
 | VOD catalogue/progress/movie and series lists | [SqliteVodStore](../qt/src/core/vod/storage/sqlitevodstore.h), additive `vod_*` tables |
+| VOD uploaded subtitles | `VodSubtitleCache`, durable copies under `vod-subtitles`; schema 11 `vod_subtitles` stores content-scoped imports and requested selection |
 | VOD artwork | Protected URL registry and decoded JPEG cache under the VOD artwork directory |
 
 VOD JPEG posters persist across restarts with a fixed 256-MiB LRU budget and no

@@ -65,6 +65,8 @@ add_subdirectory(src/app/vod)
 qt_add_executable(OKILTVQt
     src/player/mpvplaybackengine.cpp
     src/app/vod/vodruntime.cpp
+    src/app/vod/vodruntimesubtitles.cpp
+    src/app/vod/vodsubtitlecache.cpp
     src/app/vod/vodmediaprobe.cpp
     src/app/vod/vodmediaprobe.h
     src/app/vod/vodartworkcache.cpp

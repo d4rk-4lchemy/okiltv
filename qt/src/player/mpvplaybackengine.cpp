@@ -29,6 +29,7 @@ MpvPlaybackEngine::MpvPlaybackEngine(std::unique_ptr<MpvPlayer> player, bool req
         // NOLINTNEXTLINE(bugprone-easily-swappable-parameters) -- Matches the Qt signal signature.
         [this](const QString &profile, const QString &key, const QString &type, const QJsonObject &preference) {
             if (m_token.isNull() || profile != m_token.toString() || key != QStringLiteral("vod") || m_stopReason) return;
+            if (type == QLatin1String("sub")) m_subtitleSelectionConfirmed = true;
             if (preference.isEmpty()) m_trackPreferences.remove(type);
             else m_trackPreferences.insert(type, preference);
             sample();
@@ -38,6 +39,7 @@ MpvPlaybackEngine::MpvPlaybackEngine(std::unique_ptr<MpvPlayer> player, bool req
     connect(m_player.get(), &MpvPlayer::mediaLoaded, this, [this](const QUuid &token) {
         if (token != m_token || m_token.isNull()) return;
         m_loaded = true;
+        m_player->updateExternalSubtitles(m_externalSubtitles, m_requestedSubtitleSelection, token);
         // MpvPlayer refreshes telemetry on its event thread before this signal.
         sample(true);
     });
@@ -66,6 +68,10 @@ void MpvPlaybackEngine::load(const PlaybackRequest &request, const QUuid &token)
     m_token = token;
     m_requestedPause = request.startPaused;
     m_trackPreferences = request.trackPreferences;
+    m_externalSubtitles = request.externalSubtitles;
+    m_requestedSubtitleSelection = request.trackPreferences.value(QStringLiteral("sub")).toObject();
+    m_subtitleSelectionConfirmed = m_externalSubtitles.isEmpty() && m_requestedSubtitleSelection.value(QStringLiteral("mode")).toString() != QLatin1String("external");
+    m_player->resetExternalSubtitles();
     // Load-scoped identity fences confirmations; persistence belongs to the VOD
     // session. Keep unavailable choices and remember explicit baseline choices.
     m_player->configureTrackPreferences(token.toString(), QStringLiteral("vod"), m_trackPreferences, false, true);
@@ -139,7 +145,7 @@ void MpvPlaybackEngine::sample(bool loaded, bool seekCompleted)
     event.state = loaded ? EngineState::Loaded : (m_player->bufferingState().value_or(false) ? EngineState::Buffering
         : (m_player->pauseState().value_or(false) ? EngineState::Paused : EngineState::Playing));
     event.seekCompleted = seekCompleted;
-    event.trackPreferences = m_trackPreferences;
+    if (m_subtitleSelectionConfirmed) event.trackPreferences = m_trackPreferences;
     event.videoWidth = m_player->videoWidth();
     event.videoHeight = m_player->videoHeight();
     event.tracks = m_player->trackList();
@@ -166,6 +172,7 @@ void MpvPlaybackEngine::finish(const QUuid &token, EndReason reason, bool retrya
     m_preparingRange = false;
     m_waitingForRender.reset();
     m_token = QUuid{};
+    m_player->resetExternalSubtitles();
     m_loaded = false;
     m_stopReason.reset();
     auto pending = std::move(m_pending);
@@ -173,4 +180,18 @@ void MpvPlaybackEngine::finish(const QUuid &token, EndReason reason, bool retrya
     if (m_listener) m_listener(event);
     if (pending && m_token.isNull()) load(pending->first, pending->second);
 }
+void MpvPlaybackEngine::updateExternalSubtitles(const QVariantList &files, const QJsonObject &selection, const QUuid &token)
+{
+    if (token != m_token || m_stopReason) return;
+    m_externalSubtitles = files;
+    m_requestedSubtitleSelection = selection;
+    m_subtitleSelectionConfirmed = false;
+    if (m_loaded) m_player->updateExternalSubtitles(files, selection, token);
+}
+void MpvPlaybackEngine::removeExternalSubtitle(const QString &id, const QUuid &token, std::function<void(bool)> done)
+{
+    if (token != m_token || !m_loaded || m_stopReason) { done(false); return; }
+    m_player->removeExternalSubtitle(id, token, std::move(done));
+}
+
 }

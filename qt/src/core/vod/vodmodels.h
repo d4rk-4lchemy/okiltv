@@ -228,6 +228,8 @@ struct PlaybackDescriptor {
     QDateTime expiresAtUtc;
     std::optional<QString> contentRevision;
     std::function<bool()> admissionCurrent; // Checked immediately before a new session opens.
+    QVariantList externalSubtitles;
+    std::optional<QJsonObject> subtitleSelection;
 };
 enum class WatchStatus { InProgress, Watched };
 inline bool watchedByPosition(qint64 position, std::optional<qint64> duration)

@@ -17,6 +17,9 @@ public:
     virtual void stop(EndReason) = 0;
     virtual void setVolume(double percent) = 0;
     // Opaque borrowed handle, only the future renderer adapter may interpret it.
+    virtual void updateExternalSubtitles(const QVariantList &, const QJsonObject &, const QUuid &) {}
+    // NOLINTNEXTLINE(performance-unnecessary-value-param) -- Async adapters take ownership of the completion callable.
+    virtual void removeExternalSubtitle(const QString &, const QUuid &, std::function<void(bool)> done) { done(false); }
     virtual void *renderHandle() const = 0;
 };
 }

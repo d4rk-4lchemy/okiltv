@@ -1,4 +1,7 @@
 #include "core/vod/storage/sqlitevodstore.h"
+#include "app/vod/vodsubtitlecache.h"
+#include <QJsonArray>
+#include <QCryptographicHash>
 #include <QFile>
 #include <QSqlDatabase>
 #include <QSqlQuery>
@@ -68,6 +71,158 @@ void sql(const QString &path, const QString &statement)
 class VodStorageTests : public QObject {
     Q_OBJECT
 private slots:
+    void uploadedSubtitlesSurviveRestartAndDoNotCreateProgress() {
+        Fixture fixture;
+        const auto ref = fixture.movie().ref;
+        const auto root = fixture.directory.filePath(QStringLiteral("subtitles"));
+        const auto original = fixture.directory.filePath(QStringLiteral("Polskie napisy.srt"));
+        QFile file(original); QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("1\n00:00:00,000 --> 00:00:05,000\nTest\n"); file.close();
+        VodSubtitleCache cache(root, fixture.store);
+        const auto imported = cache.importFile(ref, QUrl::fromLocalFile(original), fixture.request());
+        QVERIFY(std::holds_alternative<QJsonObject>(imported));
+        auto state = std::get<QJsonObject>(imported);
+        QCOMPARE(state.value(QStringLiteral("files")).toArray().size(), 1);
+        const auto id = state.value(QStringLiteral("selection")).toObject().value(QStringLiteral("externalId")).toString();
+        const auto copied = cache.playbackFiles(ref, state).first().toMap().value(QStringLiteral("path")).toString();
+        QVERIFY(QFileInfo::exists(copied));
+        auto duplicate = cache.importFile(ref, QUrl::fromLocalFile(original), fixture.request());
+        QCOMPARE(std::get<QJsonObject>(duplicate).value(QStringLiteral("files")).toArray().size(), 1);
+        auto progress = fixture.store->read(ref, fixture.request());
+        QVERIFY(std::holds_alternative<std::optional<VodProgress>>(progress));
+        QVERIFY(!std::get<std::optional<VodProgress>>(progress));
+        QVERIFY(QFile::remove(original));
+        fixture.reopen();
+        VodSubtitleCache reopened(root, fixture.store);
+        state = std::get<QJsonObject>(reopened.read(ref, fixture.request()));
+        QCOMPARE(state.value(QStringLiteral("selection")).toObject().value(QStringLiteral("externalId")).toString(), id);
+        QVERIFY(QFileInfo::exists(copied));
+        QVERIFY(std::holds_alternative<Success>(fixture.store->evictCache(fixture.scope(), fixture.request())));
+        QCOMPARE(std::get<QJsonObject>(reopened.read(ref, fixture.request())), state);
+        const auto removed = reopened.remove(ref, id, fixture.request());
+        QVERIFY(std::holds_alternative<QJsonObject>(removed));
+        QCOMPARE(std::get<QJsonObject>(removed).value(QStringLiteral("selection")).toObject().value(QStringLiteral("mode")).toString(), QStringLiteral("off"));
+        QVERIFY(!QFileInfo::exists(copied));
+    }
+    void subtitleCacheMigratesLongLegacyPaths_data() {
+        QTest::addColumn<bool>("hashedContent");
+        QTest::addColumn<bool>("startup");
+        QTest::newRow("expanded-read") << false << false;
+        QTest::newRow("hashed-read") << true << false;
+        QTest::newRow("expanded-startup") << false << true;
+        QTest::newRow("hashed-startup") << true << true;
+    }
+    void subtitleCacheMigratesLongLegacyPaths() {
+        QFETCH(bool, hashedContent); QFETCH(bool, startup);
+        Fixture fixture;
+        auto ref = fixture.movie().ref;
+        ref.kind = ContentKind::Episode; ref.providerItemId = QStringLiteral("2296"); ref.parentNamespace = QStringLiteral("56111");
+        const auto root = fixture.directory.filePath(QStringLiteral("vod-subtitles"));
+        const auto original = fixture.directory.filePath(QStringLiteral("local.srt"));
+        QFile file(original); QVERIFY(file.open(QIODevice::WriteOnly));
+        const QByteArray bytes("1\n00:00:00,000 --> 00:00:05,000\nLocal subtitles\n");
+        file.write(bytes); file.close();
+        VodSubtitleCache cache(root, fixture.store);
+        auto imported = cache.importFile(ref, QUrl::fromLocalFile(original), fixture.request());
+        QVERIFY(std::holds_alternative<QJsonObject>(imported));
+        const auto firstState = std::get<QJsonObject>(imported);
+        const auto id = firstState.value(QStringLiteral("files")).toArray().first().toObject().value(QStringLiteral("id")).toString();
+        const auto copied = cache.playbackFiles(ref, firstState).first().toMap().value(QStringLiteral("path")).toString();
+        const auto importDir = QFileInfo(copied).dir();
+        QCOMPARE(importDir.dirName().size(), 64);
+        const auto relative = QDir(root).relativeFilePath(copied);
+        QCOMPARE(relative.split(u'/').size(), 2); // One hash directory, directly below vod-subtitles.
+        QVERIFY((QStringLiteral("C:/Users/Jabuk/AppData/Roaming/OKILTV/vod-subtitles/") + relative).size() < 150);
+        // Keep a second file in the new layout while migrating the first one.
+        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate)); file.write(bytes + "\n"); file.close();
+        imported = cache.importFile(ref, QUrl::fromLocalFile(original), fixture.request());
+        QVERIFY(std::holds_alternative<QJsonObject>(imported));
+        const auto state = std::get<QJsonObject>(imported);
+        const auto secondCopy = cache.playbackFiles(ref, state).last().toMap().value(QStringLiteral("path")).toString();
+        QVERIFY(secondCopy != copied);
+        const auto content = QString::fromLatin1(hashedContent
+            ? QCryptographicHash::hash(ref.key(), QCryptographicHash::Sha256).toHex() : ref.key().toHex());
+        const auto legacy = root + u'/' + ref.profileId.toString(QUuid::WithoutBraces) + u'/' + content;
+        QVERIFY(QDir().mkpath(legacy));
+        QVERIFY(QDir().rename(importDir.absolutePath(), QDir(legacy).filePath(id)));
+        QVERIFY(QFile::remove(original));
+        fixture.reopen();
+        VodSubtitleCache reopened(root, fixture.store);
+        if (startup) reopened.reconcile({ref.profileId});
+        QCOMPARE(std::get<QJsonObject>(reopened.read(ref, fixture.request())), state);
+        QCOMPARE(reopened.playbackFiles(ref, state).first().toMap().value(QStringLiteral("path")).toString(), copied);
+        QVERIFY(!QFileInfo::exists(legacy)); QVERIFY(QFileInfo::exists(secondCopy));
+        QFile restored(copied); QVERIFY(restored.open(QIODevice::ReadOnly)); QCOMPARE(restored.readAll(), bytes); restored.close();
+        reopened.reconcile({ref.profileId}); // Repeated reconciliation preserves migrated copies and selections.
+        QVERIFY(QFileInfo::exists(copied)); QVERIFY(QFileInfo::exists(secondCopy));
+        QCOMPARE(std::get<QJsonObject>(reopened.read(ref, fixture.request())), state);
+    }
+    void subtitleFlatCacheRemovalPreservesOtherSources() {
+        Fixture fixture;
+        const auto firstRef = fixture.movie().ref;
+        const auto root = fixture.directory.filePath(QStringLiteral("vod-subtitles"));
+        const auto original = fixture.directory.filePath(QStringLiteral("local.srt"));
+        QFile file(original); QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("1\n00:00:00,000 --> 00:00:05,000\nLocal subtitles\n"); file.close();
+        VodSubtitleCache cache(root, fixture.store);
+        const auto first = cache.importFile(firstRef, QUrl::fromLocalFile(original), fixture.request());
+        QVERIFY(std::holds_alternative<QJsonObject>(first));
+        const auto firstCopy = cache.playbackFiles(firstRef, std::get<QJsonObject>(first)).first().toMap().value(QStringLiteral("path")).toString();
+        fixture.config.revision.profileId = QUuid::createUuid(); fixture.reopen();
+        const auto secondRef = fixture.movie().ref;
+        VodSubtitleCache reopened(root, fixture.store);
+        const auto second = reopened.importFile(secondRef, QUrl::fromLocalFile(original), fixture.request());
+        QVERIFY(std::holds_alternative<QJsonObject>(second));
+        const auto secondState = std::get<QJsonObject>(second);
+        const auto secondCopy = reopened.playbackFiles(secondRef, secondState).first().toMap().value(QStringLiteral("path")).toString();
+        QVERIFY(firstCopy != secondCopy);
+        QVERIFY(std::holds_alternative<Success>(fixture.store->prepareRemoval(firstRef.profileId)));
+        QVERIFY(std::holds_alternative<Success>(fixture.store->removeSourceState(firstRef.profileId)));
+        reopened.removeSource(firstRef.profileId);
+        QVERIFY(!QFileInfo::exists(firstCopy)); QVERIFY(QFileInfo::exists(secondCopy));
+        QCOMPARE(std::get<QJsonObject>(reopened.read(secondRef, fixture.request())), secondState);
+        QVERIFY(QFileInfo::exists(original));
+    }
+    void subtitlePairsCancellationAndSourceIsolation() {
+        Fixture fixture; const auto ref = fixture.movie().ref;
+        const auto root = fixture.directory.filePath(QStringLiteral("subtitles"));
+        VodSubtitleCache cache(root, fixture.store);
+        const auto idx = fixture.directory.filePath(QStringLiteral("DVD.IDX"));
+        const auto sub = fixture.directory.filePath(QStringLiteral("DVD.SUB"));
+        QFile index(idx); QVERIFY(index.open(QIODevice::WriteOnly)); index.write("# VobSub index file, v7\n"); index.close();
+        QVERIFY(std::holds_alternative<Error>(cache.importFile(ref, QUrl::fromLocalFile(idx), fixture.request())));
+        QFile data(sub); QVERIFY(data.open(QIODevice::WriteOnly)); data.write(QByteArray::fromHex("000001ba00000000")); data.close();
+        auto cancelled = fixture.request(); cancelled.cancelled->store(true);
+        QVERIFY(std::holds_alternative<Error>(cache.importFile(ref, QUrl::fromLocalFile(idx), cancelled)));
+        auto imported = cache.importFile(ref, QUrl::fromLocalFile(sub), fixture.request());
+        QVERIFY(std::holds_alternative<QJsonObject>(imported));
+        const auto copied = cache.playbackFiles(ref, std::get<QJsonObject>(imported)).first().toMap().value(QStringLiteral("path")).toString();
+        QVERIFY(copied.endsWith(QStringLiteral(".idx")));
+        QVERIFY(QFileInfo::exists(QFileInfo(copied).dir().filePath(QStringLiteral("subtitle.sub"))));
+        auto episode = ref; episode.kind = ContentKind::Episode; episode.parentNamespace = QStringLiteral("series");
+        QVERIFY(std::get<QJsonObject>(cache.read(episode, fixture.request())).isEmpty());
+        const auto orphan = root + u'/' + ref.profileId.toString(QUuid::WithoutBraces) + u'/' + QString::fromLatin1(ref.key().toHex()) + QStringLiteral("/orphan");
+        QVERIFY(QDir().mkpath(orphan));
+        cache.reconcile({ref.profileId}); QVERIFY(!QFileInfo::exists(orphan)); QVERIFY(QFileInfo::exists(copied));
+        QVERIFY(std::holds_alternative<Success>(fixture.store->prepareRemoval(ref.profileId)));
+        QVERIFY(std::holds_alternative<Success>(fixture.store->removeSourceState(ref.profileId)));
+        cache.reconcile({}); QVERIFY(!QFileInfo::exists(copied));
+        QVERIFY(QFileInfo::exists(idx)); QVERIFY(QFileInfo::exists(sub));
+    }
+    void subtitleMigrationAndFailedPublication() {
+        Fixture fixture;
+        sql(fixture.path, QStringLiteral("DROP TABLE vod_subtitles"));
+        sql(fixture.path, QStringLiteral("DELETE FROM vod_schema_migrations WHERE version=11"));
+        sql(fixture.path, QStringLiteral("INSERT OR IGNORE INTO vod_schema_migrations(version) VALUES(10)"));
+        fixture.reopen();
+        QCOMPARE(sqlValue(fixture.path, QStringLiteral("SELECT MAX(version) FROM vod_schema_migrations")).toInt(), 11);
+        const auto ref = fixture.movie().ref;
+        QJsonObject state{{QStringLiteral("selection"), QJsonObject{{QStringLiteral("mode"), QStringLiteral("off")}}}};
+        QVERIFY(std::holds_alternative<Success>(fixture.store->writeSubtitles(ref, state, fixture.request())));
+        sql(fixture.path, QStringLiteral("CREATE TRIGGER fail_subtitles BEFORE UPDATE ON vod_subtitles BEGIN SELECT RAISE(ABORT,'fixture'); END"));
+        QVERIFY(std::holds_alternative<Error>(fixture.store->writeSubtitles(ref, {}, fixture.request())));
+        QCOMPARE(std::get<QJsonObject>(fixture.store->readSubtitles(ref, fixture.request())), state);
+    }
     void seasonMediaMetadataUsesNewestCacheAndEpisodeOrder() {
         Fixture fixture;
         const auto movie = fixture.movie();
@@ -195,9 +350,9 @@ private slots:
         QVERIFY(std::holds_alternative<MovieListState>(fixture.store->setMovieList(series, MovieList::Favourites, true, fixture.request())));
         // Migrate an actual schema-9 database, retaining progress, tracks and playback history.
         sql(fixture.path, QStringLiteral("DROP TABLE vod_series_state"));
-        sql(fixture.path, QStringLiteral("DELETE FROM vod_schema_migrations WHERE version=10"));
+        sql(fixture.path, QStringLiteral("DELETE FROM vod_schema_migrations WHERE version>=10"));
         sql(fixture.path, QStringLiteral("INSERT OR IGNORE INTO vod_schema_migrations VALUES(9)"));
-        sql(fixture.path, QStringLiteral("CREATE TRIGGER fail_v10 BEFORE INSERT ON vod_schema_migrations WHEN NEW.version=10 BEGIN SELECT RAISE(ABORT,'synthetic'); END"));
+        sql(fixture.path, QStringLiteral("CREATE TRIGGER fail_v10 BEFORE INSERT ON vod_schema_migrations WHEN NEW.version>=10 BEGIN SELECT RAISE(ABORT,'synthetic'); END"));
         fixture.reopen();
         QVERIFY(std::holds_alternative<Error>(fixture.store->prepare({})));
         QCOMPARE(sqlValue(fixture.path, QStringLiteral("SELECT MAX(version) FROM vod_schema_migrations")).toInt(), 9);

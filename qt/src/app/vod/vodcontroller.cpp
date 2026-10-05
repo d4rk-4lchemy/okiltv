@@ -333,6 +333,10 @@ QUuid VodController::play(const ContentRef &ref, const PlaybackPreferences &pref
                 }
             }
         }
+        if (saved && saved->trackPreferences.value(QStringLiteral("sub")).toObject().value(QStringLiteral("mode")).toString() == QLatin1String("external")) {
+            // A target's own saved state is supplied by its descriptor; never inherit a file from another episode.
+            saved->trackPreferences.remove(QStringLiteral("sub"));
+        }
         if (saved && saved->status == WatchStatus::Watched) saved->positionMs=0;
         if (preferences.trackPreferences) {
             if (!saved) saved = VodProgress{};

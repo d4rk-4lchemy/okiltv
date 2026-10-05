@@ -6,6 +6,7 @@ Item {
 
     property bool targetVisible: false
     property string selectedMode: "live"
+    property bool vodPalette: selectedMode !== "live"
     property bool navigationEnabled: true
     property int uiTransparency: 100
     readonly property bool navigationFocused: modeSwitch.activeFocus
@@ -46,6 +47,7 @@ Item {
         width: Math.max(Theme.mediaModeMinimumWidth, Math.min(Theme.mediaModeWidth, root.width - 24))
         height: Theme.mediaModeHeight
         selectedMode: root.selectedMode
+        vodPalette: root.vodPalette
         uiTransparency: root.uiTransparency
         enabled: root.navigationEnabled
         onModeRequested: mode => root.modeRequested(mode)

@@ -68,6 +68,8 @@ set_tests_properties(
 qt_add_executable(OKILTVQtAppTests
     tst_app_models.cpp
     ../src/app/vod/vodruntime.cpp
+    ../src/app/vod/vodruntimesubtitles.cpp
+    ../src/app/vod/vodsubtitlecache.cpp
     ../src/app/vod/vodmediaprobe.cpp
     ../src/app/vod/vodmediaprobe.h
     ../src/app/vod/vodartworkcache.cpp
@@ -404,7 +406,7 @@ target_link_libraries(OKILTVQtVodProviderTests PRIVATE OKILTVVodInfrastructure Q
 add_test(NAME OKILTVQtVodProviderTests COMMAND OKILTVQtVodProviderTests)
 set_tests_properties(OKILTVQtVodProviderTests PROPERTIES LABELS "core;vod" TIMEOUT 60)
 
-qt_add_executable(OKILTVQtVodStorageTests vod/tst_vod_storage.cpp)
+qt_add_executable(OKILTVQtVodStorageTests vod/tst_vod_storage.cpp ../src/app/vod/vodsubtitlecache.cpp)
 target_link_libraries(OKILTVQtVodStorageTests PRIVATE OKILTVVodInfrastructure Qt6::Sql Qt6::Test)
 add_test(NAME OKILTVQtVodStorageTests COMMAND OKILTVQtVodStorageTests)
 set_tests_properties(OKILTVQtVodStorageTests PROPERTIES LABELS "core;vod" TIMEOUT 120)

@@ -64,6 +64,11 @@ Outcome VodPlaybackSession::open(const PlaybackDescriptor &descriptor, const QUu
     request.validatedEngineOptions.insert(QStringLiteral("keep-open"), QStringLiteral("no"));
     request.startPaused = startPaused;
     request.trackPreferences = m_snapshot.trackPreferences;
+    if (descriptor.subtitleSelection) {
+        if (descriptor.subtitleSelection->isEmpty()) request.trackPreferences.remove(QStringLiteral("sub"));
+        else request.trackPreferences.insert(QStringLiteral("sub"), *descriptor.subtitleSelection);
+    }
+    request.externalSubtitles = descriptor.externalSubtitles;
     if (changed) changed(m_snapshot, false);
     m_engine->load(request, m_snapshot.loadToken);
     return Success{};

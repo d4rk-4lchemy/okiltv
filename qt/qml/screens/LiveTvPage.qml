@@ -2503,9 +2503,16 @@ Item {
     }
 
     function confirmSubtitlePickerSelection() {
-        if (root.subtitlePickerHighlightedId < 0) {
-            return false
+        const row = root.subtitlePickerRows.find(track => track.id === root.subtitlePickerHighlightedId)
+        if (root.vodActive && row && row.action === "upload") {
+            root.vod.beginSubtitleUpload()
+            return true
         }
+        if (root.vodActive && row && row.action === "external") {
+            root.vod.selectUploadedSubtitle(row.externalId)
+            return true
+        }
+        if (root.subtitlePickerHighlightedId < 0) return false
         root.transportPlayer.selectSubtitleTrack(root.subtitlePickerHighlightedId)
         root.closeSubtitlePicker(false)
         return true
@@ -2811,6 +2818,11 @@ Item {
         }
 
         if (root.subtitlePickerOpen) {
+            if (event.key === Qt.Key_Delete && root.vodActive) {
+                const row = root.subtitlePickerRows.find(track => track.id === root.subtitlePickerHighlightedId)
+                if (row && row.externalId) root.vod.removeUploadedSubtitle(row.externalId)
+                return true
+            }
             switch (event.key) {
             case Qt.Key_Up:
                 noteKeyboardNavigationKey()
@@ -3384,6 +3396,12 @@ Item {
             if (root.subtitlePickerOpen) root.subtitlePickerRows = root.transportPlayer.subtitleTracks()
         }
     }
+    Connections {
+        target: root.vod
+        function onSubtitlesChanged() {
+            if (root.vodActive && root.subtitlePickerOpen) root.subtitlePickerRows = root.vod.subtitleTracks()
+        }
+    }
     onPlayerChanged: Qt.callLater(root.refreshFocusedPlaybackContext)
 
     function refreshFocusedPlaybackContext() {
@@ -3778,6 +3796,16 @@ Item {
             anchors.fill: parent
             visible: root.vodActive
             playerObject: root.vodActive ? root.vod.playerObject : null
+        }
+
+        Binding {
+            target: root.vodActive ? root.vod.playerObject : null
+            property: "subtitleBottomInset"
+            // Follow the panel's slide, including fade-out, in video-surface
+            // coordinates. Fractions work identically at every display scale.
+            value: bottomChrome.visible && bottomChrome.opacity > 0 && videoCanvas.height > 0
+                ? Math.max(0, Math.min(1, (videoCanvas.height - bottomChrome.y
+                    - bottomChromeTranslation.y + Theme.spacingS) / videoCanvas.height)) : 0
         }
 
         Repeater {
@@ -4826,7 +4854,7 @@ Item {
 
         Rectangle {
             anchors.fill: parent
-            color: Theme.uiBackground("#82070d12", root.uiTransparency)
+            color: Theme.uiBackground(Theme.liveRailBackground, root.uiTransparency)
         }
 
         HoverHandler {
@@ -5041,7 +5069,7 @@ Item {
                             ? groupPickerScrollBar.width + Theme.vodScrollBarGap : 0))
                         height: 62
                         radius: 4
-                        color: root.groupPickerHighlightedId === modelData.id ? Theme.uiBackground("#96182431", root.uiTransparency) : "transparent"
+                        color: root.groupPickerHighlightedId === modelData.id ? Theme.uiBackground(Theme.liveRailSelection, root.uiTransparency) : "transparent"
                         border.width: 0
                         border.color: "transparent"
 
@@ -5183,7 +5211,7 @@ Item {
                         width: ListView.view.width
                         height: 62
                         radius: 4
-                        color: root.sourcePickerHighlightedId === modelData.id ? Theme.uiBackground("#96182431", root.uiTransparency) : "transparent"
+                        color: root.sourcePickerHighlightedId === modelData.id ? Theme.uiBackground(Theme.liveRailSelection, root.uiTransparency) : "transparent"
                         border.width: 0
                         border.color: "transparent"
 
@@ -5295,7 +5323,7 @@ Item {
                         width: ListView.view.width
                         height: 62
                         radius: 4
-                        color: root.audioPickerHighlightedId === modelData.id ? Theme.uiBackground("#96182431", root.uiTransparency) : "transparent"
+                        color: root.audioPickerHighlightedId === modelData.id ? Theme.uiBackground(Theme.liveRailSelection, root.uiTransparency) : "transparent"
 
                         RowLayout {
                             anchors.fill: parent
@@ -5368,12 +5396,12 @@ Item {
                         width: ListView.view.width
                         height: 62
                         radius: 4
-                        color: root.subtitlePickerHighlightedId === modelData.id ? Theme.uiBackground("#96182431", root.uiTransparency) : "transparent"
+                        color: root.subtitlePickerHighlightedId === modelData.id ? Theme.uiBackground(Theme.liveRailSelection, root.uiTransparency) : "transparent"
 
                         RowLayout {
                             anchors.fill: parent
                             anchors.leftMargin: 6
-                            anchors.rightMargin: 8
+                            anchors.rightMargin: removeSubtitleButton.visible ? 42 : 8
                             anchors.topMargin: 8
                             anchors.bottomMargin: 8
                             spacing: 8
@@ -5408,8 +5436,23 @@ Item {
                             }
                         }
 
+                        ToolButton {
+                            id: removeSubtitleButton
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 38; height: 38
+                            z: 2
+                            visible: root.vodActive && Boolean(modelData.externalId)
+                            enabled: !root.vodActive || !root.vod.subtitleBusy
+                            text: "×"
+                            Accessible.name: "Remove uploaded subtitles"
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Remove uploaded subtitles"
+                            onClicked: root.vod.removeUploadedSubtitle(modelData.externalId)
+                        }
                         MouseArea {
                             anchors.fill: parent
+                            anchors.rightMargin: removeSubtitleButton.visible ? 38 : 0
                             hoverEnabled: true
                             onEntered: root.subtitlePickerHighlightedId = modelData.id
                             onPositionChanged: root.revealUi("pointer")
@@ -5499,9 +5542,9 @@ Item {
                         width: ListView.view.width
                         height: 62
                         radius: 4
-                        color: channelIsSelected ? Theme.uiBackground("#96182431", root.uiTransparency)
+                        color: channelIsSelected ? Theme.uiBackground(Theme.liveRailSelection, root.uiTransparency)
                             : (rowHovered && !root.channelListKeyboardNavigation
-                                ? Theme.uiBackground("#6d111a24", root.uiTransparency) : "transparent")
+                                ? Theme.uiBackground(Theme.liveRailHover, root.uiTransparency) : "transparent")
                         border.width: 0
                         border.color: "transparent"
 
@@ -5898,7 +5941,7 @@ Item {
         height: 48
         anchors.top: parent.top
         anchors.horizontalCenter: parent.horizontalCenter
-        anchors.topMargin: root.centerOverlayMargin
+        anchors.topMargin: root.topBarReservedHeight + root.mediaNavigationInset
         opacity: root.showShellChrome ? 1 : 0
         z: 2
         compact: true
@@ -6023,7 +6066,7 @@ Item {
                     Layout.preferredWidth: 46
                     Layout.preferredHeight: 46
                     radius: 8
-                    color: settingsButton.down ? Theme.uiBackground("#ad1f2d3a", root.uiTransparency) : (settingsButton.hovered ? Theme.uiBackground("#a71c2936", root.uiTransparency) : Theme.uiBackground("#96182431", root.uiTransparency))
+                    color: settingsButton.down ? Theme.uiBackground(Theme.liveRailPressed, root.uiTransparency) : (settingsButton.hovered ? Theme.uiBackground("#a71c2936", root.uiTransparency) : Theme.uiBackground(Theme.liveRailSelection, root.uiTransparency))
 
                     IconActionButton {
                         id: settingsButton
@@ -6195,6 +6238,7 @@ Item {
         }
 
         transform: Translate {
+            id: bottomChromeTranslation
             y: root.showShellChrome ? 0 : (bottomChrome.height + Theme.spacingM)
             Behavior on y {
                 NumberAnimation {
@@ -6699,7 +6743,7 @@ Item {
                     iconInset: 1
                     iconSource: root.iconPath("closed-caption.svg")
                     caption: "Subtitle tracks"
-                    visible: root.transportTracksReady && root.transportSubtitleTrackCount > 0
+                    visible: root.vodActive || (root.transportTracksReady && root.transportSubtitleTrackCount > 0)
                     onClicked: root.openSubtitlePicker()
                 }
 

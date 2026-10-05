@@ -208,4 +208,9 @@ QString AppDataPaths::ensureExists(const QString &path)
     return path;
 }
 
+QString AppDataPaths::vodSubtitlesDirectory(const QString &dataRoot)
+{
+    return ensureExists(QDir(dataRoot.isEmpty() ? dataDirectory() : dataRoot).filePath(QStringLiteral("vod-subtitles")));
+}
+
 } // namespace OKILTV::Core

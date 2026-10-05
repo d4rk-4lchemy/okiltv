@@ -15,7 +15,8 @@ Item {
     property int edgeThickness: 8
     property int topResizeThickness: 3
     property int buttonSize: Theme.titleBarButtonSize
-    property color barFillColor: "#82070d12"
+    property bool vodPalette: false
+    property color barFillColor: root.vodPalette ? Theme.overlaySidebar : Theme.liveRailBackground
 
     implicitHeight: barHeight
     height: barHeight
@@ -268,6 +269,7 @@ Item {
                 compact: true
                 borderless: true
                 barMode: true
+                neutralBar: root.vodPalette
                 implicitWidth: root.buttonSize
                 implicitHeight: root.buttonSize
                 iconName: "windowMinimize"
@@ -287,6 +289,7 @@ Item {
                 compact: true
                 borderless: true
                 barMode: true
+                neutralBar: root.vodPalette
                 implicitWidth: root.buttonSize
                 implicitHeight: root.buttonSize
                 iconName: root.window && root.window.visibility === Window.Maximized ? "windowRestore" : "windowMaximize"
@@ -311,6 +314,7 @@ Item {
                 compact: true
                 borderless: true
                 barMode: true
+                neutralBar: root.vodPalette
                 implicitWidth: root.buttonSize
                 implicitHeight: root.buttonSize
                 iconName: "windowClose"

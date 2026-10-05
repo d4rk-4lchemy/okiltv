@@ -9,7 +9,7 @@ into the application; B4 integration is still undergoing verification.
 contract, never an application fallback. The logical table inventory is in
 `.project/OKILTV_ARCHITEKTURA_VOD.md`, section 8.
 
-## Identity and schema version 10
+## Identity and schema version 11
 
 Use the existing application database, additive `vod_*` tables, and an independent
 `vod_schema_migrations(version INTEGER PRIMARY KEY)` marker. Migration runs on a
@@ -17,6 +17,21 @@ worker before first repository access. A newer version, failed migration or
 unavailable secret protection disables VOD without resetting Live data. Repeated
 prepare calls are idempotent and serialized. Back up consistently before B2
 migration and test rollback/restart with the real database service.
+
+Schema 11 adds `vod_subtitles(identity, profile, namespace, payload)`. The JSON payload
+contains imported file IDs, display names, relative entry filenames, SHA-256 hashes and
+an optional requested subtitle selection. It has no catalogue foreign key. Cache eviction,
+credential edits and disablement retain it; source removal deletes it. Selecting/uploading
+before playback never creates a progress row. Backend-confirmed track choices still use
+the existing progress lane; external preferences identify an import and per-file ordinal.
+Copies are published before SQL, and orphan cleanup reconciles filesystem/SQL failures.
+Each import occupies one flat `vod-subtitles/<SHA-256>` directory. Its digest hashes
+`source UUID/content-key SHA-256/import UUID` with portable `/` separators and UTF-8;
+the data-root path is excluded. Both former nested layouts migrate whole imports
+without changing SQL identities or selections. Failed moves preserve the files for
+retry. Source deletion and orphan cleanup use the remaining SQL inventory to protect
+other sources' flat directories; inventory failure defers cleanup.
+The repository exposes read/write and startup inventory through `IVodSubtitleRepository`.
 
 Schema 10 adds `vod_series_state`, keyed by full series identity with profile,
 namespace, `continue_hidden` and `blocked_session`. It has no catalogue foreign

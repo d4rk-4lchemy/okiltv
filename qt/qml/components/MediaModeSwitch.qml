@@ -8,6 +8,7 @@ FocusScope {
     id: root
 
     property string selectedMode: "live"
+    property bool vodPalette: selectedMode !== "live"
     property int uiTransparency: 100
     property string actionPrefix: "ui.navigation"
     readonly property bool interactionActive: hover.hovered || root.activeFocus
@@ -55,7 +56,7 @@ FocusScope {
     Rectangle {
         anchors.fill: parent
         radius: height / 2
-        color: Theme.uiBackground(Theme.mediaModeBackground, root.uiTransparency)
+        color: Theme.uiBackground(root.vodPalette ? Theme.overlaySidebar : Theme.mediaModeBackground, root.uiTransparency)
     }
 
     Rectangle {
@@ -66,7 +67,7 @@ FocusScope {
         width: (root.width - Theme.mediaModeInset * 2) / 3
         height: root.height - Theme.mediaModeInset * 2
         radius: height / 2
-        color: Theme.mediaModeSelection
+        color: Theme.uiBackground(root.vodPalette ? Theme.overlaySurfaceInteractive : Theme.mediaModeSelection, root.uiTransparency)
         Behavior on x { NumberAnimation { duration: Theme.transitionMs; easing.type: Easing.OutCubic } }
     }
 
@@ -92,7 +93,8 @@ FocusScope {
             onClicked: root.choose(index)
             background: Rectangle {
                 radius: height / 2
-                color: segment.down ? "#20ffffff" : segment.hovered ? "#0dffffff" : "transparent"
+                color: segment.down ? Theme.uiBackground(root.vodPalette ? Theme.overlaySurfaceMuted : Theme.liveRailPressed, root.uiTransparency)
+                    : segment.hovered ? Theme.uiBackground(root.vodPalette ? Theme.overlaySurfaceRaised : Theme.liveRailHover, root.uiTransparency) : "transparent"
                 border.width: root.activeFocus && root.focusedIndex === segment.index ? 1 : 0
                 border.color: Theme.overlayTextSecondary
             }

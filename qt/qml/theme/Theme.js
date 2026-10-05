@@ -82,8 +82,13 @@ var mediaModeMinimumWidth = 216
 var mediaModeHeight = 34
 var mediaModeInset = 3
 var mediaModeFontSize = 13
-var mediaModeBackground = "#c21a1a1a"
-var mediaModeSelection = overlaySurfaceInteractive
+// Live media navigation shares the rail palette; VOD uses overlay tokens.
+var liveRailBackground = "#82070d12"
+var liveRailSelection = "#96182431"
+var liveRailHover = "#6d111a24"
+var liveRailPressed = "#ad1f2d3a"
+var mediaModeBackground = liveRailBackground
+var mediaModeSelection = liveRailSelection
 
 // Opaque, compact labels remain legible on bright movie artwork.
 var vodResolutionText = "#ffffff"

@@ -48,9 +48,10 @@ void AppModelTests::vodSourceSynchronizationAndDisable()
     QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));
     QStringList catalogRequests, seriesRequests;
     QString failCategory, failSeriesCategory;
-    bool stall = false, delayRecovery = false;
+    bool stall = false, delayRecovery = false, stallSeries = true;
     QByteArray recoveryBody;
     QPointer<QTcpSocket> stalled, recoverySocket;
+    QPointer<QTcpSocket> stalledSeries;
     int categoryRequests = 0, detailRequests = 0;
     QJsonArray categories, rows, seriesRows;
     for (int i = 1; i <= 10; ++i) {
@@ -77,6 +78,7 @@ void AppModelTests::vodSourceSynchronizationAndDisable()
                 }
                 if (action == QStringLiteral("get_series")) {
                     const auto category=query.queryItemValue(QStringLiteral("category_id"));seriesRequests.append(category);
+                    if (stallSeries) { stalledSeries = socket; return; }
                     body=!failSeriesCategory.isEmpty() && category==failSeriesCategory ? QByteArray("invalid") : QJsonDocument(seriesRows).toJson();
                 }
                 if (action == QStringLiteral("get_vod_info")) {
@@ -98,9 +100,21 @@ void AppModelTests::vodSourceSynchronizationAndDisable()
     MultiViewController multiview(&settings, nullptr, &player); TimeshiftController timeshift(&settings, &player, &dvr, &multiview);
     Test::Engine *engine = nullptr;
     VodRuntime runtime(&settings, &multiview, &dvr, &timeshift, nullptr, [&]() { auto backend = std::make_unique<Test::Engine>(); engine = backend.get(); return backend; });
-    QTRY_VERIFY(runtime.ready());
     const auto id = guidToString(profile.id), key = id + QStringLiteral("|movies");
-    runtime.synchronizeSource(id); QTRY_VERIFY(!runtime.syncing(profile.id));
+    QSignalSpy syncChanges(&runtime, &VodRuntime::sourceSyncInProgressChanged);
+    runtime.synchronizeSource(id);
+    QVERIFY(runtime.sourceSyncInProgress()); // Includes startup storage readiness.
+    QTRY_VERIFY(runtime.ready());
+    QTRY_VERIFY(stalledSeries);
+    QVERIFY(runtime.sourceSyncInProgress()); // Movie publication does not finish Series.
+    QVERIFY(runtime.syncing(profile.id));
+    QVERIFY(!syncChanges.isEmpty());
+    stallSeries = false;
+    const auto initialSeriesBody = QJsonDocument(seriesRows).toJson();
+    stalledSeries->write("HTTP/1.1 200 OK\r\nContent-Length: " + QByteArray::number(initialSeriesBody.size()) + "\r\nConnection: close\r\n\r\n" + initialSeriesBody);
+    stalledSeries->disconnectFromHost();
+    QTRY_VERIFY(!runtime.syncing(profile.id));
+    QVERIFY(!runtime.sourceSyncInProgress());
     QCOMPARE(categoryRequests, 2); QCOMPARE(catalogRequests, QStringList{QString{}}); QVERIFY(runtime.syncError(profile.id).isEmpty());
     QCOMPARE(runtime.sourceCategories(profile.id, CatalogKind::Series).size(), 10);
     const auto source = std::get<SourceContext>(runtime.store()->snapshot(profile.id));
@@ -125,6 +139,7 @@ void AppModelTests::vodSourceSynchronizationAndDisable()
     const auto seriesBeforeFailure=seriesPage().generation;
     const auto movieBeforeSeriesFailure=page().generation;
     failSeriesCategory=QStringLiteral("2");selectSeries(2);QTRY_VERIFY(!runtime.syncing(profile.id));
+    QVERIFY(!runtime.sourceSyncInProgress());
     QVERIFY(!runtime.syncError(profile.id).isEmpty());QCOMPARE(seriesPage().generation,seriesBeforeFailure);
     QVERIFY(page().generation>movieBeforeSeriesFailure);QCOMPARE(page().items.size(),10);
     failSeriesCategory.clear();selectSeries(4);QTRY_VERIFY(!runtime.syncing(profile.id));
@@ -166,6 +181,7 @@ void AppModelTests::vodSourceSynchronizationAndDisable()
     auto disabled = *settings.profileById(profile.id); const auto revision = disabled.vodCredentialRevision; disabled.vodEnabled = false;
     QVERIFY(settings.replaceProfile(profile.id, disabled)); QCOMPARE(settings.profileById(profile.id)->vodCredentialRevision, revision);
     QCOMPARE(engine->stops, 0); QVERIFY(runtime.active()); QTRY_VERIFY(!runtime.syncing(profile.id));
+    QVERIFY(!runtime.sourceSyncInProgress());
     QTRY_VERIFY(!stalled || stalled->state() == QAbstractSocket::UnconnectedState);
     QCOMPARE(page().generation, beforeDisable);
     QVERIFY(recoverySocket && recoverySocket->state() == QAbstractSocket::ConnectedState);
@@ -189,5 +205,20 @@ void AppModelTests::vodSourceSynchronizationAndDisable()
     bool rejected = false;
     runtime.module()->controller()->resolveForRecovery(ref, [&](Result<PlaybackDescriptor> result) { rejected = std::holds_alternative<Error>(result); });
     QVERIFY(rejected);
+    // Finishing/cancelling one source must not hide another source's refresh.
+    auto second = profile; second.id = QUuid::createUuid();
+    auto third = profile; third.id = QUuid::createUuid();
+    QVERIFY(settings.addProfile(second)); QVERIFY(settings.addProfile(third));
+    QVERIFY(runtime.syncing(second.id)); QVERIFY(runtime.syncing(third.id));
+    auto secondDisabled = second; secondDisabled.vodEnabled = false;
+    QVERIFY(settings.replaceProfile(second.id, secondDisabled));
+    QVERIFY(!runtime.syncing(second.id)); QVERIFY(runtime.sourceSyncInProgress());
+    QVERIFY(settings.removeProfile(third.id));
+    QVERIFY(!runtime.sourceSyncInProgress());
+    // Replacement requests keep the aggregate busy; shutdown clears it.
+    QVERIFY(settings.replaceProfile(second.id, second));
+    runtime.synchronizeSource(guidToString(second.id));
+    QVERIFY(runtime.sourceSyncInProgress());
     runtime.shutdown();
+    QVERIFY(!runtime.sourceSyncInProgress());
 }

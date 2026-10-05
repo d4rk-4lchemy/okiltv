@@ -427,6 +427,7 @@ private slots:
     void vodRuntimeMutatesActiveSource();
     void vodRuntimeLiveWaitsForStop();
     void vodRuntimeLibraryPause();
+    void vodRuntimeSubtitleImport();
     void vodRuntimeExplicitLiveWaitsForProgress();
     void vodRuntimeExplicitLiveFailure_data();
     void vodRuntimeExplicitLiveFailure();
@@ -1038,6 +1039,7 @@ void AppModelTests::vodRuntimeNativePlayback()
         QTRY_VERIFY(catalog.movie().value(QStringLiteral("progressLoaded")).toBool());
         catalog.selectAudioOption(2);
         catalog.selectSubtitleOption(2);
+        QTRY_VERIFY(!runtime.subtitleBusy());
         QCOMPARE(catalog.movie().value(QStringLiteral("audioTrackIndex")).toInt(), 2);
         QCOMPARE(catalog.movie().value(QStringLiteral("subtitleTrackIndex")).toInt(), 2);
         browseResolutions = resolutions;
@@ -1062,7 +1064,7 @@ void AppModelTests::vodRuntimeNativePlayback()
         QTRY_VERIFY_WITH_TIMEOUT(redFrame(), 5000);
     }
     QTRY_COMPARE(runtime.audioTracks().size(), 2);
-    QTRY_COMPARE(runtime.subtitleTracks().size(), 3);
+    QTRY_COMPARE(runtime.subtitleTracks().size(), 4);
     if (!episode) {
         QTRY_VERIFY(runtime.audioTracks().at(1).toMap().value(QStringLiteral("selected")).toBool());
         QTRY_VERIFY(runtime.subtitleTracks().at(1).toMap().value(QStringLiteral("selected")).toBool());
@@ -1076,6 +1078,14 @@ void AppModelTests::vodRuntimeNativePlayback()
     QVERIFY(!debug.value(QStringLiteral("videoCodec")).toString().isEmpty());
     QVERIFY(debug.value(QStringLiteral("videoCodec")).toString() != QStringLiteral("N/A"));
     QVERIFY(!QJsonDocument::fromVariant(debug).toJson().contains("synthetic-"));
+    QTRY_VERIFY(!runtime.subtitleBusy());
+    runtime.beginSubtitleUpload(); QVERIFY(runtime.isPaused());
+    runtime.finishSubtitleUpload(QUrl::fromLocalFile(subtitles.fileName()));
+    QTRY_VERIFY(!runtime.subtitleBusy());
+    QTRY_COMPARE(runtime.module()->session()->snapshot().trackPreferences.value(QStringLiteral("sub")).toObject().value(QStringLiteral("mode")).toString(), QStringLiteral("external"));
+    const auto uploadedId = runtime.subtitleState(ref).value(QStringLiteral("selection")).toObject().value(QStringLiteral("externalId")).toString();
+    QVERIFY(!uploadedId.isEmpty()); QVERIFY(QFile::remove(subtitles.fileName()));
+    QCOMPARE(runtime.playbackMetadata(ref)->subtitleTracks.size(), 2); // Uploads never contaminate measured media metadata.
     const auto secondAudio = runtime.audioTracks().at(1).toMap().value(QStringLiteral("id")).toInt();
     runtime.selectAudioTrack(secondAudio);
     QTRY_VERIFY(runtime.audioTracks().at(1).toMap().value(QStringLiteral("selected")).toBool());
@@ -1117,6 +1127,12 @@ void AppModelTests::vodRuntimeNativePlayback()
     QVERIFY(retainedBackend->m_imageSmoothingEnabled);
     QTRY_VERIFY(runtime.audioTracks().size() == 2 && runtime.audioTracks().at(1).toMap().value(QStringLiteral("selected")).toBool());
     QTRY_VERIFY(runtime.subtitleTracks().at(0).toMap().value(QStringLiteral("selected")).toBool());
+    const auto uploadedAvailable = [&]() {
+        for (const auto &row : runtime.subtitleTracks()) if (row.toMap().value(QStringLiteral("externalId")).toString() == uploadedId
+            && row.toMap().value(QStringLiteral("id")).toInt() > 0) return true;
+        return false;
+    };
+    QTRY_VERIFY(uploadedAvailable()); // Reload uses the private copy after the original was deleted.
     QTRY_VERIFY_WITH_TIMEOUT(runtime.positionSeconds() >= 30, 35000);
     QVERIFY(runtime.positionSeconds() < 40);
     auto changed = profile; changed.xtreamPassword = QStringLiteral("synthetic-after");
@@ -1370,6 +1386,60 @@ void AppModelTests::vodRuntimeLiveWaitsForStop()
     std::optional<VodProgress> saved;
     QTRY_VERIFY((saved = std::get<std::optional<VodProgress>>(runtime.store()->read(ref, request))).has_value());
     QCOMPARE(saved->positionMs, 47000);
+}
+
+void AppModelTests::vodRuntimeSubtitleImport()
+{
+    using namespace OKILTV::Vod;
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
+    settings.load(); settings.current().vodEnabled = true;
+    ServerProfile profile; profile.vodEnabled = true;
+    profile.xtreamBaseUrl = QStringLiteral("https://fixture.invalid");
+    QVERIFY(settings.addProfile(profile));
+    PlayerController player;
+    DvrController dvr(&settings, &player);
+    MultiViewController multiview(&settings, nullptr, &player);
+    TimeshiftController timeshift(&settings, &player, &dvr, &multiview);
+    Test::Engine *backend = nullptr;
+    VodRuntime runtime(&settings, &multiview, &dvr, &timeshift, nullptr, [&]() {
+        auto engine = std::make_unique<Test::Engine>(); backend = engine.get(); return engine;
+    });
+    QTRY_VERIFY(runtime.ready());
+    const auto source = std::get<SourceContext>(runtime.store()->snapshot(profile.id));
+    const auto ref = Test::refFor(source);
+    std::optional<Outcome> opened;
+    runtime.module()->coordinator()->play(QUuid::createUuid(), Test::descriptorFor(source, ref), QUuid::createUuid(), {},
+        [&](Outcome result) { opened = result; });
+    QTRY_VERIFY(opened.has_value()); QVERIFY(std::holds_alternative<Success>(*opened));
+    backend->emitState(OKILTV::Player::EngineState::Playing, 47000);
+    QTRY_VERIFY(!runtime.subtitleBusy());
+    QSignalSpy dialog(&runtime, &VodRuntime::subtitleUploadRequested);
+    runtime.beginSubtitleUpload();
+    QCOMPARE(dialog.size(), 1); QVERIFY(runtime.isPaused()); QVERIFY(runtime.subtitleDialogOpen());
+    runtime.finishSubtitleUpload();
+    QVERIFY(!runtime.isPaused()); QVERIFY(!runtime.subtitleDialogOpen());
+    runtime.togglePause(); runtime.beginSubtitleUpload(); runtime.finishSubtitleUpload();
+    QVERIFY(runtime.isPaused()); // An existing manual pause is retained.
+    runtime.togglePause();
+    const auto original = dir.filePath(QStringLiteral("fixture.srt"));
+    QFile file(original); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("1\n00:00:00,000 --> 00:00:05,000\nLocal subtitles\n"); file.close();
+    runtime.beginSubtitleUpload(); runtime.finishSubtitleUpload(QUrl::fromLocalFile(original));
+    QTRY_VERIFY(!runtime.subtitleBusy());
+    QVERIFY2(runtime.subtitleError().isEmpty(), qPrintable(runtime.subtitleError()));
+    auto state = runtime.subtitleState(ref);
+    QCOMPARE(state.value(QStringLiteral("files")).toArray().size(), 1);
+    QCOMPARE(state.value(QStringLiteral("selection")).toObject().value(QStringLiteral("mode")).toString(), QStringLiteral("external"));
+    const auto id = state.value(QStringLiteral("files")).toArray().first().toObject().value(QStringLiteral("id")).toString();
+    runtime.selectSubtitlePreference(ref, {{QStringLiteral("mode"), QStringLiteral("off")}});
+    QTRY_VERIFY(!runtime.subtitleBusy());
+    QCOMPARE(runtime.subtitleState(ref).value(QStringLiteral("selection")).toObject().value(QStringLiteral("mode")).toString(), QStringLiteral("off"));
+    runtime.beginSubtitleUpload(); runtime.stop(); runtime.finishSubtitleUpload();
+    QVERIFY(!runtime.active());
+    runtime.removeUploadedSubtitle(ref, id);
+    QTRY_VERIFY(!runtime.subtitleBusy());
+    QVERIFY(runtime.subtitleState(ref).value(QStringLiteral("files")).toArray().isEmpty());
+    QVERIFY(QFileInfo::exists(original));
 }
 
 void AppModelTests::vodRuntimeLibraryPause()

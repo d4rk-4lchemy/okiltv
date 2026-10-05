@@ -215,6 +215,7 @@ Outcome SqliteVodStore::prepare(const RequestContext &context)
         connection.sql(QStringLiteral("CREATE TABLE IF NOT EXISTS vod_series_history(series BLOB PRIMARY KEY,profile TEXT NOT NULL,namespace TEXT NOT NULL,provider_id TEXT NOT NULL,episode_id TEXT NOT NULL,updated INTEGER NOT NULL)"));
         connection.sql(QStringLiteral("CREATE INDEX IF NOT EXISTS vod_series_history_source ON vod_series_history(profile,namespace)"));
         connection.sql(QStringLiteral("CREATE TABLE IF NOT EXISTS vod_series_state(series BLOB PRIMARY KEY,profile TEXT NOT NULL,namespace TEXT NOT NULL,continue_hidden INTEGER NOT NULL DEFAULT 0,blocked_session TEXT NOT NULL DEFAULT '')"));
+        connection.sql(QStringLiteral("CREATE TABLE IF NOT EXISTS vod_subtitles(identity BLOB PRIMARY KEY,profile TEXT NOT NULL,namespace TEXT NOT NULL,payload BLOB NOT NULL)"));
         if (version < 10) connection.sql(QStringLiteral("DROP VIEW IF EXISTS vod_series_continue"));
         connection.sql(QStringLiteral("CREATE VIEW IF NOT EXISTS vod_series_continue AS "
             "WITH available AS (SELECT l.*,s.number AS season_number, "
@@ -769,7 +770,7 @@ Outcome SqliteVodStore::removeSourceState(const QUuid &id)
         auto state = connection.sql(QStringLiteral("SELECT removed FROM vod_source_state WHERE profile=?"), {uuid(id)});
         if (!state.next() || state.value(0).toInt() == 0) throw Error{ErrorCode::StorageUnavailable, {}};
         state.finish();
-        for (const auto &table : {QStringLiteral("vod_category_snapshots"), QStringLiteral("vod_items"), QStringLiteral("vod_seasons"), QStringLiteral("vod_details"), QStringLiteral("vod_generations"), QStringLiteral("vod_sync_runs"), QStringLiteral("vod_progress"), QStringLiteral("vod_movie_lists"), QStringLiteral("vod_series_history"), QStringLiteral("vod_series_state")})
+        for (const auto &table : {QStringLiteral("vod_category_snapshots"), QStringLiteral("vod_items"), QStringLiteral("vod_seasons"), QStringLiteral("vod_details"), QStringLiteral("vod_generations"), QStringLiteral("vod_sync_runs"), QStringLiteral("vod_progress"), QStringLiteral("vod_movie_lists"), QStringLiteral("vod_series_history"), QStringLiteral("vod_series_state"), QStringLiteral("vod_subtitles")})
             connection.sql(QStringLiteral("DELETE FROM %1 WHERE profile=?").arg(table), {uuid(id)});
         connection.commit(); return {};
     });
@@ -930,4 +931,35 @@ Outcome SqliteVodStore::setSeriesWatched(const SeriesWatchedChange &change, cons
         connection.current(); connection.commit(); return {};
     });
 }
+Result<QJsonObject> SqliteVodStore::readSubtitles(const ContentRef &ref, const RequestContext &context)
+{
+    return guarded<QJsonObject>(context, [&]() {
+        Connection connection(m_path, context); connection.open(); connection.checkRef(ref);
+        auto query = connection.sql(QStringLiteral("SELECT payload FROM vod_subtitles WHERE identity=?"), {ref.key()});
+        return query.next() ? QJsonDocument::fromJson(query.value(0).toByteArray()).object() : QJsonObject{};
+    });
+}
+Outcome SqliteVodStore::writeSubtitles(const ContentRef &ref, const QJsonObject &payload, const RequestContext &context)
+{
+    return guarded<Success>(context, [&]() -> Success {
+        Connection connection(m_path, context); connection.open(); connection.begin(); connection.checkRef(ref);
+        connection.sql(QStringLiteral("INSERT INTO vod_subtitles(identity,profile,namespace,payload) VALUES(?,?,?,?) "
+            "ON CONFLICT(identity) DO UPDATE SET payload=excluded.payload"),
+            {ref.key(), uuid(ref.profileId), uuid(ref.catalogNamespace), QJsonDocument(payload).toJson(QJsonDocument::Compact)});
+        connection.commit(); return Success{};
+    });
+}
+
+Result<QJsonArray> SqliteVodStore::subtitleInventory(const RequestContext &context)
+{
+    return guarded<QJsonArray>(context, [&]() {
+        Connection connection(m_path, context); connection.open();
+        auto query = connection.sql(QStringLiteral("SELECT identity,profile,payload FROM vod_subtitles"));
+        QJsonArray result;
+        while (query.next()) result.append(QJsonObject{{QStringLiteral("key"), QString::fromLatin1(query.value(0).toByteArray().toHex())},
+            {QStringLiteral("profile"), query.value(1).toString()}, {QStringLiteral("state"), QJsonDocument::fromJson(query.value(2).toByteArray()).object()}});
+        return result;
+    });
+}
+
 }

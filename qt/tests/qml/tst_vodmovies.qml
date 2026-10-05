@@ -57,7 +57,15 @@ TestCase {
         function selectSource(id) { sourceId = id }
         function selectCategory(id) { categoryId = id }
         function selectAudioOption(index) { movie = Object.assign({}, movie, {audioTrackIndex: index}) }
-        function selectSubtitleOption(index) { movie = Object.assign({}, movie, {subtitleTrackIndex: index}) }
+        property int uploadCount: 0
+        property int removedSubtitle: -1
+        function removeSubtitleOption(index) { removedSubtitle = index }
+        function selectSubtitleOption(index) {
+            const row = movie.subtitleTrackOptions[index]
+            if (row.optionEnabled === false) return
+            if (row.action === "upload") { ++uploadCount; return }
+            movie = Object.assign({}, movie, {subtitleTrackIndex: index})
+        }
         function selectMovie(row) {
             selectedIndex = row
             const item = row < 0 ? continueMovies[-row - 1] : get(row)
@@ -196,11 +204,36 @@ TestCase {
         compare(backend.playCount,0)
         page.handleEscape();verify(!page.detailsOpen)
     }
+    function test_seriesDetailsDoubleClickStartsClickedEpisode() {
+        backend.series = true
+        episodeBackend.episodes = [episodeBackend.episodes[0],
+            Object.assign({}, episodeBackend.episodes[0], {episodeKey: "second", selected: false}),
+            Object.assign({}, episodeBackend.episodes[0], {episodeKey: "missing", selected: false, available: false})]
+        backend.selectMovie(0)
+        tryVerify(() => findChild(page, "ui.vod.episode.1") !== null)
+        waitForRendering(page)
+        const second = findChild(page, "ui.vod.episode.1")
+        mouseClick(second, 10, second.height / 2)
+        compare(episodeBackend.selectedIndex, 1)
+        compare(backend.playCount, 0)
+        mouseDoubleClickSequence(second, 10, second.height / 2)
+        compare(backend.playCount, 1)
+        compare(episodeBackend.selectedIndex, 1)
+        compare(backend.playedFromBeginning, false)
+        mouseDoubleClickSequence(findChild(page, "ui.vod.episodeWatched.second"))
+        compare(backend.playCount, 1)
+        const missing = findChild(page, "ui.vod.episode.2")
+        mouseDoubleClickSequence(missing, 10, missing.height / 2)
+        compare(backend.playCount, 1)
+        episodeBackend.busy = true
+        mouseDoubleClickSequence(second, 10, second.height / 2)
+        compare(backend.playCount, 1)
+    }
     function test_seriesTracksBeforeFirstPlayback() {
         backend.series = true
         backend.selectMovie(0)
         backend.movie = Object.assign({}, backend.movie, {
-            mediaProbeReady: true, trackOptionsEditable: true, progressLoaded: true,
+            mediaProbeReady: true, trackOptionsEditable: true, subtitleOptionsEnabled: true, progressLoaded: true,
             audioTrackOptions: [{label: "Default"}, {label: "Polish"}, {label: "English"}],
             subtitleTrackOptions: [{label: "Default"}, {label: "Off"}, {label: "Polish"}]
         })
@@ -213,7 +246,7 @@ TestCase {
         compare(backend.playCount, 0)
         backend.movie = Object.assign({}, backend.movie, {mediaProbeReady: false, trackOptionsEditable: false, mediaProbeLoading: true})
         backend.probePlayBlocked = true
-        verify(!audio.enabled); verify(!subtitles.enabled)
+        verify(!audio.enabled); verify(subtitles.enabled)
         verify(!findChild(page, "ui.vod.play").enabled)
     }
     function test_seriesSeasonKeysClampAndKeepEpisodeFocus() {
@@ -241,21 +274,40 @@ TestCase {
         compare(episodeBackend.seasonId, "0")
         episodeBackend.seasons = seasons
     }
-    function test_inheritedEpisodeTracksCannotOpenSelectors() {
+    function test_inheritedEpisodeSubtitlesAllowUploadButNotBorrowedTracks() {
         backend.series = true
         backend.selectMovie(0)
         backend.movie = Object.assign({}, backend.movie, {
-            mediaProbeReady: false, trackOptionsEditable: false, progressLoaded: true,
+            mediaProbeReady: false, trackOptionsEditable: false, subtitleOptionsEnabled: true, progressLoaded: true,
             audioTrackOptions: [{label: "Default"}, {label: "English"}],
-            subtitleTrackOptions: [{label: "Default"}, {label: "Off"}, {label: "Polish"}]
+            subtitleTrackOptions: [{label: "Default"}, {label: "Off"}, {label: "Polish", optionEnabled: false}, {label: "Upload subtitles...", action: "upload"}]
         })
         const audio = findChild(page, "ui.vod.audioBeforePlay")
         const subtitles = findChild(page, "ui.vod.subtitlesBeforePlay")
-        compare(audio.count, 2); compare(subtitles.count, 3)
-        verify(!audio.enabled); verify(!subtitles.enabled)
+        compare(audio.count, 2); compare(subtitles.count, 4)
+        verify(!audio.enabled); verify(subtitles.enabled)
         mouseClick(audio); mouseClick(subtitles)
-        verify(!audio.popup.visible); verify(!subtitles.popup.visible)
+        verify(!audio.popup.visible); verify(subtitles.popup.visible)
+        subtitles.activated(2); compare(backend.movie.subtitleTrackIndex || 0, 0)
+        const count = backend.uploadCount
+        subtitles.activated(3); compare(backend.uploadCount, count + 1)
+        subtitles.popup.close()
         verify(findChild(page, "ui.vod.play").enabled)
+    }
+    function test_uploadWithoutMetadataPreservesChoiceAndAllowsRemoval() {
+        backend.selectMovie(0)
+        backend.movie = Object.assign({}, backend.movie, {subtitleOptionsEnabled: true, subtitleTrackIndex: 1,
+            subtitleTrackOptions: [{label: "Default"}, {label: "Off"}, {label: "local.srt", externalId: "one"}, {label: "Upload subtitles...", action: "upload"}]})
+        const subtitles = findChild(page, "ui.vod.subtitlesBeforePlay")
+        verify(subtitles.enabled)
+        const uploads = backend.uploadCount
+        subtitles.activated(3)
+        compare(backend.uploadCount, uploads + 1)
+        compare(subtitles.currentIndex, 1)
+        subtitles.activated(2)
+        subtitles.forceActiveFocus(); keyClick(Qt.Key_Delete)
+        compare(backend.removedSubtitle, 2)
+        compare(backend.playCount, 0)
     }
     function test_libraryStorageLoading_data() {
         return [{tag: "movies", series: false}, {tag: "series", series: true}]
@@ -733,7 +785,7 @@ TestCase {
         checkComboPopup(findChild(page, "ui.vod.category"))
         backend.selectMovie(0)
         const options = [{label: "Default"}, {label: "Track with a very long description that must never resize a dropdown"}, {label: "Off"}]
-        backend.movie = Object.assign({}, backend.movie, {mediaProbeReady: true, trackOptionsEditable: true, audioTrackOptions: options,
+        backend.movie = Object.assign({}, backend.movie, {mediaProbeReady: true, trackOptionsEditable: true, subtitleOptionsEnabled: true, audioTrackOptions: options,
             subtitleTrackOptions: options, audioTrackIndex: 0, subtitleTrackIndex: 0})
         for (const size of [1200, 700]) {
             testCase.width = size; page.width = size; wait(30)

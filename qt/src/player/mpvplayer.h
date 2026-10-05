@@ -19,6 +19,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <functional>
 #include <optional>
 #include <thread>
 #include <utility>
@@ -30,6 +31,8 @@ class CatchupStreamSession;
 class MpvPlayer final : public QObject
 {
     Q_OBJECT
+    // Fraction of the rendered surface reserved by transient VOD controls.
+    Q_PROPERTY(double subtitleBottomInset READ subtitleBottomInset WRITE setSubtitleBottomInset NOTIFY subtitleBottomInsetChanged)
 
 public:
     struct CacheReadState
@@ -135,11 +138,16 @@ public:
     bool deinterlaceEnabled() const;
 
     QVariantList trackList() const;
+    double subtitleBottomInset() const { return m_subtitleBottomInset; }
+    void setSubtitleBottomInset(double fraction);
     void selectAudioTrack(int id, bool remember = false);
     void selectSubtitleTrack(int id, bool remember = false);
     void configureTrackPreferences(const QString &profileId, const QString &channelKey,
                                    const QJsonObject &preferences, bool discardMissing = true, bool rememberDefault = false);
     bool managesTrackPreferences() const;
+    void updateExternalSubtitles(const QVariantList &, const QJsonObject &, const QUuid &);
+    void removeExternalSubtitle(const QString &, const QUuid &, std::function<void(bool)>);
+    void resetExternalSubtitles();
 
     void detectAndApplyDeinterlace();
 
@@ -153,6 +161,8 @@ public:
     qint64 lastRenderUpdateTimestampMs() const;
 
 signals:
+    void externalSubtitleError(const QUuid &loadToken);
+    void subtitleBottomInsetChanged();
     void renderContextReady();
     void handoffStopped(const QUuid &request, bool success);
     void mediaLoaded(const QUuid &loadToken);
@@ -172,6 +182,18 @@ signals:
     void errorOccurred(const QString &message);
 
 private:
+    QVariantList decorateExternalTracks(QVariantList tracks) const;
+    QVariantList m_externalSubtitles;
+    QSet<QString> m_addedSubtitles;
+    QSet<QString> m_loadingSubtitles;
+    QHash<QString, std::function<void(bool)>> m_pendingSubtitleRemovals;
+    struct SubtitleCommand { QUuid token; std::function<void(bool)> done; QString addedId; };
+    QHash<quint64, SubtitleCommand> m_subtitleCommands;
+    void updateSubtitlePosition();
+    double m_subtitleBottomInset = 0.0;
+    double m_originalSubtitlePosition = 100.0;
+    double m_appliedSubtitlePosition = 100.0;
+    bool m_bottomAlignedSubtitles = true;
     bool playWithPolicy(const QString &url, const QString &options, TransportPolicy policy);
     QMutex m_loadMutex;
     bool m_nativeRenderSurface = false;

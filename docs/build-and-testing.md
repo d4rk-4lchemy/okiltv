@@ -44,9 +44,35 @@ Linux release helper.
 
 ## Select validation by affected contract
 
+Uploaded-subtitle coverage includes Storage tests for schema 10-to-11 migration,
+restart without original files, content isolation, deduplication, VobSub pairing,
+cancellation, SQL rollback, migration of both older nested cache layouts into one flat
+hash directory, source isolation during deletion, and orphan cleanup.
+`OKILTV_SUBTITLE_FIXTURE` optionally supplies a private local subtitle file to
+`uploadedSubtitlesAttachRestoreAndRemove`; default fixtures remain synthetic. Mpv tests
+attach subtitles to subtitle-free media, restore stable identity after reordered loads, select Off, remove
+tracks and reject stale load tokens. The native Windows executable also checks matching
+Qt local paths against mpv paths with native Windows separators. `vodRuntimeSubtitleImport`
+covers dialog-owned and manual pauses, import/selection persistence and cancellation after stop. QML tests cover
+Upload without probe data and individually disabled borrowed episode tracks. Native
+Windows file dialogs, file-handle release and visual rendering require hardware acceptance.
+
+`OKILTVQtVodMpvTests::subtitlesClearPlaybackControls` renders generated local
+two-line SubRip and ASS tracks through libmpv, measuring subtitle pixels while
+paused. It covers lifting above controls, restoring a custom user position,
+wide/letterboxed windows, resize, track changes, subtitles Off and preserved ASS
+placement. Windows hardware acceptance remains a separate manual check.
+
 `OKILTVQtMediaModeSwitchTests` covers segment order, confirmed selection versus
 requests, animated geometry, minimum width, keyboard confirmation, disabled
-input and visible stationary chrome while navigation is gated. App cases
+input and visible stationary chrome while navigation is gated. The VOD library
+QML suite also checks that episode double-click starts the clicked available
+episode once, preserves resume semantics and ignores status-button gestures.
+`vodSourceSynchronizationAndDisable` covers aggregate refresh state through
+startup readiness, delayed Series publication, errors, concurrent sources,
+disablement/removal, replacement requests and shutdown.
+`vodLibraryWaitsForStorage` verifies that initialization failure clears queued
+source refresh state while the library retains its separate retry window. App cases
 `vodRuntimeLibraryPause`, `vodRuntimeExplicitLiveWaitsForProgress` and `appControllerReturnsToLastPlayedChannel` verify session-owned pause/resume,
 manual pause preservation, explicit-action invalidation, matching stop
 acknowledgement, durable progress before Live, playback/browse independence and

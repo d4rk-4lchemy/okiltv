@@ -59,7 +59,16 @@ VodRuntime::VodRuntime(Core::SettingsManager *settings, App::MultiViewController
     App::DvrController *dvr, App::TimeshiftController *timeshift, QObject *parent, EngineFactory engineFactory)
     : QObject(parent), m_settings(settings), m_multiview(multiview), m_dvr(dvr), m_timeshift(timeshift)
 {
+    m_subtitlePool.setMaxThreadCount(1);
+    connect(this, &VodRuntime::sourceInvalidated, this, [this](const QUuid &profile) {
+        if (m_uploadRef.profileId == profile) { m_uploadRef = {}; m_uploadPausedSession = QUuid{}; }
+        if (const auto cancel = m_subtitleCancellation.take(profile)) cancel->store(true);
+        m_subtitlePending.clear();
+        m_subtitleIntents.clear();
+        m_subtitleStates.clear();
+    });
     m_module = std::make_unique<VodModule>();
+    connect(this, &VodRuntime::sourceSyncChanged, this, &VodRuntime::sourceSyncInProgressChanged);
     m_episodes = std::make_unique<VodEpisodesModel>(this);
     connect(m_episodes.get(), &VodEpisodesModel::playRequested, this, [this](const ContentRef &ref,bool fromBeginning) { startEpisode(ref,fromBeginning); });
     connect(m_episodes.get(), &VodEpisodesModel::changed, this, [this]() {
@@ -138,13 +147,23 @@ void VodRuntime::synchronizeSource(const QString &profileId)
     const QUuid id(profileId);
     if (m_stopped || id.isNull()) return;
     const auto saved = m_settings->profileById(id);
-    if (!saved || saved->type != Core::ProfileType::Xtream || !saved->vodEnabled) return;
+    if (!saved || saved->type != Core::ProfileType::Xtream || !saved->vodEnabled) {
+        if (syncing(id)) finishSync(id);
+        return;
+    }
     ensureForSource(id);
-    if (!m_ready) { m_queuedSync.insert(id); return; }
+    if (!m_ready) {
+        m_queuedSync.insert(id);
+        m_syncErrors.remove(id);
+        emit sourceSyncChanged(id);
+        retryInitialization();
+        return;
+    }
     updatePolicy(id);
     m_module->controller()->sourceChanged(id);
     const auto requests = m_syncRequests.keys();
     for (const auto &request : requests) if (m_syncRequests.value(request).profile == id) m_syncRequests.remove(request);
+    m_queuedSync.remove(id);
     m_syncing.insert(id); m_syncErrors.remove(id);
     m_syncRequests.insert(m_module->controller()->scope(id), {id, SyncStage::Scope, {}});
     emit sourceSyncChanged(id);
@@ -206,9 +225,21 @@ void VodRuntime::receiveSync(const VodEvent &event)
 }
 void VodRuntime::finishSync(const QUuid &id)
 {
+    m_queuedSync.remove(id);
     m_syncing.remove(id);
+    const auto requests = m_syncRequests.keys();
+    for (const auto &request : requests)
+        if (m_syncRequests.value(request).profile == id) m_syncRequests.remove(request);
     emit sourceSyncChanged(id);
-    emit sourceSyncFinished(id);
+    if (!m_stopped) emit sourceSyncFinished(id);
+}
+void VodRuntime::failQueuedSync(const QString &error)
+{
+    const auto queued = m_queuedSync;
+    for (const auto &id : queued) {
+        m_syncErrors[id] = error;
+        finishSync(id);
+    }
 }
 QList<Core::ChannelCategory> VodRuntime::sourceCategories(const QUuid &id, CatalogKind kind) const
 {
@@ -267,6 +298,7 @@ void VodRuntime::initialize(EngineFactory engineFactory)
         } catch (...) { return Error{ErrorCode::SecretUnavailable, {}}; }
     });
     { QMutexLocker lock(&m_storeMutex); m_store = std::move(store); }
+    m_subtitles = std::make_shared<VodSubtitleCache>(Core::AppDataPaths::vodSubtitlesDirectory(directory.absolutePath()), m_store);
     auto legacy = std::make_shared<LegacyPlaybackAdapter>(LegacyPlaybackAdapter::Hooks{
         [this]() { return LegacyResources{m_multiview->hasRecordingForHandoff(), m_dvr->hasRecordingDemand(), !m_settings->current().dvrStopVodBeforeRecording}; },
         [this](const QUuid &id, LegacyPlaybackAdapter::Acknowledgement done) {
@@ -292,6 +324,9 @@ void VodRuntime::initialize(EngineFactory engineFactory)
             [artwork](const QUuid &profile, const ArtworkRef &ref, const RequestContext &context) { return artwork->resolve(profile, ref, context); },
             [](const PlaybackDescriptor &descriptor, const RequestContext &context) { return probeVodMedia(descriptor, context); },
             [artwork](const QUuid &profile, const ArtworkRef &ref, const RequestContext &context) { return artwork->cached(profile, ref, context); }, m_store};
+        const auto subtitles = m_subtitles;
+        composition.dependencies.subtitles = [subtitles](const ContentRef &ref, const RequestContext &context) { return subtitles->read(ref, context); };
+        composition.dependencies.subtitleFiles = [subtitles](const ContentRef &ref, const QJsonObject &state) { return subtitles->playbackFiles(ref, state); };
         composition.legacy = legacy;
         composition.createEngine = [this]() {
             auto backend = std::make_unique<Player::MpvPlayer>();
@@ -311,6 +346,7 @@ void VodRuntime::initialize(EngineFactory engineFactory)
     m_module->changed = [this](const SessionSnapshot &snapshot) {
         if (snapshot.end || snapshot.sessionToken != m_libraryPausedSession) m_libraryPausedSession = QUuid{};
         emit stateChanged();
+        observeSubtitles(snapshot);
         updatePlaybackMetadata(snapshot);
         observeEpisode(snapshot);
         if (snapshot.state == SessionState::Failed) {
@@ -321,7 +357,7 @@ void VodRuntime::initialize(EngineFactory engineFactory)
             emit notification(message);
         }
     };
-    m_module->playbackInterrupted = [this]() { finishLibraryBrowsing(false); cancelEpisodeTransition(); };
+    m_module->playbackInterrupted = [this]() { m_uploadPausedSession = QUuid{}; finishLibraryBrowsing(false); cancelEpisodeTransition(); };
     m_module->progressFailed = [this](const Error &error) { emit errorOccurred(error.message()); };
     connect(m_module->controller(), &VodController::playbackRequested, this, &VodRuntime::cancelEpisodeTransition);
     connect(m_module->controller(), &VodController::playbackRequested, this, [this]() {
@@ -368,24 +404,34 @@ void VodRuntime::reconcileSources()
     connect(reconcile, &QFutureWatcher<Result<QList<QUuid>>>::finished, this, [this, reconcile, existing]() {
         const auto result = reconcile->result(); reconcile->deleteLater();
         if (m_stopped) return;
-        if (const auto *error = std::get_if<Error>(&result)) { emit errorOccurred(error->message()); return; }
+        if (const auto *error = std::get_if<Error>(&result)) {
+            failQueuedSync(error->message());
+            emit errorOccurred(error->message());
+            return;
+        }
         QScopedValueRollback reconciling(m_reconciling, true);
         for (const auto &id : std::get<QList<QUuid>>(result)) {
             if (m_settings->profileById(id) && !m_settings->removeProfile(id)) {
+                failQueuedSync(m_settings->lastSaveError());
                 emit errorOccurred(m_settings->lastSaveError()); return;
             }
         }
         for (const auto &id : existing) m_module->controller()->unblockSource(id);
         m_ready = true;
+        const auto failedSources = m_syncErrors.keys();
+        m_syncErrors.clear(); // Initialization errors no longer block catalogue loading.
+        for (const auto &id : failedSources) emit sourceSyncChanged(id);
         emit sourcesReconciled(); emit stateChanged();
-        const auto queued = std::exchange(m_queuedSync, {});
+        const auto queued = m_queuedSync;
         for (const auto &id : queued) synchronizeSource(id.toString(QUuid::WithoutBraces));
     });
     const auto store = m_store;
     const auto artwork = m_artwork;
-    m_reconcileWork = QtConcurrent::run([store, artwork, existing]() -> Result<QList<QUuid>> {
+    const auto subtitles = m_subtitles;
+    m_reconcileWork = QtConcurrent::run([store, artwork, subtitles, existing]() -> Result<QList<QUuid>> {
         try {
             artwork->retainSources(existing);
+            subtitles->reconcile(existing);
             return store->reconcileRemovedSources(existing);
         } catch (...) { return Error{ErrorCode::StorageUnavailable, {}}; }
     });
@@ -419,7 +465,41 @@ QVariantList VodRuntime::audioTracks() const
 }
 QVariantList VodRuntime::subtitleTracks() const
 {
-    return App::Playback::subtitleTracks(qobject_cast<Player::MpvPlayer *>(playerObject()));
+    auto rows = App::Playback::subtitleTracks(qobject_cast<Player::MpvPlayer *>(playerObject()));
+    const auto *backend = qobject_cast<Player::MpvPlayer *>(playerObject());
+    const auto tracks = backend ? backend->trackList() : QVariantList{};
+    for (auto &value : rows) {
+        auto row = value.toMap();
+        for (const auto &entry : tracks) {
+            const auto track = entry.toMap();
+            if (track.value(QStringLiteral("type")).toString() == QLatin1String("sub") && track.value(QStringLiteral("id")) == row.value(QStringLiteral("id"))) {
+                row.insert(QStringLiteral("externalId"), track.value(QStringLiteral("externalId")));
+                break;
+            }
+        }
+        value = row;
+    }
+    if (active()) {
+        const auto state = subtitleState(m_module->session()->snapshot().ref);
+        int synthetic = -3;
+        for (const auto &value : state.value(QStringLiteral("files")).toArray()) {
+            const auto file = value.toObject();
+            const auto id = file.value(QStringLiteral("id")).toString();
+            bool loaded = false;
+            for (auto &entry : rows) {
+                auto row = entry.toMap();
+                if (row.value(QStringLiteral("externalId")).toString() == id) {
+                    loaded = true; row.insert(QStringLiteral("name"), file.value(QStringLiteral("name")).toString()); entry = row;
+                }
+            }
+            if (!loaded) rows.append(QVariantMap{{QStringLiteral("id"), synthetic--}, {QStringLiteral("externalId"), id},
+                {QStringLiteral("action"), QStringLiteral("external")}, {QStringLiteral("name"), file.value(QStringLiteral("name")).toString()},
+                {QStringLiteral("subtitle"), QStringLiteral("Uploaded subtitles")}, {QStringLiteral("selected"), false}});
+        }
+    }
+    if (active()) rows.append(QVariantMap{{QStringLiteral("id"), -2}, {QStringLiteral("action"), QStringLiteral("upload")},
+        {QStringLiteral("name"), QStringLiteral("Upload subtitles...")}, {QStringLiteral("subtitle"), QString{}}, {QStringLiteral("selected"), false}});
+    return rows;
 }
 void VodRuntime::selectAudioTrack(int id)
 {
@@ -427,6 +507,8 @@ void VodRuntime::selectAudioTrack(int id)
 }
 void VodRuntime::selectSubtitleTrack(int id)
 {
+    if (!active()) return;
+    m_subtitleIntents.remove(m_module->session()->snapshot().ref.key());
     if (auto *backend = qobject_cast<Player::MpvPlayer *>(playerObject())) backend->selectSubtitleTrack(id, true);
 }
 std::optional<VodMediaProbe> VodRuntime::playbackMetadata(const ContentRef &ref) const
@@ -444,6 +526,7 @@ void VodRuntime::updatePlaybackMetadata(const SessionSnapshot &snapshot)
     for (const auto &entry : snapshot.tracks) {
         const auto track = entry.toMap();
         const auto type = track.value(QStringLiteral("type")).toString();
+        if (track.value(QStringLiteral("external")).toBool()) continue;
         if (type != QLatin1String("audio") && type != QLatin1String("sub")) continue;
         auto &tracks = type == QLatin1String("audio") ? metadata.audioTracks : metadata.subtitleTracks;
         VodMediaTrack value;
@@ -559,7 +642,7 @@ void VodRuntime::returnToLive()
         if (!gate(this, activate)) activate();
     });
 }
-void VodRuntime::togglePause() { finishLibraryBrowsing(false); if (active()) { if (isPaused()) m_module->session()->resume(); else m_module->session()->pause(); } }
+void VodRuntime::togglePause() { m_uploadPausedSession = QUuid{}; finishLibraryBrowsing(false); if (active()) { if (isPaused()) m_module->session()->resume(); else m_module->session()->pause(); } }
 void VodRuntime::stop() { finishLibraryBrowsing(false); cancelLiveNavigation(); cancelEpisodeTransition(); if (m_module->controller()) m_module->controller()->cancelPendingPlayback(); if (active()) m_module->session()->stop(); }
 void VodRuntime::seekRelative(double seconds) { if (active() && std::isfinite(seconds)) m_module->session()->seek(static_cast<qint64>(std::max(0.0, positionSeconds() + std::clamp(seconds, -86400.0, 86400.0)) * 1000.0)); }
 QString VodRuntime::title() const
@@ -630,6 +713,7 @@ bool VodRuntime::prepareMutation(const QUuid &id, const Core::ServerProfile *rep
         return false;
     }
     emit sourceInvalidated(id);
+    if (syncing(id)) finishSync(id);
     if (replacement) m_preparingEdits.insert(id);
     const auto revision = replacement ? replacement->vodCredentialRevision : 0;
     const auto outcome = waitFor([this, id, revision, replacement](Completion done) {
@@ -639,7 +723,8 @@ bool VodRuntime::prepareMutation(const QUuid &id, const Core::ServerProfile *rep
             m_removals.insert(operation, [this, id, done](Outcome result) {
                 if (std::holds_alternative<Success>(result)) {
                     const auto artwork = m_artwork;
-                    m_sourceWork.addFuture(work(this, [artwork, id]() -> Outcome { artwork->removeSource(id); return Success{}; }, [](Outcome) {}));
+                    const auto subtitles = m_subtitles;
+                    m_sourceWork.addFuture(work(this, [artwork, subtitles, id]() -> Outcome { artwork->removeSource(id); subtitles->removeSource(id); return Success{}; }, [](Outcome) {}));
                 }
                 done(result);
                 QTimer::singleShot(0, this, [this, id]() { emit sourceUpdated(id); });
@@ -709,6 +794,9 @@ void VodRuntime::shutdown()
     cancelEpisodeTransition();
     if (m_stopped) return;
     m_stopped = true;
+    for (const auto &cancel : m_subtitleCancellation) cancel->store(true);
+    const auto syncingSources = m_syncing | m_queuedSync;
+    for (const auto &id : syncingSources) finishSync(id);
     m_settings->vodPolicyChanged = {};
     if (m_module->enabled()) {
         m_dvr->prepareRecordingStart = {};
@@ -724,6 +812,7 @@ void VodRuntime::shutdown()
     m_module->shutdown();
     // Local storage work owns Qt SQL connections. Join it while the application
     // and its drivers still exist; workers never wait for the GUI thread.
+    m_subtitlePool.waitForDone();
     m_sourceWork.waitForFinished();
     if (m_reconcileWork.isStarted()) m_reconcileWork.waitForFinished();
 }

@@ -101,8 +101,16 @@ Hide Unchecked. Category lists include empty/not-yet-imported provider groups.
 `VodRuntime::synchronizeSource()` coordinates scope, movie categories, series
 categories and independent movie/series snapshot publication through bounded `VodController` jobs.
 `AppController::sourceRefreshRequested` connects the common manual/automatic
-source refresh path without waiting for Live or EPG. Adding/enabling a source
-and saving changed movie or series selections also synchronize; ordering/search/Hide
+source refresh path without waiting for Live or EPG.
+
+The global top-right refresh indicator combines Live loading with
+`VodRuntime.sourceSyncInProgress`, including queued storage initialization and all
+category/movie/series publication stages across sources. It remains visible above
+the library until both Live and VOD finish. Failure, source cancellation/removal
+and shutdown clear the corresponding pending work; storage initialization failure
+reports the existing error and ends queued refreshes. EPG keeps its own indicator.
+Adding/enabling a source and saving changed movie or series selections also
+synchronize; ordering/search/Hide
 Unchecked do not import catalogue items. Errors/loading are independent of Live/EPG and
 are exposed in the VOD group editors and library. Series category failure does
 not prevent movie synchronization. Drafts survive category refresh.
@@ -309,7 +317,9 @@ details, Left/Right change to the previous/next season in selector order (includ
 Specials), without wrapping, selecting the first episode in the new season. A
 single season is unchanged; an empty season clears selection and disables Play.
 The episode list retains focus and open popups keep their own key handling. Library
-clicks select; Play/Enter plays or resumes. A single click/Enter in the
+clicks select; double-click, Play or Enter plays/resumes the selected episode
+through the same metadata gate and playback path. Episode status buttons consume
+clicks without playing. A single click/Enter in the
 right playback panel starts the episode. Right focuses its episode list; Up/Down
 select and Enter activates, while Left returns to the series list. Selection and season changes alone never
 change playback. Browsing library/playback lists never probes media. Outside active
@@ -325,18 +335,18 @@ track controls without clearing or replacing the series information.
 The first episode retains the same probe, Play gate and teardown rules as movies.
 Audio/subtitle choices are editable before playback only with measured ffprobe/mpv
 metadata belonging to the selected episode. `movie.trackOptionsEditable` gates
-both selectors and model mutation methods. When the episode has no measured
+embedded track choices and audio selection. Subtitle upload, Default and Off remain available. When the episode has no measured
 metadata, the newest cached measurement in the same series/season supplies its
 option labels; equal timestamps prefer the earlier episode in queue order.
 `VodController::cachedSeasonMetadata` uses the bounded worker lane and the
 repository's cache-only `readSeasonMediaMetadata` read, respecting existing detail
 cache validity and opening no provider or media connection. These populated
-selectors are completely disabled, including popup opening. Indices use the
+audio selectors are disabled; borrowed subtitle rows are disabled individually. Indices use the
 selected episode's saved preferences, falling back to Default; donor preferences
 are never copied. Own measurements always override borrowed ones, even when older.
 Borrowed metadata is presentation-only: it never updates the selected episode's
 cache, progress, resolution or playback preferences. A missing donor or failed
-cache read leaves empty, disabled controls without blocking Play. Cancellation and current
+cache read leaves audio disabled while the subtitle upload options remain available, without blocking Play. Cancellation and current
 selection checks fence late replies; failed probing still permits Play. Active VOD uses cached
 or backend metadata without opening another media connection. Technical metadata
 and confirmed track preferences belong to the episode. The target's saved
@@ -466,6 +476,15 @@ VOD uses the existing video surface and bottom timeline. Scrubbing seeks exact
 absolute media time without minute rounding and is disabled without duration or
 seekability. Active VOD hides Live rails/Guide affordances; the Back arrow outside the
 left movie/group panel opens the library and stops playback through the normal progress-checkpoint path.
+While transport chrome is visible, bottom-aligned SubRip/SRT, WebVTT, MOV text
+and plain text subtitles move above its animated top edge with 10 logical pixels
+of clearance. The inset follows panel movement and window resizing as a fraction
+of the video surface, including during paused playback. Hiding chrome restores
+the effective user `sub-pos`; an already higher user position is retained.
+The backend reapplies the inset on current-load track snapshots, including track
+changes and replacement loads. ASS/SSA, bitmap/unknown formats and top/center
+alignment retain their original layout. This is temporary presentation state,
+not a setting or a watch-progress preference; Live playback is unaffected.
 The `V` shortcut opens/closes the library without changing playback.
 The shared central playback spinner follows VOD opening, resume seeking, recovery
 and buffering (except a user pause), and hides on playback, stop or failure.
@@ -535,6 +554,52 @@ loops, keep-open, external media, headers, cookies, seeking and start/end behavi
 Reject unknown/conflicting invariant options before loading. Resume waits for
 current-load backend events/telemetry, not a fixed GUI timer. Paused telemetry
 checkpoints on entry into Paused; completed seeks and track changes still checkpoint.
+
+## Uploaded subtitles
+
+Movie/episode details always offer Default, Off and **Upload subtitles...**, even
+without measured subtitle tracks. Borrowed episode tracks remain disabled individually;
+local uploads do not require a probe. The VOD transport subtitle button and F2 also
+remain available without embedded subtitles. Uploaded files appear by name; each has
+Remove uploaded subtitles (also Delete in the picker). Upload is an action, not a track.
+Cancellation preserves the previous choice and focus. File dialogs pause only a session
+they own, resuming that same session on dismissal; manual/library pauses remain paused.
+
+`VodSubtitleCache` copies local files on a serialized worker into the AppDataPaths
+`vod-subtitles` directory. Schema 11 stores source/content-scoped file identities,
+relative entries, names, hashes and requested selection in `vod_subtitles`, separately
+from progress. Multiple files persist without TTL/LRU eviction, independently of their
+original locations. Each import lives directly in `vod-subtitles/<SHA-256>/subtitle.ext`;
+the digest covers the entire logical `source UUID/content-key hash/import UUID` path,
+with `/` separators and UTF-8 encoding, independently of the app-data root. There are
+no nested source/content/import directories. Both earlier nested layouts (expanded
+content keys and hashed content keys) migrate whole import directories on read/import
+and startup without changing file IDs or selections. Failed moves retain their old
+locations for retry; IDX/SUB pairs move together. Identical bytes deduplicate within a
+content identity. VobSub IDX/SUB pairs are copied together. Filters suggest common
+subtitle formats; All files permits
+other formats recognized by the installed mpv. Bytes, encoding and ASS styling are not
+converted. mpv validates subtitle decoding when the file is attached; failures leave
+playback available and expose a removable cache entry with an error.
+
+Refresh, catalogue eviction, VOD disablement and credential edits retain uploads. Source
+removal and explicit per-file removal clean the copies, never the original files.
+Source cleanup uses the surviving SQL inventory to retain other sources in the flat
+cache. Startup reconciles orphan directories; failed physical deletions are retried
+by reconciliation.
+Writes publish only complete copies; SQL failures retain the previous record. Pending
+imports are cancelled on source invalidation/shutdown. Pre-play preference changes do not
+create watch history or alter Continue watching; Play waits for outstanding subtitle work.
+
+The playback descriptor carries trusted local attachments. Each load/recovery attaches
+them asynchronously through `sub-add`; confirmed track choices use the import identity
+and per-file subtitle ordinal instead of mpv's transient IDs. On Windows, local paths
+from Qt and mpv are compared with normalized separators and case; remote URL matching
+remains exact. Default/Off/embedded choices
+replace the requested upload choice. Deleting a selected file selects Off; loaded tracks
+are detached before deleting their bytes. Load tokens reject stale additions and file
+choices never inherit to another episode. External tracks are excluded from technical
+metadata and season fallback caches. Live track selection is unchanged.
 
 ## Remote MP4 transport and recovery
 

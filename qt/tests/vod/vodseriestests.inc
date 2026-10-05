@@ -140,7 +140,7 @@ void AppModelTests::vodSeriesRuntime() {
         QTRY_VERIFY(catalog.movie().value(QStringLiteral("mediaProbeReady")).toBool());
         QTRY_VERIFY(catalog.movie().value(QStringLiteral("progressLoaded")).toBool());
         QCOMPARE(catalog.movie().value(QStringLiteral("audioTrackOptions")).toList().size(), 3);
-        QCOMPARE(catalog.movie().value(QStringLiteral("subtitleTrackOptions")).toList().size(), 3);
+        QCOMPARE(catalog.movie().value(QStringLiteral("subtitleTrackOptions")).toList().size(), 4);
         QVERIFY(!catalog.probePlayBlocked()); QVERIFY(!runtime.active()); QVERIFY(!engine);
         const auto cached = std::get<std::optional<VodDetails>>(runtime.store()->readDetails(first, context));
         QVERIFY(cached && cached->mediaProbe); QCOMPARE(cached->mediaProbe->audioTracks.size(), 2);
@@ -171,7 +171,8 @@ void AppModelTests::vodSeriesRuntime() {
         catalog.back(); catalog.selectMovie(0);
         QTRY_VERIFY(mediaPaths.size() > beforeStale);
         QTRY_VERIFY(!catalog.movie().value(QStringLiteral("mediaProbeLoading")).toBool());
-        catalog.selectAudioOption(2); catalog.selectSubtitleOption(2); catalog.play();
+        catalog.selectAudioOption(2); catalog.selectSubtitleOption(2);
+        QTRY_VERIFY(!runtime.subtitleBusy()); catalog.play();
         QTRY_VERIFY(engine && engine->loads == 1);
         QCOMPARE(engine->request.trackPreferences.value(QStringLiteral("audio")).toObject().value(QStringLiteral("lang")).toString(), QStringLiteral("eng"));
         QCOMPARE(engine->request.trackPreferences.value(QStringLiteral("sub")).toObject().value(QStringLiteral("lang")).toString(), QStringLiteral("pol"));

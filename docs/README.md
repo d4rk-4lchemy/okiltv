@@ -12,7 +12,7 @@ its boundaries and where to make changes; they are not a release history.
 | Understand startup, ownership or dependencies | [Architecture](architecture.md) |
 | Change source import, channels, groups or programme data | [Sources and EPG](sources-and-epg.md) |
 | Change Live, catch-up, timeshift, recording or multiview | [Playback](playback.md) |
-| Change movie/series libraries, episodes, VOD sessions or progress | [VOD](vod.md) |
+| Change movie/series libraries, episodes, VOD sessions, progress or uploaded subtitles | [VOD](vod.md), [uploaded subtitles](vod.md#uploaded-subtitles) |
 | Change QML, focus, shortcuts, overlays or appearance | [UI and interaction](ui-and-interaction.md) |
 | Change settings, persistence, migrations or protected data | [Settings and storage](settings-and-storage.md) |
 | Build, validate, diagnose CI or package the application | [Build and testing](build-and-testing.md) |

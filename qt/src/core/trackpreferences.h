@@ -64,6 +64,10 @@ inline QJsonObject makeTrackPreference(const QVariantList &tracks, const QString
             continue;
         }
         if (track.value(QStringLiteral("id")).toInt() != id || id <= 0) { ++ordinal; continue; }
+        if (type == QLatin1String("sub") && !track.value(QStringLiteral("externalId")).toString().isEmpty())
+            return {{QStringLiteral("mode"), QStringLiteral("external")},
+                {QStringLiteral("externalId"), track.value(QStringLiteral("externalId")).toString()},
+                {QStringLiteral("ordinal"), track.value(QStringLiteral("externalOrdinal")).toInt()}};
         return {
             { QStringLiteral("mode"), QStringLiteral("track") },
             { QStringLiteral("id"), id },
@@ -85,6 +89,16 @@ inline int matchTrackPreference(const QVariantList &tracks, const QString &type,
     if (mode == QLatin1String("off") && type == QLatin1String("sub")) {
         return 0;
     }
+    if (mode == QLatin1String("external") && type == QLatin1String("sub")) {
+        for (const auto &value : tracks) {
+            const auto track = value.toMap();
+            if (track.value(QStringLiteral("externalId")).toString() == preference.value(QStringLiteral("externalId")).toString()
+                && !track.value(QStringLiteral("externalId")).toString().isEmpty()
+                && track.value(QStringLiteral("externalOrdinal")).toInt() == preference.value(QStringLiteral("ordinal")).toInt())
+                return track.value(QStringLiteral("id")).toInt();
+        }
+        return -1;
+    }
     const auto savedId = preference.value(QStringLiteral("id")).toInt(-1);
     const auto savedOrdinal = preference.value(QStringLiteral("ordinal")).toInt(-1);
     if (mode != QLatin1String("track") || (savedId <= 0 && savedOrdinal < 0)) {
@@ -104,6 +118,7 @@ inline int matchTrackPreference(const QVariantList &tracks, const QString &type,
     for (const auto &value : tracks) {
         const auto track = value.toMap();
         if (track.value(QStringLiteral("type")).toString() != type) continue;
+        if (!track.value(QStringLiteral("externalId")).toString().isEmpty()) continue;
         const bool metadataMatches = normalizedTrackLabel(track.value(QStringLiteral("title"))) == title
             && normalizedTrackLanguage(track.value(QStringLiteral("lang"))) == language
             && (codec.isEmpty() || normalizedTrackLabel(track.value(QStringLiteral("codec"))) == codec);

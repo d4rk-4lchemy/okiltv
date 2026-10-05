@@ -64,6 +64,14 @@ series continuation alongside confirmed episode progress in one SQLite transacti
 Schema 10 adds durable suppression after bulk Watched, without changing playback
 history; a confirmed checkpoint of a new session clears it.
 
+Uploaded subtitles use `IVodSubtitleRepository`/`SqliteVodStore` (schema 11) and
+`VodSubtitleCache` for durable local files. `VodRuntime` owns a serialized worker
+pool, source cancellation, file-dialog pause ownership and shared UI publication.
+Playback descriptors carry trusted attachments to `IPlaybackEngine`; actual mpv
+track IDs never become durable import identities. Requested pre-play selection is
+separate from confirmed session progress. Shutdown cancels and joins subtitle
+workers before SQL/Qt teardown; source reconciliation also cleans orphan copies.
+
 ## Startup and shutdown
 
 1. Set up platform/bootstrap paths, Fusion style and the OpenGL rendering backend.

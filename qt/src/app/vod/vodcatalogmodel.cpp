@@ -74,6 +74,10 @@ VodCatalogModel::VodCatalogModel(VodRuntime *runtime, Core::SettingsManager *set
         if (series()) m_movie.insert(QStringLiteral("watched"), m_episodes->allWatched());
         emit changed();
     });
+    connect(m_runtime, &VodRuntime::subtitlesChanged, this, [this](const ContentRef &ref) {
+        if (ref != (series() ? m_episodes->selectedRef() : m_selected)) return;
+        updateSubtitlePresentation(); emit changed();
+    });
     m_probePlayDelay.setSingleShot(true);
     m_probePlayDelay.setInterval(5000);
     m_probePlayDelay.setTimerType(Qt::PreciseTimer);
@@ -126,7 +130,9 @@ VodCatalogModel::VodCatalogModel(VodRuntime *runtime, Core::SettingsManager *set
     });
     connect(runtime, &VodRuntime::sourceSyncChanged, this, [this](const QUuid &id) { if (id == m_profile) emit changed(); });
     connect(runtime, &VodRuntime::sourceSyncFinished, this, [this](const QUuid &id) {
-        if (id != m_profile || !m_open || !m_controller) return;
+        // Startup has its own retry window; a failed queued refresh must not
+        // publish a transient storage error or start queries before readiness.
+        if (id != m_profile || !m_open || !m_controller || !m_runtime->ready()) return;
         m_error = m_runtime->syncError(id);
         const auto saved = m_settings->profileById(id);
         if (!saved || !saved->vodEnabled) { emit changed(); return; }
@@ -367,6 +373,7 @@ void VodCatalogModel::selectMovie(int row)
         {QStringLiteral("toWatch"), m_movieLists.value(item.ref.key()).toWatch},
         {QStringLiteral("favourite"), m_movieLists.value(item.ref.key()).favourite},
         {QStringLiteral("listsLoaded"), m_movieLists.contains(item.ref.key())}, {QStringLiteral("listsBusy"), listsBusy(item.ref)}};
+    updateSubtitlePresentation();
     requestPoster(row);
     track(m_controller->details(item.ref), Operation::Details, item.ref);
     if (series()) m_episodes->load(item.ref);
@@ -383,7 +390,7 @@ void VodCatalogModel::back()
 void VodCatalogModel::play(bool fromBeginning)
 {
     const auto playable = series() ? m_episodes->selectedRef() : m_selected;
-    if (!m_controller || !playable.playable() || startingPlayback() || probePlayBlocked() || !m_movie.value(QStringLiteral("available")).toBool()
+    if (!m_controller || !playable.playable() || m_runtime->subtitleBusy(playable) || startingPlayback() || probePlayBlocked() || !m_movie.value(QStringLiteral("available")).toBool()
         || (series() && !m_episodes->selectedEpisode().value(QStringLiteral("available")).toBool())) return;
     cancelKind(Operation::CardProgress); cancelKind(Operation::CardResolution); m_requestedProgress.clear();
     // Playback takes priority over thumbnail work.
@@ -482,15 +489,67 @@ void VodCatalogModel::selectAudioOption(int index)
 }
 void VodCatalogModel::selectSubtitleOption(int index)
 {
-    if (!m_mediaProbe || !m_movie.value(QStringLiteral("trackOptionsEditable")).toBool()
-        || startingPlayback() || !m_movie.value(QStringLiteral("progressLoaded")).toBool()) return;
-    if (index <= 0) m_playbackTrackPreferences.remove(QStringLiteral("sub"));
-    else if (index == 1) m_playbackTrackPreferences.insert(QStringLiteral("sub"), QJsonObject{{QStringLiteral("mode"), QStringLiteral("off")}});
-    else if (index - 2 < m_mediaProbe->subtitleTracks.size())
-        m_playbackTrackPreferences.insert(QStringLiteral("sub"), probedPreference(m_mediaProbe->subtitleTracks.at(index - 2)));
-    else return;
+    const auto ref = series() ? m_episodes->selectedRef() : m_selected;
+    const auto rows = m_movie.value(QStringLiteral("subtitleTrackOptions")).toList();
+    if (!ref.playable() || startingPlayback() || index < 0 || index >= rows.size()) return;
+    const auto row = rows[index].toMap();
+    if (!row.value(QStringLiteral("optionEnabled"), true).toBool()) return;
+    if (row.value(QStringLiteral("action")).toString() == QLatin1String("upload")) {
+        m_runtime->beginSubtitleUpload(ref); emit changed(); return;
+    }
+    const auto preference = QJsonObject::fromVariantMap(row.value(QStringLiteral("preference")).toMap());
+    if (preference.isEmpty()) m_playbackTrackPreferences.remove(QStringLiteral("sub"));
+    else m_playbackTrackPreferences.insert(QStringLiteral("sub"), preference);
     m_trackOptionsEdited = true;
-    updateMediaPresentation(); emit changed();
+    m_runtime->selectSubtitlePreference(ref, preference);
+}
+void VodCatalogModel::removeSubtitleOption(int index)
+{
+    const auto rows = m_movie.value(QStringLiteral("subtitleTrackOptions")).toList();
+    if (index < 0 || index >= rows.size()) return;
+    m_runtime->removeUploadedSubtitle(series() ? m_episodes->selectedRef() : m_selected,
+        rows[index].toMap().value(QStringLiteral("externalId")).toString());
+}
+void VodCatalogModel::updateSubtitlePresentation()
+{
+    if (m_movie.isEmpty()) return;
+    const auto ref = series() ? m_episodes->selectedRef() : m_selected;
+    if (!ref.playable()) return;
+    m_runtime->requestSubtitleState(ref);
+    const auto state = m_runtime->subtitleState(ref);
+    const auto selected = state.contains(QStringLiteral("selection")) ? state.value(QStringLiteral("selection")).toObject()
+        : m_playbackTrackPreferences.value(QStringLiteral("sub")).toObject();
+    QVariantList rows;
+    rows.append(QVariantMap{{QStringLiteral("label"), QStringLiteral("Default")}, {QStringLiteral("preference"), QVariantMap{}}});
+    rows.append(QVariantMap{{QStringLiteral("label"), QStringLiteral("Off")}, {QStringLiteral("preference"), QVariantMap{{QStringLiteral("mode"), QStringLiteral("off")}}}});
+    int selectedIndex = selected.value(QStringLiteral("mode")).toString() == QLatin1String("off") ? 1 : 0;
+    const auto metadata = m_mediaProbe ? m_mediaProbe : m_seasonTrackMetadata;
+    if (metadata) {
+        const auto match = selectedProbeTrack(metadata->subtitleTracks, QStringLiteral("sub"), selected);
+        for (qsizetype i = 0; i < metadata->subtitleTracks.size(); ++i) {
+            const auto &track = metadata->subtitleTracks[i];
+            if (m_mediaProbe && i == match) selectedIndex = static_cast<int>(rows.size());
+            rows.append(QVariantMap{{QStringLiteral("label"), trackLabel(track)}, {QStringLiteral("optionEnabled"), m_mediaProbe.has_value()},
+                {QStringLiteral("preference"), probedPreference(track).toVariantMap()}});
+        }
+    }
+    QHash<QString, int> names;
+    for (const auto &value : state.value(QStringLiteral("files")).toArray()) {
+        const auto file = value.toObject();
+        const auto id = file.value(QStringLiteral("id")).toString();
+        auto name = file.value(QStringLiteral("name")).toString();
+        const auto count = ++names[name];
+        if (count > 1) name += QStringLiteral(" (%1)").arg(count);
+        if (selected.value(QStringLiteral("externalId")).toString() == id) selectedIndex = static_cast<int>(rows.size());
+        const QJsonObject preference{{QStringLiteral("mode"), QStringLiteral("external")}, {QStringLiteral("externalId"), id}, {QStringLiteral("ordinal"), 0}};
+        rows.append(QVariantMap{{QStringLiteral("label"), name}, {QStringLiteral("externalId"), id}, {QStringLiteral("preference"), preference.toVariantMap()}});
+    }
+    rows.append(QVariantMap{{QStringLiteral("label"), QStringLiteral("Upload subtitles...")}, {QStringLiteral("action"), QStringLiteral("upload")}});
+    m_movie.insert(QStringLiteral("subtitleTrackOptions"), rows);
+    m_movie.insert(QStringLiteral("subtitleTrackIndex"), selectedIndex);
+    m_movie.insert(QStringLiteral("subtitleOptionsEnabled"), !m_runtime->subtitleBusy(ref));
+    m_movie.insert(QStringLiteral("subtitleBusy"), m_runtime->subtitleBusy(ref));
+    m_movie.insert(QStringLiteral("subtitleError"), m_runtime->subtitleError());
 }
 void VodCatalogModel::updateMediaPresentation()
 {
@@ -507,6 +566,7 @@ void VodCatalogModel::updateMediaPresentation()
         m_movie.insert(QStringLiteral("subtitleTrackIndex"), 0);
         m_movie.insert(QStringLiteral("audioTrackCount"), 0);
         m_movie.insert(QStringLiteral("subtitleTrackCount"), 0);
+        updateSubtitlePresentation();
         return;
     }
     if (!series()) applyResolution(m_selected, metadata->videoWidth, metadata->videoHeight);
@@ -539,6 +599,7 @@ void VodCatalogModel::updateMediaPresentation()
     if (!series() && metadata->videoWidth && metadata->videoHeight)
         m_movie.insert(QStringLiteral("resolution"), QStringLiteral("%1 × %2").arg(*metadata->videoWidth).arg(*metadata->videoHeight));
     if (m_mediaProbe) m_movie.remove(QStringLiteral("mediaProbeError"));
+    updateSubtitlePresentation();
 }
 void VodCatalogModel::readMediaMetadata(const ContentRef &ref, const VodDetails &details)
 {

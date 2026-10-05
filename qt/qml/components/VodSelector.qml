@@ -5,6 +5,8 @@ import "../theme/Theme.js" as Theme
 
 ComboBox {
     id: combo
+    property bool optionActionsEnabled: false
+    signal removeOption(int index)
     property real popupHeightLimit: 450
     property int uiTransparency: 100
     implicitWidth: 200
@@ -32,11 +34,13 @@ ComboBox {
     delegate: ItemDelegate {
         id: option
         required property int index
+        readonly property var row: combo.optionActionsEnabled ? combo.model[index] : null
+        enabled: !row || row.optionEnabled !== false
         width: combo.popup.availableWidth
         height: combo.height
         padding: 0
         leftPadding: combo.leftPadding
-        rightPadding: combo.rightPadding
+        rightPadding: removeButton.visible ? combo.height : combo.rightPadding
         hoverEnabled: true
         highlighted: combo.highlightedIndex === index
         contentItem: Text {
@@ -49,6 +53,19 @@ ComboBox {
         }
         background: Rectangle {
             color: option.highlighted || option.hovered ? Theme.overlaySurfaceInteractive : "transparent"
+        }
+        ToolButton {
+            id: removeButton
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            width: combo.height
+            height: combo.height
+            visible: Boolean(option.row && option.row.externalId)
+            text: "×"
+            Accessible.name: "Remove uploaded subtitles"
+            ToolTip.visible: hovered
+            ToolTip.text: "Remove uploaded subtitles"
+            onClicked: combo.removeOption(option.index)
         }
         ToolTip.visible: hovered && optionText.truncated
         ToolTip.text: combo.textAt(index)
@@ -73,6 +90,10 @@ ComboBox {
             border.color: Theme.overlayBorder
             radius: Theme.radiusS
         }
+    }
+    Keys.onDeletePressed: {
+        if (combo.optionActionsEnabled && combo.currentIndex >= 0 && combo.model[combo.currentIndex].externalId)
+            combo.removeOption(combo.currentIndex)
     }
     palette.button: Theme.overlaySurfaceRaised
     palette.buttonText: Theme.overlayTextPrimary

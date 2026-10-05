@@ -1,10 +1,13 @@
 #pragma once
 #include "vodmodule.h"
 #include "vodartworkcache.h"
+#include "vodsubtitlecache.h"
+#include <QThreadPool>
 #include "core/vod/storage/sqlitevodstore.h"
 #include <QPointer>
 #include <QFutureSynchronizer>
 
+namespace OKILTV::Player { class MpvPlayer; }
 namespace OKILTV::Core { class SettingsManager; struct ServerProfile; struct ChannelCategory; }
 namespace OKILTV::App { class MultiViewController; class PlayerController; class DvrController; class TimeshiftController; }
 namespace OKILTV::Vod {
@@ -12,6 +15,9 @@ class VodEpisodesModel;
 // Production composition and active transport; no catalog screens or routing.
 class VodRuntime final : public QObject {
     Q_OBJECT
+    Q_PROPERTY(bool subtitleDialogOpen READ subtitleDialogOpen NOTIFY stateChanged)
+    Q_PROPERTY(bool subtitleBusy READ subtitleBusy NOTIFY stateChanged)
+    Q_PROPERTY(QString subtitleError READ subtitleError NOTIFY stateChanged)
     Q_PROPERTY(bool activeSeries READ activeSeries NOTIFY stateChanged)
     Q_PROPERTY(QObject *episodesModel READ episodesObject CONSTANT)
     Q_PROPERTY(bool hasPreviousEpisode READ hasPreviousEpisode NOTIFY stateChanged)
@@ -21,6 +27,7 @@ class VodRuntime final : public QObject {
     Q_PROPERTY(bool active READ active NOTIFY stateChanged)
     Q_PROPERTY(bool liveTransition READ liveTransition NOTIFY stateChanged)
     Q_PROPERTY(bool ready READ ready NOTIFY stateChanged)
+    Q_PROPERTY(bool sourceSyncInProgress READ sourceSyncInProgress NOTIFY sourceSyncInProgressChanged)
     Q_PROPERTY(bool isPlaying READ isPlaying NOTIFY stateChanged)
     Q_PROPERTY(bool isPaused READ isPaused NOTIFY stateChanged)
     Q_PROPERTY(bool isLoading READ isLoading NOTIFY stateChanged)
@@ -64,6 +71,19 @@ public:
     Q_INVOKABLE QVariantMap debugOverlaySnapshot() const;
     Q_INVOKABLE QVariantList audioTracks() const;
     Q_INVOKABLE QVariantList subtitleTracks() const;
+    bool subtitleDialogOpen() const { return m_uploadRef.playable(); }
+    bool subtitleBusy() const { return !m_subtitlePending.isEmpty(); }
+    QString subtitleError() const { return m_subtitleError; }
+    QJsonObject subtitleState(const ContentRef &ref) const { return m_subtitleStates.value(ref.key()); }
+    bool subtitleBusy(const ContentRef &ref) const { return m_subtitlePending.contains(ref.key()); }
+    void requestSubtitleState(const ContentRef &);
+    void beginSubtitleUpload(const ContentRef &);
+    Q_INVOKABLE void beginSubtitleUpload();
+    Q_INVOKABLE void finishSubtitleUpload(const QUrl &file = {});
+    Q_INVOKABLE void removeUploadedSubtitle(const QString &id);
+    Q_INVOKABLE void selectUploadedSubtitle(const QString &id);
+    void removeUploadedSubtitle(const ContentRef &, const QString &id);
+    void selectSubtitlePreference(const ContentRef &, const QJsonObject &);
     Q_INVOKABLE void selectAudioTrack(int id);
     Q_INVOKABLE void selectSubtitleTrack(int id);
     Q_INVOKABLE void togglePause();
@@ -82,11 +102,14 @@ public:
     void policyChanged(const QUuid &profile);
     QList<Core::ChannelCategory> sourceCategories(const QUuid &, CatalogKind) const;
     QString syncError(const QUuid &id) const { return m_syncErrors.value(id); }
-    bool syncing(const QUuid &id) const { return m_syncing.contains(id); }
+    bool syncing(const QUuid &id) const { return m_syncing.contains(id) || m_queuedSync.contains(id); }
+    bool sourceSyncInProgress() const { return !m_syncing.isEmpty() || !m_queuedSync.isEmpty(); }
     void retryInitialization();
     VodModule *module() const { return m_module.get(); }
     std::shared_ptr<SqliteVodStore> store() const { return m_store; }
 signals:
+    void subtitleUploadRequested();
+    void subtitlesChanged(const OKILTV::Vod::ContentRef &ref);
     void seriesReturnRequested(const OKILTV::Vod::ContentRef &);
     void libraryRequested();
     void liveRequested();
@@ -99,9 +122,26 @@ signals:
     void sourceUpdated(const QUuid &profile);
     void categoriesUpdated(const QUuid &profile);
     void sourceSyncChanged(const QUuid &profile);
+    void sourceSyncInProgressChanged();
     void sourceSyncFinished(const QUuid &profile);
     void playbackMetadataChanged(const OKILTV::Vod::ContentRef &ref);
 private:
+    enum class SubtitleOperation { Read, Import, Remove, Select };
+    void subtitleWork(const ContentRef &, SubtitleOperation, const QUrl & = {}, const QString & = {}, const QJsonObject & = {}, bool apply = false);
+    void observeSubtitles(const SessionSnapshot &);
+    std::shared_ptr<VodSubtitleCache> m_subtitles;
+    QThreadPool m_subtitlePool;
+    QHash<QByteArray, QJsonObject> m_subtitleStates;
+    QHash<QByteArray, quint64> m_subtitlePending;
+    QSet<QByteArray> m_subtitleIntents;
+    quint64 m_subtitleSequence = 0;
+    QHash<QUuid, std::shared_ptr<std::atomic_bool>> m_subtitleCancellation;
+    QString m_subtitleError;
+    ContentRef m_uploadRef;
+    QUuid m_uploadPausedSession;
+    QUuid m_observedSubtitleLoad;
+    QJsonObject m_observedSubtitlePreference;
+    QPointer<QObject> m_subtitleBackend;
     void cancelLiveNavigation();
     QUuid m_libraryPausedSession;
     quint64 m_liveGeneration = 0;
@@ -143,6 +183,7 @@ private:
     void receiveSync(const VodEvent &);
     bool reconcileCategories(const CategorySnapshot &);
     void finishSync(const QUuid &);
+    void failQueuedSync(const QString &error);
     std::shared_ptr<VodArtworkCache> m_artwork;
     bool gate(QObject *owner, std::function<void()>);
     void bindPlayer(App::PlayerController *);

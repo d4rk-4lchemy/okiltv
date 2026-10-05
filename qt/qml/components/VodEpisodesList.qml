@@ -208,6 +208,11 @@ FocusScope {
                     if (root.directPlay) root.episodeModel.playEpisode(index)
                     else root.episodeModel.selectEpisode(index)
                 }
+                onDoubleClicked: {
+                    if (root.directPlay || !row.modelData.available) return
+                    episodeList.forceActiveFocus()
+                    root.episodeModel.playEpisode(index)
+                }
             }
         }
         Label { Layout.fillWidth: true; visible: text.length > 0; text: root.episodeModel ? root.episodeModel.errorText : ""; wrapMode: Text.WordWrap; color: Theme.overlayTextSecondary }

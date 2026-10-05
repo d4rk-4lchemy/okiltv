@@ -17,6 +17,7 @@ Button {
     property bool compact: false
     property bool borderless: false
     property bool barMode: false
+    property bool neutralBar: false
     property bool glassMode: false
     property bool retainEnabledAppearance: false
     readonly property bool visuallyEnabled: enabled || retainEnabledAppearance
@@ -215,9 +216,9 @@ Button {
             }
             if (control.barMode) {
                 if (control.down)
-                    return Theme.uiBackground("#5e2a3e57", control.uiTransparency)
+                    return Theme.uiBackground(control.neutralBar ? Theme.overlaySurfaceMuted : "#5e2a3e57", control.uiTransparency)
                 if (control.hovered)
-                    return Theme.uiBackground("#4b203246", control.uiTransparency)
+                    return Theme.uiBackground(control.neutralBar ? Theme.overlaySurfaceRaised : "#4b203246", control.uiTransparency)
                 return "transparent"
             }
             if (control.accent)

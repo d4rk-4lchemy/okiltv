@@ -562,9 +562,13 @@ void AppModelTests::vodLibraryWaitsForStorage()
     VodRuntime runtime(&settings, &multiview, &dvr, &timeshift, nullptr, []() { return std::make_unique<Test::Engine>(); });
     QSignalSpy errors(&runtime, &VodRuntime::errorOccurred);
     VodCatalogModel catalog(&runtime, &settings, nullptr, VodCatalogModel::Purpose::Library, series ? CatalogKind::Series : CatalogKind::Movies);
+    runtime.synchronizeSource(guidToString(profile.id));
+    QVERIFY(runtime.sourceSyncInProgress());
     QElapsedTimer waiting; waiting.start(); catalog.open();
     QVERIFY(catalog.busy()); QVERIFY(catalog.errorText().isEmpty());
     QTRY_VERIFY_WITH_TIMEOUT(!errors.isEmpty(), 5000);
+    QVERIFY(!runtime.sourceSyncInProgress());
+    QVERIFY(!runtime.syncError(profile.id).isEmpty());
     QVERIFY(!runtime.ready()); QVERIFY(catalog.busy()); QVERIFY(catalog.errorText().isEmpty());
     if (scenario == QStringLiteral("timeout")) {
         QTRY_VERIFY_WITH_TIMEOUT(!catalog.busy(), 17000);

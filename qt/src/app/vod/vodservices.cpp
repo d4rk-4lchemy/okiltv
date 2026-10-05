@@ -77,7 +77,14 @@ Result<PlaybackDescriptor> VodPlaybackResolver::resolve(const VodDependencies &d
     if (!ref.playable() || ref.profileId != source.revision.profileId || ref.catalogNamespace != source.revision.catalogNamespace)
         return Error{ErrorCode::ContentUnavailable, request.operationId};
     auto result = deps.provider->resolvePlayback(source, ref, preferences, request);
-    if (const auto *descriptor = std::get_if<PlaybackDescriptor>(&result)) {
+    if (auto *descriptor = std::get_if<PlaybackDescriptor>(&result)) {
+        if (deps.subtitles && deps.subtitleFiles) {
+            const auto subtitles = deps.subtitles(ref, request);
+            if (const auto *error = std::get_if<Error>(&subtitles)) return *error;
+            const auto state = std::get<QJsonObject>(subtitles);
+            descriptor->externalSubtitles = deps.subtitleFiles(ref, state);
+            if (state.contains(QStringLiteral("selection"))) descriptor->subtitleSelection = state.value(QStringLiteral("selection")).toObject();
+        }
         const auto &url = descriptor->mediaUri;
         if (descriptor->ref != ref || descriptor->source != source.revision || !url.isValid() || url.host().isEmpty()
             || (url.scheme() != QStringLiteral("https") && url.scheme() != QStringLiteral("http"))

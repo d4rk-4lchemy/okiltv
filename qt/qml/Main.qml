@@ -3,12 +3,34 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Window
+import QtQuick.Dialogs
 import QtQml
 import OKILTV
 import "theme/Theme.js" as Theme
 
 ApplicationWindow {
     id: window
+
+    FileDialog {
+        id: subtitleFileDialog
+        title: "Upload subtitles..."
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["Subtitle files (*.srt *.ass *.ssa *.vtt *.sub *.idx *.sup *.pgs *.smi *.sami *.scc *.ttml *.dfxp *.lrc *.txt *.mks *.rt *.utf *.utf8 *.utf-8)", "All files (*)"]
+        property var previousFocus: null
+        onAccepted: { window.vod.finishSubtitleUpload(selectedFile); restoreFocus() }
+        onRejected: { window.vod.finishSubtitleUpload(); restoreFocus() }
+        function restoreFocus() {
+            if (previousFocus) previousFocus.forceActiveFocus()
+            previousFocus = null
+        }
+    }
+    Connections {
+        target: window.vod
+        function onSubtitleUploadRequested() {
+            subtitleFileDialog.previousFocus = window.activeFocusItem
+            subtitleFileDialog.open()
+        }
+    }
 
     width: 1600
     height: 900
@@ -34,11 +56,12 @@ ApplicationWindow {
     readonly property string selectedMediaMode: window.vodOpen ? window.vodLibraryKind
         : window.vod && (window.vod.active || window.vod.episodeTransition)
             ? (window.vod.activeSeries ? "series" : "movies") : "live"
+    readonly property bool vodPalette: window.vodMounted || window.selectedMediaMode !== "live"
     property bool pendingLiveNavigation: false
     readonly property bool modeNavigationEnabled: window.shell.activeOverlay !== "settings"
         && !window.vodTransitioning && !livePage.chromeAnimationsRunning
         && !window.pendingLiveNavigation && !(window.vod && window.vod.liveTransition)
-        && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible
+        && !window.subtitleDialogActive && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible
         && !window.downloads.shuttingDown && !window.multiView.degradePromptVisible
 
     FontLoader {
@@ -68,7 +91,8 @@ ApplicationWindow {
     readonly property bool vodTransitioning: vodMounted
         && (vodClosing || vodSlideProgress < 1 || vodSlideAnimation.running)
     readonly property bool textEditorFocused: activeFocusItem instanceof TextInput || activeFocusItem instanceof TextEdit
-    readonly property bool overlayShortcutsEnabled: window.shell.activeOverlay !== "settings" && !window.vodOpen && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
+    readonly property bool subtitleDialogActive: window.vod !== null && Boolean(window.vod.subtitleDialogOpen)
+    readonly property bool overlayShortcutsEnabled: window.shell.activeOverlay !== "settings" && !window.vodOpen && !window.subtitleDialogActive && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
     readonly property bool liveShortcutsEnabled: window.overlayShortcutsEnabled && !livePage.searchFieldActive
     readonly property var forwardedShortcuts: {
         const shortcuts = [
@@ -209,7 +233,7 @@ ApplicationWindow {
     function toggleVod(kind = "movies") {
         if (window.vodTransitioning) return true
         if (window.textEditorFocused || window.shell.activeOverlay === "settings"
-            || downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
+            || window.subtitleDialogActive || downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
             return false
         if (window.vodOpen && window.vodLibraryKind === kind) closeVod()
         else window.openVodLibrary(kind)
@@ -284,6 +308,7 @@ ApplicationWindow {
         if (window.shell.activeOverlay === "none" && window.vod) window.vod.finishLibraryBrowsing()
     }
     function dispatchShortcut(key, modifiers, text) {
+        if (window.subtitleDialogActive) return true
         if (downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
             return false
         if (window.vodOpen) {
@@ -300,7 +325,7 @@ ApplicationWindow {
     function shortcutEnabled(scope) {
         if (window.modeNavigationFocused && scope !== "always") return false
         if (livePage.vodSeasonFocused && (scope === "live" || scope === "overlay")) return false
-        if (downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
+        if (window.subtitleDialogActive || downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
             return false
         if (window.vodOpen) return false
         if (scope === "vodBack") {
@@ -351,7 +376,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "V"
         autoRepeat: false
-        enabled: !window.textEditorFocused && window.shell.activeOverlay !== "settings"
+        enabled: !window.subtitleDialogActive && !window.textEditorFocused && window.shell.activeOverlay !== "settings"
             && !window.pendingLiveNavigation && !(window.vod && window.vod.liveTransition)
             && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
         onActivated: window.toggleVod()
@@ -359,7 +384,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "B"
         autoRepeat: false
-        enabled: !window.textEditorFocused && window.shell.activeOverlay !== "settings"
+        enabled: !window.subtitleDialogActive && !window.textEditorFocused && window.shell.activeOverlay !== "settings"
             && !window.pendingLiveNavigation && !(window.vod && window.vod.liveTransition)
             && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
         onActivated: window.toggleVod("series")
@@ -374,7 +399,7 @@ ApplicationWindow {
 
     Shortcut {
         sequence: "Escape"
-        enabled: !downloadUi.choosingFile && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
+        enabled: !window.subtitleDialogActive && !downloadUi.choosingFile && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
         onActivated: {
             if (downloadUi.handleEscape())
                 return
@@ -400,7 +425,7 @@ ApplicationWindow {
         mainWindow: window
         downloadIndicatorVisible: downloadUi.indicatorVisible
         topBarExternalHideLock: windowChromeBar.interactionActive || mediaModeChrome.interactionActive
-            || windowResizeHandles.interactionActive || downloadUi.interactionActive
+            || windowResizeHandles.interactionActive || window.subtitleDialogActive || downloadUi.interactionActive
         onTopBarExternalHideLockChanged: {
             if (topBarExternalHideLock) livePage.revealUi("pointer")
         }
@@ -439,7 +464,7 @@ ApplicationWindow {
             anchors.fill: parent
             visible: window.vodLibraryKind === "movies"
             enabled: visible && window.vodOpen && !window.vodTransitioning
-                && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible
+                && !window.subtitleDialogActive && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible
             transform: Translate { y: (1 - window.vodSlideProgress) * vodOverlayFrame.height }
             // qmllint disable unqualified
             catalog: vodCatalog
@@ -461,7 +486,7 @@ ApplicationWindow {
             anchors.fill: parent
             visible: window.vodLibraryKind === "series"
             enabled: visible && window.vodOpen && !window.vodTransitioning
-                && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible
+                && !window.subtitleDialogActive && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible
             transform: Translate { y: (1 - window.vodSlideProgress) * vodOverlayFrame.height }
             // qmllint disable unqualified
             catalog: vodSeriesCatalog
@@ -484,7 +509,7 @@ ApplicationWindow {
         repeat: true
         running: window.vod && window.vod.libraryReturnPending
         onTriggered: {
-            if (window.shell.activeOverlay !== "settings" && !window.vodTransitioning && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible)
+            if (window.shell.activeOverlay !== "settings" && !window.vodTransitioning && !window.subtitleDialogActive && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible)
                 window.vod.deliverLibraryReturn()
         }
     }
@@ -534,6 +559,7 @@ ApplicationWindow {
         window: window
         livePage: livePage
         targetVisible: livePage.topBarVisible
+        vodPalette: window.vodPalette
         uiTransparency: window.settings.uiTransparency
         z: 30
     }
@@ -549,6 +575,7 @@ ApplicationWindow {
         targetVisible: livePage.showHoverUi || window.vodMounted || window.pendingLiveNavigation
             || (window.vod && window.vod.liveTransition) || livePage.chromeAnimationsRunning
         selectedMode: window.selectedMediaMode
+        vodPalette: window.vodPalette
         navigationEnabled: window.modeNavigationEnabled
         uiTransparency: window.settings.uiTransparency
         onModeRequested: mode => window.selectMediaMode(mode)
@@ -567,13 +594,14 @@ ApplicationWindow {
     }
 
     BusyIndicator {
+        objectName: "ui.sourceRefresh.busy"
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.margins: Theme.spacingM
         anchors.topMargin: Theme.spacingM + window.topBarReservedHeight
-        running: window.app.isBusy
+        running: window.app.isBusy || Boolean(window.vod && window.vod.sourceSyncInProgress)
         visible: running
-        z: 20
+        z: 31
     }
 
     Rectangle {
@@ -618,7 +646,7 @@ ApplicationWindow {
         controller: window.updates
         uiTransparency: window.settings.uiTransparency
         allowedToOpen: window.visible && window.visibility !== Window.Minimized
-            && !downloadUi.interactionActive && !dvrExitDialog.visible
+            && !window.subtitleDialogActive && !downloadUi.interactionActive && !dvrExitDialog.visible
             && window.pendingCloseSource === "" && !window.downloads.shuttingDown
             && window.shell.activeOverlay !== "settings" && !window.multiView.degradePromptVisible
     }

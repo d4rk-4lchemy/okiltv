@@ -19,6 +19,8 @@ struct VodDependencies {
     std::function<Result<VodMediaProbe>(const PlaybackDescriptor &, const RequestContext &)> mediaProbe;
     std::function<Result<std::optional<ArtworkRef>>(const QUuid &, const ArtworkRef &, const RequestContext &)> cachedArtwork;
     std::shared_ptr<IVodMovieListsRepository> lists;
+    std::function<Result<QJsonObject>(const ContentRef &, const RequestContext &)> subtitles;
+    std::function<QVariantList(const ContentRef &, const QJsonObject &)> subtitleFiles;
     [[nodiscard]] bool complete() const;
 };
 class VodCatalogService {

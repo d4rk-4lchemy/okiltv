@@ -71,6 +71,7 @@ public:
     Q_INVOKABLE void play(bool fromBeginning = false);
     Q_INVOKABLE void selectAudioOption(int index);
     Q_INVOKABLE void selectSubtitleOption(int index);
+    Q_INVOKABLE void removeSubtitleOption(int index);
     Q_INVOKABLE void requestPoster(int row);
     Q_INVOKABLE void requestProgress(int row);
     Q_INVOKABLE void requestResolution(int row);
@@ -91,6 +92,7 @@ private:
     void updatePlayingSummary();
     void applyProgress(const ContentRef &, const VodProgress &);
     void updateMediaPresentation();
+    void updateSubtitlePresentation();
     void readMediaMetadata(const ContentRef &, const VodDetails &);
     void waitForStorage();
     void stopWaitingForStorage();

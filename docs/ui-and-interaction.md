@@ -47,13 +47,36 @@ transient playback chrome, without floating outer gaps or residual dark scrims a
 chrome hides. Extend the existing bottom timeline for playback modes rather than
 adding a competing scrubber.
 
+During VOD, supported bottom-aligned text subtitles follow the animated top edge
+of the bottom transport panel with a 10 px gap and return to their user position
+when it hides. The video surface supplies a scale-independent inset to libmpv;
+ASS/SSA and bitmap subtitle layouts are preserved. See
+[VOD transport](vod.md#progress-and-transport) for format and lifecycle details.
+
+VOD subtitle selectors always include `Upload subtitles...`, including unprobed or
+subtitle-free movies/episodes. Borrowed embedded options are disabled individually;
+Default, Off and uploaded files remain actionable. File selection is modal, preserves
+focus and uses session-owned pause/resume. Uploaded rows expose a remove action; Delete
+removes the selected upload. See [uploaded subtitles](vod.md#uploaded-subtitles).
+
 ## Media mode navigation
 
 `MediaModeChrome` centers `MediaModeSwitch`: Movies, Live TV, Series, independently
 of the title bar in windowed, maximized and fullscreen modes.
-The neutral 300 × 34 px capsule has three equal segments, 3 px insets and a
-rounded grey selection that slides in 180 ms with OutCubic easing. It shrinks to
+The 300 × 34 px capsule and custom title bar follow the current media context.
+A mounted library (including its closing animation) or active/paused VOD, including
+episode transitions, uses the neutral VOD palette; otherwise they use Live colors.
+VOD backgrounds use `overlaySidebar`; switch selection uses
+`overlaySurfaceInteractive`, hover uses `overlaySurfaceRaised` and pressed uses
+`overlaySurfaceMuted`. Window buttons use the same neutral hover/pressed fills,
+preserving the red close icon. The Live switch retains the channel rail palette.
+All these fills follow the global UI transparency draft
+(including live preview and discard), without fading labels or keyboard focus.
+It has three equal segments, 3 px insets and a rounded selection that slides in
+180 ms with OutCubic easing. It shrinks to
 216 px in narrow windows. It selects by click or keyboard, without dragging.
+The Live TV Guide button begins directly below the 50 px navigation container,
+leaving 8 px between the visible switch and Guide in every window mode.
 The custom title bar retains its original 33 px height, 18 px app icon, bold 13 px
 title and 30 × 30 px window buttons. It hides in fullscreen. Empty title-bar areas
 retain native system move, double-click maximization and Windows Snap.
@@ -226,8 +249,10 @@ separate overflow-dependent scrollbars for information and episodes.
 
 B and V share shortcut gating, overlay slide animation and input ownership.
 Separate instances of the shared library retain independent browsing state. Series
-details add seasons and a virtualized episode list: clicks select, Play/Enter
-starts/resumes. Opening details or returning from playback focuses episodes
+details add seasons and a virtualized episode list: single clicks select;
+double-click, Play or Enter starts/resumes through the same metadata gate.
+Status buttons consume double-clicks without starting playback. Opening details
+or returning from playback focuses episodes
 without Tab. Up/Down move one row, clamp at list boundaries and reveal selection;
 Enter/Return starts the model-selected episode. Left/Right in the details list
 change seasons in selector order, clamp at the ends and select the first episode;
@@ -237,7 +262,7 @@ the playback panel retains Left/Right focus navigation. Open popups own their ke
 Changing episodes keeps the series information, layout, focus and scroll stable.
 Only playback actions and track presentation follow the selected episode. Its
 own measured metadata enables Audio/Subtitles; borrowed metadata from the newest
-cached measurement in the same season fills completely disabled controls.
+cached measurement in the same season fills disabled audio controls and individually disabled embedded subtitle rows; local subtitle upload remains available.
 Borrowed data does not change preferences, resolution or progress.
 Native list key navigation is
 disabled so it cannot independently move the highlight. Back stays fixed;

@@ -23,6 +23,7 @@ struct PlaybackRequest {
     QMap<QString, QString> validatedEngineOptions;
     bool startPaused = false;
     QJsonObject trackPreferences;
+    QVariantList externalSubtitles;
 };
 struct PlaybackEvent {
     QUuid loadToken;
