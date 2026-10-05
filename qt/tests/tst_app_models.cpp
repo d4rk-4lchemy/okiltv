@@ -924,12 +924,12 @@ void AppModelTests::vodRuntimeNativePlayback()
     const auto mediaPath = dir.filePath(QStringLiteral("vod.mkv"));
     QFile subtitles(dir.filePath(QStringLiteral("subtitles.srt")));
     QVERIFY(subtitles.open(QIODevice::WriteOnly));
-    subtitles.write("1\n00:00:00,000 --> 00:00:59,000\nLocal subtitle\n");
+    subtitles.write("1\n00:00:00,000 --> 00:01:59,000\nLocal subtitle\n");
     subtitles.close();
     QProcess generator;
     generator.start(QStringLiteral("ffmpeg"), {QStringLiteral("-v"), QStringLiteral("error"),
-        QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"), QStringLiteral("color=c=red:s=160x120:r=10:d=60"),
-        QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"), QStringLiteral("sine=frequency=440:duration=60"),
+        QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"), QStringLiteral("color=c=red:s=160x120:r=10:d=120"),
+        QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"), QStringLiteral("sine=frequency=440:duration=120"),
         QStringLiteral("-i"), subtitles.fileName(),
         QStringLiteral("-map"), QStringLiteral("0:v"), QStringLiteral("-map"), QStringLiteral("1:a"),
         QStringLiteral("-map"), QStringLiteral("1:a"), QStringLiteral("-map"), QStringLiteral("2:s"),
@@ -1047,7 +1047,7 @@ void AppModelTests::vodRuntimeNativePlayback()
         catalog.play(true);
     }
     QTRY_VERIFY_WITH_TIMEOUT(runtime.isPlaying(), 10000);
-    QVERIFY(runtime.playerObject()); QVERIFY(runtime.seekable()); QVERIFY(runtime.durationSeconds() > 59);
+    QVERIFY(runtime.playerObject()); QVERIFY(runtime.seekable()); QVERIFY(runtime.durationSeconds() > 119);
     QTRY_VERIFY(runtime.positionSeconds() > 0.2);
     QTRY_VERIFY(runtime.playbackMetadata(ref));
     QCOMPARE(runtime.playbackMetadata(ref)->videoWidth, std::optional<int>(160));
@@ -1097,8 +1097,10 @@ void AppModelTests::vodRuntimeNativePlayback()
     QVERIFY(player.currentChannel().isEmpty());
     runtime.togglePause();
     QTRY_COMPARE(runtime.module()->session()->snapshot().state, SessionState::Paused);
-    runtime.seekRelative(35);
-    QTRY_VERIFY(runtime.positionSeconds() >= 35);
+    // Durable resume starts only at 60 seconds. A shorter checkpoint restarts
+    // at zero and would let a long wait pass through ordinary playback alone.
+    runtime.seekRelative(70);
+    QTRY_VERIFY(runtime.positionSeconds() >= 70);
     QVERIFY(runtime.isPaused());
     auto *retainedBackend = qobject_cast<OKILTV::Player::MpvPlayer *>(runtime.playerObject());
     QVERIFY(retainedBackend);
@@ -1116,12 +1118,16 @@ void AppModelTests::vodRuntimeNativePlayback()
     QVERIFY(runtime.debugOverlaySnapshot().isEmpty());
     RequestContext context; context.source = source.revision;
     std::optional<VodProgress> saved;
-    QTRY_VERIFY((saved = std::get<std::optional<VodProgress>>(runtime.store()->read(ref, context))) && saved->positionMs >= 35000);
+    QTRY_VERIFY((saved = std::get<std::optional<VodProgress>>(runtime.store()->read(ref, context))) && saved->positionMs >= 70000);
     QCOMPARE(saved->trackPreferences.value(QStringLiteral("audio")).toObject().value(QStringLiteral("id")).toInt(), secondAudio);
     QCOMPARE(saved->trackPreferences.value(QStringLiteral("sub")).toObject().value(QStringLiteral("mode")).toString(), QStringLiteral("off"));
     QVERIFY(settings.current().channelTrackPreferences.isEmpty());
     runtime.module()->controller()->play(ref);
     QTRY_VERIFY(runtime.isPlaying());
+    // Resume includes the production five-second rewind. Check it immediately,
+    // within a deadline too short to reach this position by playing from zero.
+    const double expectedResumeSeconds = static_cast<double>(saved->positionMs - 5000) / 1000.0;
+    QTRY_VERIFY_WITH_TIMEOUT(qAbs(runtime.positionSeconds() - expectedResumeSeconds) < 2.0, 10000);
     QCOMPARE(runtime.playerObject(), retainedBackend);
     QCOMPARE(retainedBackend->m_picturePreset, QStringLiteral("warm"));
     QVERIFY(retainedBackend->m_imageSmoothingEnabled);
@@ -1133,8 +1139,6 @@ void AppModelTests::vodRuntimeNativePlayback()
         return false;
     };
     QTRY_VERIFY(uploadedAvailable()); // Reload uses the private copy after the original was deleted.
-    QTRY_VERIFY_WITH_TIMEOUT(runtime.positionSeconds() >= 30, 35000);
-    QVERIFY(runtime.positionSeconds() < 40);
     auto changed = profile; changed.xtreamPassword = QStringLiteral("synthetic-after");
     QVERIFY(settings.replaceProfile(profile.id, changed));
     QVERIFY(!runtime.active());

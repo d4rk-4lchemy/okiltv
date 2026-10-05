@@ -122,6 +122,10 @@ def main():
         return (named(state, "ui.vod.close") or {}).get("enabled", False)
 
     def reveal_movies(state):
+        # A disabled search field can belong to a panel already sliding in.
+        # Waiting inside key() and then sending another Left would open Groups.
+        if state["window"]["chromeAnimationsRunning"]:
+            return False
         if (named(state, "ui.vod.playback.search") or {}).get("enabled", False):
             return True
         key("Left")

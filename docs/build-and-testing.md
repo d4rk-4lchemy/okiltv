@@ -118,6 +118,12 @@ ctest --preset qt-linux-debug -L '^qml$' --output-on-failure
 ctest --preset qt-linux-debug -L vod --output-on-failure
 ```
 
+`OKILTVQtVodRuntimeTests` retains a 90-second CTest budget for its movie and
+episode render cases. Its two-minute local fixture checkpoints beyond the
+60-second resume threshold and verifies the restored position, including the
+five-second rewind, within ten seconds. Ordinary playback from zero cannot
+satisfy the resume assertion; the test does not wait for media time to catch up.
+
 | Area | Main coverage |
 |---|---|
 | Import, settings, storage, EPG | `OKILTVQtCoreTests`, `OKILTVQtDatabaseStartupTests` |
@@ -303,7 +309,9 @@ new media request and a populated playback timeline before the next navigation.
 Desktop UI scenarios must run serially and separately from native Xvfb playback
 tests because both reserve X displays. UI-12 follows current button bounds until
 hover is confirmed before clicking (or bounds stay stable for controls without
-hover telemetry), and sends transition-key bursts with an
+hover telemetry). Its playback-list reveal retries wait for settled chrome so
+a repeated Left does not open Groups after the list has already begun opening.
+It sends transition-key bursts with an
 explicit short delay so the burst remains within the animation window. Provider credentials
 are restricted to separate local manual integration, never automated tests.
 Windows hardware playback/rendering acceptance remains pending.
@@ -323,6 +331,11 @@ generated local media; setup is documented in
 [scripts/ci/README.md](../scripts/ci/README.md). CTest serializes desktop scenarios.
 Each harness invocation keeps a unique appdata/artifact directory; do not reuse
 encrypted fixture data with a new keyring.
+
+All desktop UI scenarios have a 600-second CTest limit to accommodate CI software
+rendering, including the full movie library, playback, responsive-layout and
+source settings flow. Individual readiness waits remain bounded by each
+scenario; the total budget does not extend stalled steps.
 
 The [scenario directory](../ui-tests/tests) covers channel selection, inactivity,
 Guide groups, stationary pointer behavior, transparency, downloads, multiview and

@@ -338,7 +338,7 @@ if (OKILTV_BUILD_UI_TESTS)
                 "$<TARGET_FILE:OKILTVQt>"
                 "${CMAKE_BINARY_DIR}/ui-artifacts/${scenario}")
         set_tests_properties("UI-${scenario}" PROPERTIES
-            LABELS ui TIMEOUT 300 RESOURCE_LOCK okiltv_ui_desktop)
+            LABELS ui TIMEOUT 600 RESOURCE_LOCK okiltv_ui_desktop)
     endforeach()
 endif ()
 
