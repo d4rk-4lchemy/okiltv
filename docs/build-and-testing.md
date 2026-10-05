@@ -90,6 +90,15 @@ the intended settled overlay and enabled target controls. It does not require
 each short animation phase to appear in HTTP polling: a slow CI read can span
 the entire 240 ms library slide. An ignored click or an unfinished transition
 still fails, and background Live must retain its channel and position continuity.
+Pointer tests identify source/group picker rows by stable object names; a search
+field containing the same text is not a result row. UI-12 waits for settled
+scrolling and unchanged target bounds before clicking, including hovered controls.
+It confirms the source media segment with `checked` before checking its categories,
+and waits for Series provider categories before leaving that library so Settings
+does not depend on a request cancelled by an earlier navigation step.
+The bridge exposes ancestor `scrollMoving` and supported control `checked` states
+so failures distinguish a missed selection from missing category data.
+
 The UI bridge window snapshot exposes `chromeAnimationsRunning`, `vodTransitioning`
 and `navigationFocused` for transition/focus
 arbitration. It verifies standalone navigation below the restored 33 px bar and

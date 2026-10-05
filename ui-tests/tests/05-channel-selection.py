@@ -157,19 +157,25 @@ def main():
              and channel_item(s, number).get("pinned", False)
              and selected(s) == number - 1)
 
-    def picker_row(text):
+    def picker_row(text, object_name):
         attempt = 0
+        last_bounds = None
 
         def ready(state):
-            nonlocal attempt
-            item = next((i for i in state["inventory"] if i["text"] == text
+            nonlocal attempt, last_bounds
+            # The search field/header can contain exactly the row's name.
+            item = next((i for i in state["inventory"] if i["objectName"] == object_name
+                         and i["text"] == text
                          and 0 <= i.get("bounds", {}).get("x", -1) < 340
                          and i.get("enabled", False)), None)
-            if not item:
+            if not item or state["window"]["chromeAnimationsRunning"] or item["scrollMoving"]:
+                last_bounds = None
                 return False
+            settled = item["bounds"] == last_bounds
             point_at_item(item, attempt)
+            last_bounds = item["bounds"]
             attempt += 1
-            return True
+            return settled
 
         wait("picker row accepts pointer input: " + text, ready)
 
@@ -308,7 +314,7 @@ def main():
         outside()
         pin(2)
         key("ctrl+s")
-        picker_row("Second local fixture")
+        picker_row("Second local fixture", "ui.player.source.22222222-2222-2222-2222-222222222222")
         click()
         wait("source switch with overlapping channel IDs", lambda s:
              "22222222" in s["playback"]["currentChannel"].get("profileId", ""), 20)
@@ -325,9 +331,10 @@ def main():
         key("ctrl+g")
         runner.xdotool("type", "--window", runner.window_id, "Fixture")
         time.sleep(.3)
-        picker_row("Fixture")
+        picker_row("Fixture", "ui.player.group.Fixture")
         click()
-        wait("group picker still confirms with one click", lambda s: playing(s) == 1 and any(
+        wait("group picker still confirms with one click", lambda s:
+             playing(s) == 1 and not s["multiview"]["pickerOpen"] and any(
             i["text"] == "Search channels" and 0 <= i.get("bounds", {}).get("x", -1) < 340
             for i in s["inventory"]))
     finally:

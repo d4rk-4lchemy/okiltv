@@ -5235,6 +5235,7 @@ Item {
 
                                 Text {
                                     Layout.fillWidth: true
+                                    objectName: "ui.player.source." + modelData.id
                                     text: modelData.name
                                     color: Theme.textPrimary
                                     font.pixelSize: 14
