@@ -255,14 +255,15 @@ def main():
         before = wait("Media navigation is ready", lambda s:
                       (named(s, name) or {}).get("enabled", False))
         expected = named(before, name)["bounds"]
+        live_channel = before["multiview"]["tiles"][0]["channelId"]
         live_position = before["multiview"]["tiles"][0]["position"]
         click(name, instant=True)
-        saw_library_transition = False
-        saw_live_reveal = False
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             state = runner.read_state(3)
             assert state["multiview"]["isPlaying"], "Background Live paused during library navigation"
+            assert state["multiview"]["tiles"][0]["channelId"] == live_channel, \
+                "Background Live changed channel during library navigation"
             position = state["multiview"]["tiles"][0]["position"]
             assert position >= live_position - .15, "Background Live rewound during library navigation"
             live_position = position
@@ -271,7 +272,6 @@ def main():
             assert all(abs(item["bounds"][axis] - expected[axis]) < 1 for axis in ("x", "y")), \
                 "Media switch moved with the library"
             if state["window"]["vodTransitioning"]:
-                saw_library_transition = True
                 assert not item["enabled"], "Navigation accepted input during the library animation"
                 if closing:
                     for region in state["regions"]:
@@ -279,15 +279,21 @@ def main():
                             assert region["x"] + region["width"] <= 1, "Live list opened before the library closed"
                         elif region["name"] == "right_pane":
                             assert region["x"] >= state["window"]["width"] - 1, "Live EPG opened before the library closed"
-            elif closing and state["window"]["chromeAnimationsRunning"]:
-                saw_live_reveal = True
-            elif item.get("enabled", False):
-                if closing:
-                    assert saw_library_transition, "The library close animation was not observed"
-                    assert saw_live_reveal, "The subsequent Live panel animation was not observed"
-                checks.append("Fixed media navigation and sequential library/Live animations: " + name)
+            # HTTP reads and process scheduling can outlast the 240 ms slide.
+            # Validate every sampled transition, but require the settled target
+            # rather than requiring the external runner to observe each phase.
+            # Enabled navigation alone could also mean the click was ignored.
+            elif item.get("enabled", False) and not state["window"]["chromeAnimationsRunning"] and (
+                    (closing and state["window"]["visibleOverlay"] == "none"
+                     and not named(state, "ui.vod.close")
+                     and (named(state, "ui.live.guideButton") or {}).get("enabled", False)
+                     and (named(state, "ui.live.settingsButton") or {}).get("enabled", False))
+                    or (not closing and state["window"]["visibleOverlay"] == "vod"
+                        and library_ready(state))):
+                checks.append("Fixed media navigation and completed library/Live transition: " + name)
                 return state
             time.sleep(.02)
+        runner.save_state_snapshot("media-transition-failure", state)
         raise AssertionError("Media transition did not finish: " + name)
 
     try:

@@ -85,6 +85,11 @@ exercises the standalone switch in windowed/fullscreen
 mode, library pause/resume, fixed navigation throughout library animations and
 library-close-before-Live-panel-reveal ordering during VOD-to-Live handoff, with
 background Live still playing and its observed position advancing without rewind.
+The external runner validates animation ordering in sampled states and requires
+the intended settled overlay and enabled target controls. It does not require
+each short animation phase to appear in HTTP polling: a slow CI read can span
+the entire 240 ms library slide. An ignored click or an unfinished transition
+still fails, and background Live must retain its channel and position continuity.
 The UI bridge window snapshot exposes `chromeAnimationsRunning`, `vodTransitioning`
 and `navigationFocused` for transition/focus
 arbitration. It verifies standalone navigation below the restored 33 px bar and
