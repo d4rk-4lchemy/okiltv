@@ -292,6 +292,14 @@ edits. It also covers
 Settings, Back, video-only Escape/Backspace return and narrow/wide layouts through local media. It also exercises
 the playback Stop button returning to the owning series/episode, persisting a
 resumable position and restoring it on Resume without starting another episode.
+UI-13 waits for both chrome and library animations before ordinary key input.
+Panel readiness uses the requested control after animation settles, independently
+of the Previous episode button; reveal retries do not send keys during a slide.
+Its Escape/Backspace sequence confirms visible playback controls before hiding
+them, then requires settled video-only playback before returning to details.
+Details readiness requires an enabled Play control; episode titles alone also
+occur on Continue watching cards. Restarting the same episode must produce a
+new media request and a populated playback timeline before the next navigation.
 Desktop UI scenarios must run serially and separately from native Xvfb playback
 tests because both reserve X displays. UI-12 follows current button bounds until
 hover is confirmed before clicking (or bounds stay stable for controls without
