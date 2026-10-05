@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(OKILTVQt VERSION 0.5.4 LANGUAGES CXX)
+project(OKILTVQt VERSION 0.6.0 LANGUAGES CXX)
 
 # Keep runtime identification independent of packaging metadata.  Core code also
 # uses this in tests, where QCoreApplication may not have an application version.
@@ -59,7 +59,19 @@ endif ()
 
 qt_standard_project_setup()
 
+add_subdirectory(src/core/vod)
+add_subdirectory(src/app/vod)
+
 qt_add_executable(OKILTVQt
+    src/player/mpvplaybackengine.cpp
+    src/app/vod/vodruntime.cpp
+    src/app/vod/vodruntimesubtitles.cpp
+    src/app/vod/vodsubtitlecache.cpp
+    src/app/vod/vodmediaprobe.cpp
+    src/app/vod/vodmediaprobe.h
+    src/app/vod/vodartworkcache.cpp
+    src/app/vod/vodcatalogmodel.cpp
+    src/app/vod/vodepisodesmodel.cpp
     src/app/catchupdownloadcontroller.cpp
     src/app/catchuparchivetransfer.cpp
     src/app/catchuparchivetransfer.h
@@ -168,6 +180,7 @@ qt_add_executable(OKILTVQt
     src/player/livebuffertuner.h
     src/player/cachepolicy.cpp
     src/player/mpvplayer.cpp
+    src/player/vodrangestream.cpp
     src/player/mpvplayer.h
     src/player/mpvvideoitem.cpp
     src/player/mpvvideoitem.h
@@ -186,14 +199,17 @@ qt_add_resources(OKILTVQt app_assets
         resources/icons/close.svg
         resources/icons/restart.svg
         resources/icons/diagnostics.svg
+        resources/icons/movie-info.svg
         resources/icons/download.svg
         resources/icons/dvr.svg
         resources/icons/epg-hide.svg
         resources/icons/epg-show.svg
         resources/icons/epg.svg
         resources/icons/favourites.svg
+        resources/icons/bookmark.svg
         resources/icons/fullscreen-close.svg
         resources/icons/fullscreen-enter.svg
+        resources/icons/left-arrow.svg
         resources/icons/next-channel.svg
         resources/icons/on-top.svg
         resources/icons/pause.svg
@@ -206,6 +222,8 @@ qt_add_resources(OKILTVQt app_assets
         resources/icons/settings.svg
         resources/icons/sources.svg
         resources/icons/start-from-beginning.svg
+        resources/icons/mark-watched.svg
+        resources/icons/mark-unwatched.svg
         resources/icons/stop.svg
         resources/icons/timeshift.svg
         resources/icons/group-placeholder.svg
@@ -238,6 +256,8 @@ if (UNIX AND NOT APPLE)
 endif ()
 
 target_link_libraries(OKILTVQt PRIVATE
+    OKILTVVodApplication
+    OKILTVVodInfrastructure
     ${OKILTV_SECRET_LIB}
     Qt6::Concurrent
     Qt6::Core
@@ -278,6 +298,14 @@ set(OKILTV_QML_FILES
     qml/components/UpdateAvailableDialog.qml
     qml/components/CatchupDownloads.qml
     qml/components/AppButton.qml
+    qml/components/VodPlaybackList.qml
+    qml/components/PlaybackSearchHeader.qml
+    qml/components/VodPlaybackInfo.qml
+    qml/components/VodMarqueeTitle.qml
+    qml/components/VodMarqueeController.qml
+    qml/components/VodSelector.qml
+    qml/components/VodScrollBar.qml
+    qml/components/VodEpisodesList.qml
     qml/components/ChannelBadge.qml
     qml/components/FormComboBox.qml
     qml/components/FormSpinBox.qml
@@ -288,14 +316,20 @@ set(OKILTV_QML_FILES
     qml/components/EpgHoverBubble.qml
     qml/components/GlassPanel.qml
     qml/components/IconActionButton.qml
+    qml/components/VodMovieListButton.qml
     qml/components/OverlaySectionPanel.qml
     qml/components/PathBrowseField.qml
     qml/components/SettingsRailButton.qml
     qml/components/WindowChromeBar.qml
+    qml/components/MediaModeSwitch.qml
+    qml/components/MediaModeChrome.qml
     qml/components/WindowResizeHandles.qml
     qml/components/SourceGroupsList.qml
     qml/components/SourceManagerPane.qml
+    qml/screens/VodMoviesPage.qml
+    qml/screens/VodLibraryPage.qml
     qml/screens/GuidePage.qml
+    qml/components/ChannelNumber.js
     qml/screens/LiveTvPage.qml
     qml/screens/SettingsPage.qml
 )

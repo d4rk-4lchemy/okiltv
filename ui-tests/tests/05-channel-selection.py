@@ -250,6 +250,10 @@ def main():
         # The Guide channel column is visually sticky while its text remains a
         # child of horizontally scrolled content, so inventory X can be negative.
         move(100, guide_channel_bounds["y"] + guide_channel_bounds["height"] / 2)
+        # Entering Guide with the pointer can restart the shell animation and
+        # temporarily disable input after the snapshot used above. Await the
+        # actual post-movement readiness before sending the right click.
+        wait("Guide channel ready after pointer movement", guide_channel)
         runner.xdotool("click", "3")
         wait("Guide right click opens PiP and closes overlay", lambda s:
              s["window"]["visibleOverlay"] == "none" and pip_channels(s, 2, 1))

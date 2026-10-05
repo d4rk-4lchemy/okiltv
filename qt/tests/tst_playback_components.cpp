@@ -3,6 +3,7 @@
 #include "app/playback/playbackrecovery.h"
 #include "app/playback/catchupplaybacksession.h"
 #include "app/playback/catchupstandbytransition.h"
+#include "player/mpvplayer.h"
 
 using namespace OKILTV::App::Playback;
 
@@ -16,6 +17,10 @@ private slots:
     void startupPolicies();
     void reconnectStopLoadLimitsAndCancellation();
     void reconnectReserveAndStabilization();
+    void playbackBufferUsesPlaybackClockAndContinuousMedia();
+    void playbackBufferAlignsMpegTsTimestampEpochs();
+    void reconnectAcceptsHighPlateauAndDeliveryBursts();
+    void reconnectDrainsReserveAndRejectsStaleOrFrozenPlayback();
     void watchdogsRespectContext();
     void catchupTimelineAndProgress();
     void seekQueuePublicationAndRetry();
@@ -147,15 +152,191 @@ void PlaybackTests::reconnectReserveAndStabilization()
     QVERIFY(recovery.observeRecovery(health, context, true, true, 8001));
     QVERIFY(recovery.stabilizing());
     QVERIFY(recovery.attemptTimeout(5000, 1000, 20000).isEmpty());
-    for (int i = 1; i < 12; ++i) {
+    for (int i = 1; i <= 12; ++i) {
         health.cacheDurationSeconds = i % 2 == 0 ? 7.5 : 7.0;
         recovery.observeRecovery(health, context, true, true, 8001 + i * 1000);
     }
     QVERIFY(recovery.recovered());
-    QCOMPARE(recovery.reserve(0.5, false, false, true, 5.0, 21000).action, Action::Pause);
+    QCOMPARE(recovery.reserve(0.5, false, false, true, 5.0, 22000).action, Action::Pause);
     QVERIFY(!recovery.stabilizing());
-    QCOMPARE(recovery.reserve(0.5, false, true, true, 5.0, 21001).action, Action::Stop);
+    QCOMPARE(recovery.reserve(0.5, false, true, true, 5.0, 22001).action, Action::Stop);
     QVERIFY(!recovery.attemptInFlight());
+}
+
+void PlaybackTests::playbackBufferUsesPlaybackClockAndContinuousMedia()
+{
+    using Player = OKILTV::Player::MpvPlayer;
+    QVariantMap state {{QStringLiteral("cache-duration"), 11.008},
+        {QStringLiteral("reader-pts"), 1.365333}, {QStringLiteral("cache-end"), 12.373333},
+        {QStringLiteral("raw-input-rate"), 1000000.0}};
+    auto sample = Player::playbackBufferForCacheState(1.021333, state);
+    QVERIFY(sample.seconds);
+    QVERIFY(std::abs(*sample.seconds - 11.352) < 0.000001);
+    QCOMPARE(sample.endSeconds.value(), 12.373333);
+    const auto track = [](const QString &type, double end) {
+        return QVariantMap {{QStringLiteral("type"), type}, {QStringLiteral("reader-pts"), 1.365333},
+            {QStringLiteral("cache-end"), end}, {QStringLiteral("cache-duration"), end - 1.365333}};
+    };
+    state.insert(QStringLiteral("ts-per-stream"), QVariantList {
+        track(QStringLiteral("video"), 15.0), track(QStringLiteral("audio"), 12.373333),
+        track(QStringLiteral("sub"), 2.0)});
+    sample = Player::playbackBufferForCacheState(1.021333, state);
+    QVERIFY(!sample.estimated);
+    QVERIFY(std::abs(*sample.seconds - 11.352) < 0.000001);
+    // A stationary cache end drains as actual playback advances.
+    QCOMPARE(Player::playbackBufferForCacheState(5.0, state).seconds.value(), 7.373333);
+    // No hard ceiling: a larger observed cache is published as-is.
+    state.insert(QStringLiteral("cache-duration"), 24.0 - 1.365333);
+    state.insert(QStringLiteral("cache-end"), 24.0);
+    state.insert(QStringLiteral("ts-per-stream"), QVariantList {track(QStringLiteral("video"), 25.0), track(QStringLiteral("audio"), 24.0)});
+    QCOMPARE(Player::playbackBufferForCacheState(1.0, state).seconds.value(), 23.0);
+    const auto range = [](double start, double end) {
+        return QVariantMap {{QStringLiteral("start"), start}, {QStringLiteral("end"), end}};
+    };
+    state.insert(QStringLiteral("seekable-ranges"), QVariantList {range(8.0, 24.0), range(0.0, 4.0)});
+    QCOMPARE(Player::playbackBufferForCacheState(1.0, state).seconds.value(), 3.0);
+    QVERIFY(!Player::playbackBufferForCacheState(6.0, state).seconds);
+    state.insert(QStringLiteral("seeking"), true);
+    QVERIFY(!Player::playbackBufferForCacheState(1.0, state).seconds);
+    const QVariantMap fallback {{QStringLiteral("cache-duration"), 11.008}};
+    sample = Player::playbackBufferForCacheState(1.0, fallback);
+    QVERIFY(sample.estimated);
+    QCOMPARE(sample.seconds.value(), 11.008);
+    QVERIFY(!Player::playbackBufferForCacheState(1.0, {}).seconds);
+    state.remove(QStringLiteral("seeking"));
+    state.insert(QStringLiteral("cache-duration"), 4096.0);
+    QVERIFY(!Player::playbackBufferForCacheState(1.0, state).seconds);
+}
+
+void PlaybackTests::playbackBufferAlignsMpegTsTimestampEpochs()
+{
+    using Player = OKILTV::Player::MpvPlayer;
+    const auto track = [](const QString &type, double reader, double end) {
+        return QVariantMap {{QStringLiteral("type"), type}, {QStringLiteral("reader-pts"), reader},
+            {QStringLiteral("cache-end"), end}, {QStringLiteral("cache-duration"), end - reader}};
+    };
+    // Real mpv cache states apply ts_offset only to aggregate clocks/ranges.
+    // These represent the same reserve despite very different raw MPEG-TS PTS.
+    for (const double epoch : {0.0, 0.02, 40000.0, 95440.0, -40000.0}) {
+        QVariantMap state {{QStringLiteral("cache-duration"), 11.008},
+            {QStringLiteral("reader-pts"), 1.365333}, {QStringLiteral("cache-end"), 12.373333},
+            {QStringLiteral("seekable-ranges"), QVariantList {QVariantMap {
+                {QStringLiteral("start"), 0.0}, {QStringLiteral("end"), 11.5}}}},
+            {QStringLiteral("ts-per-stream"), QVariantList {
+                track(QStringLiteral("video"), epoch + 1.4, epoch + 13.0),
+                track(QStringLiteral("audio"), epoch + 1.365333, epoch + 12.373333)}}};
+        auto sample = Player::playbackBufferForCacheState(1.021333, state);
+        QVERIFY(sample.seconds);
+        QVERIFY(!sample.estimated);
+        QVERIFY(std::abs(*sample.seconds - 11.352) < 0.000001);
+        QVERIFY(std::abs(*sample.endSeconds - 12.373333) < 0.000001);
+
+        // Known delivery stops: the corrected end stays fixed while playback
+        // consumes the reserve, rather than preserving a huge raw PTS offset.
+        sample = Player::playbackBufferForCacheState(12.35, state);
+        QVERIFY(sample.seconds);
+        QVERIFY(*sample.seconds < 0.05);
+
+        PlaybackRecovery recovery;
+        recovery.start(); recovery.beginLoad(false, 3.0, 0); recovery.loaded(0);
+        StreamHealth health;
+        RecoveryContext context;
+        health.bufferTargetSeconds = 3.0;
+        health.cacheDurationSeconds = sample.seconds;
+        health.cacheEndSeconds = sample.endSeconds;
+        for (int i = 0; i <= 12; ++i) recovery.observeRecovery(health, context, true, true, i * 1000);
+        QVERIFY(!recovery.stabilizing());
+        QVERIFY(!recovery.recovered());
+        QVERIFY(!recovery.attemptTimeout(10000, 1000, 20000).isEmpty());
+
+        // Sparse subtitles may supply the aggregate clock but must not bound A/V.
+        state.insert(QStringLiteral("reader-pts"), 2.0);
+        state.insert(QStringLiteral("cache-end"), 2.5);
+        state.insert(QStringLiteral("cache-duration"), 0.5);
+        auto streams = state.value(QStringLiteral("ts-per-stream")).toList();
+        streams.append(track(QStringLiteral("subtitle"), epoch + 2.0, epoch + 2.5));
+        state.insert(QStringLiteral("ts-per-stream"), streams);
+        sample = Player::playbackBufferForCacheState(1.021333, state);
+        QVERIFY(sample.seconds);
+        QVERIFY(!sample.estimated);
+        QVERIFY(std::abs(*sample.seconds - 11.352) < 0.000001);
+    }
+
+    // Ambiguous or missing stream correspondence uses the already rebased
+    // aggregate clock, explicitly estimated; it never guesses a huge reserve.
+    QVariantMap ambiguous {{QStringLiteral("cache-duration"), 11.0},
+        {QStringLiteral("reader-pts"), 1.0}, {QStringLiteral("cache-end"), 12.0},
+        {QStringLiteral("ts-per-stream"), QVariantList {
+            track(QStringLiteral("video"), 40001.0, 40012.0),
+            track(QStringLiteral("audio"), 50001.0, 50012.0)}}};
+    auto sample = Player::playbackBufferForCacheState(0.5, ambiguous);
+    QVERIFY(sample.estimated);
+    QCOMPARE(sample.seconds.value(), 11.5);
+    ambiguous.insert(QStringLiteral("ts-per-stream"), QVariantList {
+        track(QStringLiteral("video"), 40001.0, 40015.0)});
+    sample = Player::playbackBufferForCacheState(0.5, ambiguous);
+    QVERIFY(sample.estimated);
+    QCOMPARE(sample.seconds.value(), 11.5);
+}
+
+void PlaybackTests::reconnectAcceptsHighPlateauAndDeliveryBursts()
+{
+    for (const bool bursts : {false, true}) {
+        PlaybackRecovery recovery;
+        recovery.start();
+        recovery.beginLoad(false, 3.0, 0);
+        RecoveryContext context;
+        context.hasChannel = true;
+        StreamHealth health {11.008, 0.0, 3.0};
+        for (int i = 0; i <= 12; ++i) {
+            if (bursts) {
+                health.cacheDurationSeconds = 3.1 - (i % 3) * 0.7;
+                health.cacheSpeedBytesPerSecond = i % 3 == 0 ? 1000000.0 : 0.0;
+            }
+            recovery.observeRecovery(health, context, true, true, i * 1000);
+            QVERIFY(recovery.attemptTimeout(10000, 1000, i * 1000).isEmpty());
+            QCOMPARE(recovery.recovered(), i == 12);
+        }
+    }
+}
+
+void PlaybackTests::reconnectDrainsReserveAndRejectsStaleOrFrozenPlayback()
+{
+    PlaybackRecovery recovery;
+    recovery.start();
+    recovery.beginLoad(false, 3.0, 0);
+    RecoveryContext context;
+    context.hasChannel = true;
+    StreamHealth health {40.0, 0.0, 3.0};
+    health.cacheEndSeconds = 100.0;
+    for (int i = 0; i <= 20; ++i) {
+        health.cacheDurationSeconds = 40.0 - i;
+        recovery.observeRecovery(health, context, true, true, i * 1000);
+        QVERIFY(!recovery.recovered());
+        QVERIFY(recovery.attemptTimeout(10000, 1000, i * 1000).isEmpty());
+    }
+    health.sampleFresh = false;
+    recovery.observeRecovery(health, context, true, true, 21000);
+    QVERIFY(!recovery.recovered());
+    QCOMPARE(recovery.attemptTimeout(10000, 1000, 21000), QStringLiteral("stabilization-timeout"));
+    health.sampleFresh = true;
+    for (int i = 22; i <= 24; ++i) recovery.observeRecovery(health, context, false, false, i * 1000);
+    QVERIFY(recovery.unstable());
+
+    recovery.clearAttempt();
+    recovery.beginLoad(false, 3.0, 25000);
+    health.cacheDurationSeconds = 11.008;
+    recovery.observeRecovery(health, context, true, true, 25000);
+    context.manuallyPaused = true;
+    recovery.observeRecovery(health, context, false, false, 26000);
+    context.manuallyPaused = false;
+    recovery.observeRecovery(health, context, true, true, 60000);
+    QVERIFY(!recovery.recovered());
+    for (int i = 1; i <= 12; ++i) {
+        health.cacheEndSeconds = 100.0 + i;
+        recovery.observeRecovery(health, context, true, true, 60000 + i * 1000);
+    }
+    QVERIFY(recovery.recovered());
 }
 
 void PlaybackTests::watchdogsRespectContext()

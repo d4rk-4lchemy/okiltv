@@ -177,6 +177,11 @@ QString AppDataPaths::epgCacheFile(const QUuid &profileId)
     return QDir(epgCacheDirectory()).filePath(QStringLiteral("%1.cache").arg(profileId.toString(QUuid::WithoutBraces).toLower()));
 }
 
+QString AppDataPaths::vodArtworkDirectory(const QString &dataRoot)
+{
+    return QDir(dataRoot.isEmpty() ? dataDirectory() : dataRoot).filePath(QStringLiteral("vod-artwork"));
+}
+
 QString AppDataPaths::iconCacheDirectory()
 {
     return ensureExists(QDir(dataDirectory()).filePath(QStringLiteral("icons")));
@@ -201,6 +206,11 @@ QString AppDataPaths::ensureExists(const QString &path)
 {
     QDir().mkpath(path);
     return path;
+}
+
+QString AppDataPaths::vodSubtitlesDirectory(const QString &dataRoot)
+{
+    return ensureExists(QDir(dataRoot.isEmpty() ? dataDirectory() : dataRoot).filePath(QStringLiteral("vod-subtitles")));
 }
 
 } // namespace OKILTV::Core

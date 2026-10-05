@@ -1,4 +1,6 @@
 #pragma once
+#include "playbackrequest.h"
+#include <QMutex>
 
 #include <QTemporaryDir>
 
@@ -15,7 +17,9 @@
 #include <QtGlobal>
 
 #include <atomic>
+#include <chrono>
 #include <memory>
+#include <functional>
 #include <optional>
 #include <thread>
 #include <utility>
@@ -27,6 +31,8 @@ class CatchupStreamSession;
 class MpvPlayer final : public QObject
 {
     Q_OBJECT
+    // Fraction of the rendered surface reserved by transient VOD controls.
+    Q_PROPERTY(double subtitleBottomInset READ subtitleBottomInset WRITE setSubtitleBottomInset NOTIFY subtitleBottomInsetChanged)
 
 public:
     struct CacheReadState
@@ -44,6 +50,17 @@ public:
         qint64 maxBackBytes;
         std::optional<double> refillSeconds {};
     };
+
+    struct PlaybackBufferSnapshot
+    {
+        std::optional<double> seconds;
+        std::optional<double> endSeconds;
+        std::optional<double> inputBytesPerSecond;
+        bool estimated { true };
+        bool fresh { false };
+    };
+    static PlaybackBufferSnapshot playbackBufferForCacheState(double positionSeconds, const QVariantMap &state);
+    PlaybackBufferSnapshot playbackBufferSnapshot() const;
 
     explicit MpvPlayer(QObject *parent = nullptr);
     ~MpvPlayer() override;
@@ -67,13 +84,23 @@ public:
     QString diagnostics() const;
     bool isAvailable() const;
     bool catchupStreamProtocolAvailable() const;
+    bool vodRangeCacheEligible(const PlaybackRequest &request);
+    QByteArray vodUserAgent() const;
+    bool usesLiveMpegTsTransport() const { return m_liveStream != nullptr; }
 
     void setRenderUpdateTarget(QObject *target);
 
     bool ensureInitialized();
 
     void play(const QString &url, const QString &loadfileOptions = {});
+    bool play(const PlaybackRequest &request, const QUuid &loadToken);
     void stop();
+    void stopForHandoff(const QUuid &request);
+    void requireNativeRenderSurface() { m_nativeRenderSurface = true; }
+    bool nativeRenderSurface() const { return m_nativeRenderSurface; }
+    bool renderContextAvailable() const { return m_renderContextAvailable.load(); }
+    // Render thread only, with its GL context current.
+    void releaseRenderContext();
     void setHwdec(const QString &mode);
     void togglePause();
     void setPaused(bool paused);
@@ -86,6 +113,7 @@ public:
     void seekAbsoluteFast(double seconds);
     void seekAbsoluteExact(double seconds);
     double position() const;
+    std::optional<double> duration() const;
     std::optional<bool> seekable() const;
     std::optional<bool> pauseState() const;
     std::optional<bool> bufferingState() const;
@@ -110,11 +138,16 @@ public:
     bool deinterlaceEnabled() const;
 
     QVariantList trackList() const;
+    double subtitleBottomInset() const { return m_subtitleBottomInset; }
+    void setSubtitleBottomInset(double fraction);
     void selectAudioTrack(int id, bool remember = false);
     void selectSubtitleTrack(int id, bool remember = false);
     void configureTrackPreferences(const QString &profileId, const QString &channelKey,
-                                   const QJsonObject &preferences, bool discardMissing = true);
+                                   const QJsonObject &preferences, bool discardMissing = true, bool rememberDefault = false);
     bool managesTrackPreferences() const;
+    void updateExternalSubtitles(const QVariantList &, const QJsonObject &, const QUuid &);
+    void removeExternalSubtitle(const QString &, const QUuid &, std::function<void(bool)>);
+    void resetExternalSubtitles();
 
     void detectAndApplyDeinterlace();
 
@@ -128,6 +161,13 @@ public:
     qint64 lastRenderUpdateTimestampMs() const;
 
 signals:
+    void externalSubtitleError(const QUuid &loadToken);
+    void subtitleBottomInsetChanged();
+    void renderContextReady();
+    void handoffStopped(const QUuid &request, bool success);
+    void mediaLoaded(const QUuid &loadToken);
+    void mediaEnded(const QUuid &loadToken, OKILTV::Player::EndReason reason, bool retryable = false);
+    void mediaSeekCompleted(const QUuid &loadToken);
     void trackListReady(quint64 generation, const QVariantList &tracks);
     void trackPreferenceChanged(const QString &profileId, const QString &channelKey,
                                 const QString &type, const QJsonObject &preference);
@@ -142,6 +182,30 @@ signals:
     void errorOccurred(const QString &message);
 
 private:
+    QVariantList decorateExternalTracks(QVariantList tracks) const;
+    QVariantList m_externalSubtitles;
+    QSet<QString> m_addedSubtitles;
+    QSet<QString> m_loadingSubtitles;
+    QHash<QString, std::function<void(bool)>> m_pendingSubtitleRemovals;
+    struct SubtitleCommand { QUuid token; std::function<void(bool)> done; QString addedId; };
+    QHash<quint64, SubtitleCommand> m_subtitleCommands;
+    void updateSubtitlePosition();
+    double m_subtitleBottomInset = 0.0;
+    double m_originalSubtitlePosition = 100.0;
+    double m_appliedSubtitlePosition = 100.0;
+    bool m_bottomAlignedSubtitles = true;
+    bool playWithPolicy(const QString &url, const QString &options, TransportPolicy policy);
+    QMutex m_loadMutex;
+    bool m_nativeRenderSurface = false;
+    std::atomic_bool m_renderContextAvailable{false};
+    QUuid m_pendingLoadToken;
+    QUuid m_activeLoadToken;
+    qint64 m_activePlaylistId = -1;
+    bool m_typedSeekInProgress = false;
+    quint64 m_nextTypedStopRequest = 1000;
+    QHash<quint64, QUuid> m_typedStopTokens;
+    QHash<quint64, QUuid> m_handoffStopTokens;
+    bool m_typedRemoteMedia = false;
     void beginTrackLoad(const QString &url);
     QString trackLoadOptions(const QString &options) const;
     int loadFileLocked(const QString &url, const QString &options);
@@ -156,6 +220,7 @@ private:
     QString m_trackChannelKey;
     QJsonObject m_trackPreferences;
     bool m_discardMissingTrackPreferences { true };
+    bool m_rememberDefaultTrack { false };
     QVariantList m_readyTracks;
     QMap<QString, int> m_defaultTrackIds;
     QSet<QString> m_restoredTrackTypes;
@@ -169,6 +234,7 @@ private:
     struct CachedTelemetry
     {
         double positionSeconds { -1.0 };
+        std::optional<double> durationSeconds;
         std::optional<bool> seekable;
         std::optional<bool> pauseState;
         std::optional<bool> bufferingState;
@@ -177,6 +243,9 @@ private:
         std::optional<CacheReadState> cacheReadState;
         std::optional<std::pair<double, double>> demuxerSeekableRangeSeconds;
         std::optional<double> cacheSpeedBytesPerSecond;
+        PlaybackBufferSnapshot playbackBuffer;
+        std::chrono::steady_clock::time_point bufferSampledAt {};
+        quint64 bufferGeneration { 0 };
         std::optional<int> videoWidth;
         std::optional<int> videoHeight;
         std::optional<QString> videoCodec;
@@ -218,7 +287,10 @@ private:
     std::optional<bool> propertyFlag(const char *name) const;
     std::optional<bool> propertyNodeBoolField(const char *prop, const char *key) const;
     std::optional<double> propertyNodeDoubleField(const char *prop, const char *key) const;
-    std::optional<std::pair<double, double>> propertyDemuxerSeekableRangeSeconds(std::optional<CacheReadState> *readState = nullptr) const;
+    std::optional<std::pair<double, double>> propertyDemuxerSeekableRangeSeconds(
+        double positionSeconds, std::optional<CacheReadState> *readState, PlaybackBufferSnapshot *buffer) const;
+    void invalidatePlaybackBuffer();
+    std::atomic_bool m_bufferSeeking { false };
     std::optional<QString> propertyString(const char *name) const;
 
     static void *getProcAddress(void *ctx, const char *name);
@@ -260,6 +332,7 @@ private:
     QPointer<QObject> m_updateTarget;
     std::atomic_bool m_frameUpdateQueued { false };
     CachedTelemetry m_cachedTelemetry;
+    bool m_vodRangeProtocolAvailable = false;
     std::atomic_bool m_eventThreadRunning { false };
     std::unique_ptr<std::thread> m_eventThread;
     std::atomic_bool m_trackListRefreshPending { false };

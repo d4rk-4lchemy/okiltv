@@ -6,9 +6,11 @@
 #include <QSemaphore>
 #include <QTest>
 #include <QThread>
+#include <QThreadStorage>
 #include <QTimer>
 
 #include <stdexcept>
+#include <atomic>
 
 class DatabaseStartupTests final : public QObject
 {
@@ -17,6 +19,7 @@ private slots:
     void migrationKeepsGuiResponsiveAndClosesDialog();
     void ordinaryStartupDoesNotShowDialog();
     void failureClosesDialogAndPreservesException();
+    void repeatedWorkersFinishThreadCleanupBeforeReturning();
 };
 
 namespace {
@@ -93,6 +96,29 @@ void DatabaseStartupTests::failureClosesDialogAndPreservesException()
         QCOMPARE(QString::fromUtf8(error.what()), QStringLiteral("migration fixture failure"));
     }
     QVERIFY(!visibleRebuildDialog());
+}
+
+void DatabaseStartupTests::repeatedWorkersFinishThreadCleanupBeforeReturning()
+{
+    struct CleanupMarker {
+        std::atomic_int *count;
+        ~CleanupMarker() { ++*count; }
+    };
+    std::atomic_int cleanupCount { 0 };
+    QThreadStorage<CleanupMarker *> storage;
+    for (int attempt = 0; attempt < 32; ++attempt) {
+        bool workerThread = false;
+        OKILTV::App::runDatabaseStartup([&](const auto &) {
+            workerThread = QThread::currentThread() != qApp->thread();
+            storage.setLocalData(new CleanupMarker { &cleanupCount });
+            // Exercise Qt's deferred deletion as well as thread-local storage.
+            auto *object = new QObject;
+            QObject::connect(object, &QObject::destroyed, [ &cleanupCount ] { ++cleanupCount; });
+            object->deleteLater();
+        });
+        QVERIFY(workerThread);
+        QCOMPARE(cleanupCount.load(), (attempt + 1) * 2);
+    }
 }
 
 QTEST_MAIN(DatabaseStartupTests)

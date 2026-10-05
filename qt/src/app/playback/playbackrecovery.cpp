@@ -11,7 +11,9 @@ constexpr int kReconnectMaxAttempts = 5;
 constexpr int kReconnectTransportSettleMs = 450;
 constexpr int kReconnectStabilizationStableTickThreshold = 12;
 constexpr int kReconnectStabilizationUnstableTickThreshold = 3;
-constexpr int kReconnectStabilizationMinRefillTicks = 2;
+constexpr qint64 kReconnectHealthyPlaybackMs = 12000;
+constexpr qint64 kReconnectDeliveryWindowMs = 5000;
+constexpr double kReconnectBufferToleranceSeconds = 0.25;
 constexpr int kNoRefillTickThreshold = 3;
 constexpr int kVideoFreezeTickThreshold = 3;
 constexpr int kDecoderStallTickThreshold = 6;
@@ -46,6 +48,13 @@ void PlaybackRecovery::resetStabilization() {
     m_reconnectRecoveryUnhealthyTickCount = 0;
     m_reconnectStabilizationRefillTickCount = 0;
     m_lastReconnectStabilizationCacheDurationSeconds.reset();
+    m_lastReconnectCacheEndSeconds.reset();
+    m_stablePlaybackStartedMs.reset();
+    m_lastRecoveryObservationMs.reset();
+    m_lastRecoveryDeliveryMs.reset();
+    m_recoveryWindowCacheSeconds.reset();
+    m_latestRecoveryPlayable = false;
+    m_stabilizationReady = false;
 }
 void PlaybackRecovery::clearAttempt() {
     if (active()) m_phase = Phase::Ready;
@@ -85,12 +94,17 @@ void PlaybackRecovery::loaded(qint64 nowMs) {
     m_reserveProgressMs = nowMs;
 }
 bool PlaybackRecovery::totalExpired(int waitMs, qint64 nowMs) const {
+    if (stabilizing() && m_latestRecoveryPlayable && m_lastRecoveryObservationMs
+        && nowMs - *m_lastRecoveryObservationMs <= 2000) return false;
     return attemptInFlight() && nowMs - m_totalStartedMs >= std::max(120000, waitMs * 3);
 }
 // Preserve the established positional contract; parameter names identify their roles.
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 QString PlaybackRecovery::attemptTimeout(int waitMs, int sampleIntervalMs, qint64 nowMs) {
     if (!attemptInFlight()) return {};
+    // A deadline schedules health assessment; it must not tear down playable media.
+    if (stabilizing() && m_latestRecoveryPlayable && m_lastRecoveryObservationMs
+        && nowMs - *m_lastRecoveryObservationMs <= 2000) return {};
     const auto limit = stabilizing() ? std::max(waitMs, (kReconnectStabilizationStableTickThreshold + 3) * sampleIntervalMs) : waitMs;
     if (nowMs - m_attemptStartedMs < limit) return {};
     return stabilizing() ? QStringLiteral("stabilization-timeout") : QStringLiteral("attempt-timeout");
@@ -131,8 +145,7 @@ PlaybackRecovery::ReserveResult PlaybackRecovery::reserve(std::optional<double> 
     return {action, true, {}};
 }
 bool PlaybackRecovery::recovered() const {
-    return stabilizing() && m_reconnectRecoveryHealthyTickCount >= kReconnectStabilizationStableTickThreshold
-        && m_reconnectStabilizationRefillTickCount >= kReconnectStabilizationMinRefillTicks;
+    return stabilizing() && m_stabilizationReady;
 }
 bool PlaybackRecovery::unstable() const {
     return stabilizing() && m_reconnectRecoveryUnhealthyTickCount >= kReconnectStabilizationUnstableTickThreshold;
@@ -382,7 +395,7 @@ bool PlaybackRecovery::observeRecovery(const StreamHealth &health, const Recover
 {
     bool restoreStrict = false;
 
-    if (!active() || !attemptInFlight() || !context.hasChannel || context.startupPending
+    if (!active() || !attemptInFlight() || !context.hasChannel || context.startupPending || context.manuallyPaused
         || context.failed) {
         resetStabilization();
         m_reconnectRecoveryHealthyTickCount = 0;
@@ -411,7 +424,7 @@ bool PlaybackRecovery::observeRecovery(const StreamHealth &health, const Recover
             m_reconnectRecoveryHealthyTickCount = 1;
             m_reconnectRecoveryUnhealthyTickCount = 0;
             // Catch-up stabilization intentionally ignores cache-duration/cache-speed samples.
-            m_reconnectStabilizationRefillTickCount = kReconnectStabilizationMinRefillTicks;
+            m_reconnectStabilizationRefillTickCount = 0;
             Core::DebugLogger::instance().log(
                 QStringLiteral("player"),
                 QStringLiteral("Reconnect attempt entered catch-up stabilization phase."));
@@ -428,6 +441,7 @@ bool PlaybackRecovery::observeRecovery(const StreamHealth &health, const Recover
             m_reconnectRecoveryHealthyTickCount = 0;
             m_reconnectRecoveryUnhealthyTickCount = 0;
         }
+        m_stabilizationReady = m_reconnectRecoveryHealthyTickCount >= kReconnectStabilizationStableTickThreshold;
 
         if (playerTraceEnabled()) {
             Core::DebugLogger::instance().log(
@@ -474,14 +488,18 @@ bool PlaybackRecovery::observeRecovery(const StreamHealth &health, const Recover
 
     const auto backendHealthy = !context.buffering && !context.stalled;
     const auto frameHealthy = framePtsAdvanced.value_or(playbackAdvanced);
-    const auto refillPositive = cacheRefilling;
+    const auto endAdvanced = health.cacheEndSeconds && m_lastReconnectCacheEndSeconds
+        && *health.cacheEndSeconds > *m_lastReconnectCacheEndSeconds + kNoRefillCacheIncreaseEpsilonSeconds;
+    m_lastReconnectCacheEndSeconds = health.cacheEndSeconds;
+    const auto refillPositive = health.sampleFresh && (cacheRefilling || endAdvanced
+        || normalizedCacheSpeed > kNoRefillCacheSpeedThresholdBytesPerSecond);
     const auto cacheAtOrAboveTarget = hasCacheSample
-        && normalizedCacheDuration + kNoRefillCacheIncreaseEpsilonSeconds >= normalizedBufferTarget;
+        && normalizedCacheDuration + kReconnectBufferToleranceSeconds >= normalizedBufferTarget;
     const auto cacheCriticallyLow = hasCacheSample
         && normalizedCacheDuration <= kReconnectDepletedBufferThresholdSeconds;
 
     if (!stabilizing()) {
-        const auto candidateHealthy = backendHealthy && playbackAdvanced && frameHealthy
+        const auto candidateHealthy = health.sampleFresh && hasCacheSample && backendHealthy && playbackAdvanced && frameHealthy
             && !cacheCriticallyLow && (m_reconnectReserveReady || cacheAtOrAboveTarget);
         if (!candidateHealthy) {
             m_reconnectRecoveryHealthyTickCount = 0;
@@ -495,6 +513,12 @@ bool PlaybackRecovery::observeRecovery(const StreamHealth &health, const Recover
         m_reconnectRecoveryHealthyTickCount = 1;
         m_reconnectRecoveryUnhealthyTickCount = 0;
         m_reconnectStabilizationRefillTickCount = 1;
+        m_stablePlaybackStartedMs = nowMs;
+        m_lastRecoveryObservationMs = nowMs;
+        m_latestRecoveryPlayable = true;
+        m_recoveryWindowCacheSeconds = hasCacheSample ? std::optional<double>(normalizedCacheDuration) : std::nullopt;
+        m_recoveryWindowStartedMs = nowMs;
+        if (refillPositive) m_lastRecoveryDeliveryMs = nowMs;
         restoreStrict = true;
         Core::DebugLogger::instance().log(
             QStringLiteral("player"),
@@ -511,35 +535,63 @@ bool PlaybackRecovery::observeRecovery(const StreamHealth &health, const Recover
 
     if (refillPositive) {
         m_reconnectStabilizationRefillTickCount += 1;
+        m_lastRecoveryDeliveryMs = nowMs;
     }
 
     // A healthy player normally consumes cache between provider bursts.
     // Refill evidence is counted separately; draining alone is not failure.
-    const auto stableTick = backendHealthy && playbackAdvanced && frameHealthy && !cacheCriticallyLow;
+    const auto stableTick = health.sampleFresh && hasCacheSample && backendHealthy && playbackAdvanced && frameHealthy && !cacheCriticallyLow;
     const auto unstableTick = cacheCriticallyLow || !backendHealthy || !frameHealthy;
 
+    if (m_lastRecoveryObservationMs && nowMs - *m_lastRecoveryObservationMs > 2000) {
+        m_stablePlaybackStartedMs.reset(); // Pause/missing observations never count as healthy time.
+        m_recoveryWindowCacheSeconds.reset();
+        m_lastRecoveryDeliveryMs.reset();
+    }
+    m_lastRecoveryObservationMs = nowMs;
+    m_latestRecoveryPlayable = stableTick && hasCacheSample;
+    if (!m_recoveryWindowCacheSeconds && hasCacheSample) {
+        m_recoveryWindowCacheSeconds = normalizedCacheDuration;
+        m_recoveryWindowStartedMs = nowMs;
+    }
+    const auto windowDraining = m_recoveryWindowCacheSeconds && hasCacheSample
+        && normalizedCacheDuration + kReconnectBufferToleranceSeconds < *m_recoveryWindowCacheSeconds;
+    const auto recentDelivery = m_lastRecoveryDeliveryMs
+        && nowMs - *m_lastRecoveryDeliveryMs <= kReconnectDeliveryWindowMs;
+    const auto reserveHealthy = (cacheAtOrAboveTarget && !windowDraining)
+        || (recentDelivery && hasCacheSample && normalizedCacheDuration > 0.5);
+    if (nowMs - m_recoveryWindowStartedMs >= kReconnectDeliveryWindowMs && hasCacheSample) {
+        m_recoveryWindowCacheSeconds = normalizedCacheDuration;
+        m_recoveryWindowStartedMs = nowMs;
+    }
+
     if (stableTick) {
+        if (!m_stablePlaybackStartedMs) m_stablePlaybackStartedMs = nowMs;
         m_reconnectRecoveryHealthyTickCount += 1;
         m_reconnectRecoveryUnhealthyTickCount = 0;
     } else if (unstableTick) {
+        m_stablePlaybackStartedMs.reset();
         m_reconnectRecoveryUnhealthyTickCount += 1;
         m_reconnectRecoveryHealthyTickCount = 0;
     } else {
+        m_stablePlaybackStartedMs.reset();
         m_reconnectRecoveryHealthyTickCount = 0;
         m_reconnectRecoveryUnhealthyTickCount = 0;
     }
+    m_stabilizationReady = stableTick && reserveHealthy && m_stablePlaybackStartedMs
+        && nowMs - *m_stablePlaybackStartedMs >= kReconnectHealthyPlaybackMs;
 
     if (playerTraceEnabled()) {
         Core::DebugLogger::instance().log(
             QStringLiteral("player"),
             QStringLiteral(
-                "Reconnect stabilization tick: stable=%1/%2 unstable=%3/%4 refill=%5/%6 cache=%7 target=%8 cache-speed=%9B/s draining=%10 buffering=%11 stalled=%12.")
+                "Reconnect stabilization tick: stable=%1 healthy-ms=%2/12000 unstable=%3/%4 delivery-evidence=%5 fresh=%6 cache=%7 target=%8 cache-speed=%9B/s draining=%10 buffering=%11 stalled=%12 reserve-healthy=%13.")
                 .arg(m_reconnectRecoveryHealthyTickCount)
-                .arg(kReconnectStabilizationStableTickThreshold)
+                .arg(m_stablePlaybackStartedMs ? nowMs - *m_stablePlaybackStartedMs : 0)
                 .arg(m_reconnectRecoveryUnhealthyTickCount)
                 .arg(kReconnectStabilizationUnstableTickThreshold)
                 .arg(m_reconnectStabilizationRefillTickCount)
-                .arg(kReconnectStabilizationMinRefillTicks)
+                .arg(health.sampleFresh ? QStringLiteral("true") : QStringLiteral("false"))
                 .arg(hasCacheSample ? QString::number(normalizedCacheDuration, 'f', 3) : QStringLiteral("N/A"))
                 .arg(QString::number(normalizedBufferTarget, 'f', 3))
                 .arg(
@@ -548,7 +600,8 @@ bool PlaybackRecovery::observeRecovery(const StreamHealth &health, const Recover
                         : QStringLiteral("N/A"))
                 .arg(cacheDraining ? QStringLiteral("true") : QStringLiteral("false"))
                 .arg(context.buffering ? QStringLiteral("true") : QStringLiteral("false"))
-                .arg(context.stalled ? QStringLiteral("true") : QStringLiteral("false")));
+                .arg(context.stalled ? QStringLiteral("true") : QStringLiteral("false"))
+                .arg(reserveHealthy ? QStringLiteral("true") : QStringLiteral("false")));
     }
     return restoreStrict;
 }

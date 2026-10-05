@@ -9,6 +9,8 @@ Button {
     property bool danger: false
     property bool compact: false
     property bool borderless: false
+    property bool retainEnabledAppearance: false
+    readonly property bool visuallyEnabled: enabled || retainEnabledAppearance
 
     implicitWidth: Math.max(compact ? 80 : 96, contentItem.implicitWidth + leftPadding + rightPadding)
     implicitHeight: compact ? 34 : 40
@@ -23,7 +25,7 @@ Button {
     contentItem: Text {
         text: control.text
         font: control.font
-        color: control.enabled ? Theme.textPrimary : Theme.textMuted
+        color: control.visuallyEnabled ? Theme.textPrimary : Theme.textMuted
         horizontalAlignment: Text.AlignHCenter
         verticalAlignment: Text.AlignVCenter
         elide: Text.ElideRight
@@ -33,7 +35,7 @@ Button {
     background: Rectangle {
         radius: Theme.radiusS
         color: {
-            if (!control.enabled)
+            if (!control.visuallyEnabled)
                 return Theme.surface
             if (control.danger)
                 return control.down ? "#a84f4f" : (control.hovered ? "#d56767" : Theme.danger)

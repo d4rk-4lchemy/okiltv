@@ -35,6 +35,8 @@ public:
     static QString epgCacheDirectory();
     static QString epgCacheFile(const QUuid &profileId);
     static QString iconCacheDirectory();
+    static QString vodArtworkDirectory(const QString &dataRoot = {});
+    static QString vodSubtitlesDirectory(const QString &dataRoot = {});
     static QString screenshotsDirectory();
     static QString recordingsDirectory();
     static QString timeshiftDirectory();

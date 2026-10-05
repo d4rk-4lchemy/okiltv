@@ -44,7 +44,7 @@ public:
 class BlockingNetworkAccess final : public NetworkAccess
 {
 public:
-    explicit BlockingNetworkAccess(int timeoutMs = 30000);
+    explicit BlockingNetworkAccess(int timeoutMs = 90000);
 
     QByteArray get(const QUrl &url) const override;
     QByteArray get(const QUrl &url, const std::function<bool()> &cancelled) const override;
@@ -53,12 +53,12 @@ public:
         const std::function<void(qint64)> &progress = {}) const override;
 
 private:
-    int m_timeoutMs { 30000 };
+    int m_timeoutMs { 90000 };
 };
 
 quint64 addNetworkObserver(const NetworkObserver &observer);
 void removeNetworkObserver(quint64 observerId);
 
-std::shared_ptr<NetworkAccess> makeDefaultNetworkAccess(int timeoutMs = 30000);
+std::shared_ptr<NetworkAccess> makeDefaultNetworkAccess(int timeoutMs = 90000);
 
 } // namespace OKILTV::Core

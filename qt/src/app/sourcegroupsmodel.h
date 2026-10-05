@@ -17,6 +17,8 @@ class SourceGroupsModel final : public QAbstractListModel
     Q_PROPERTY(int selectedCount READ selectedCount NOTIFY groupsChanged)
     Q_PROPERTY(int totalCount READ totalCount NOTIFY groupsChanged)
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
+    Q_PROPERTY(QString errorText READ errorText NOTIFY groupsChanged)
+    Q_PROPERTY(bool hasEmptyDraftSelection READ hasEmptyDraftSelection NOTIFY groupsChanged)
     Q_PROPERTY(bool dirty READ dirty NOTIFY dirtyChanged)
     Q_PROPERTY(bool autoPersist READ autoPersist WRITE setAutoPersist NOTIFY autoPersistChanged)
     Q_PROPERTY(bool hideUnchecked READ hideUnchecked WRITE setHideUnchecked NOTIFY hideUncheckedChanged)
@@ -37,7 +39,9 @@ public:
     explicit SourceGroupsModel(
         Core::SettingsManager *settings,
         Core::DatabaseService *database,
-        QObject *parent = nullptr);
+        QObject *parent = nullptr,
+        QString mediaType = {},
+        std::function<QList<Core::ChannelCategory>(const QUuid &)> loader = {});
 
     int rowCount(const QModelIndex &parent = {}) const override;
     QVariant data(const QModelIndex &index, int role) const override;
@@ -51,6 +55,9 @@ public:
     int totalCount() const;
     bool loading() const;
     bool dirty() const;
+    QString errorText() const { return m_syncError.isEmpty() ? m_errorText : m_syncError; }
+    void setSyncState(bool loading, const QString &error);
+    bool hasEmptyDraftSelection() const;
     bool autoPersist() const;
     void setAutoPersist(bool value);
     bool hideUnchecked() const;
@@ -68,10 +75,11 @@ public:
     Q_INVOKABLE bool deselectAll();
     Q_INVOKABLE bool moveGroup(const QString &groupId, int targetIndex);
     Q_INVOKABLE bool reorderVisibleGroups(const QStringList &visibleOrderedIds);
-    Q_INVOKABLE void saveDraftChanges();
+    Q_INVOKABLE bool saveDraftChanges();
     Q_INVOKABLE void discardDraftChanges();
 
 signals:
+    void groupsSaved(const QString &profileId, bool selectionChanged);
     void selectionEdited(const QString &profileId);
     void profileIdChanged();
     void groupsChanged();
@@ -110,6 +118,13 @@ private:
     DraftState persistedDraftState(const QString &profileId) const;
     bool draftStatesEqual(const DraftState &left, const DraftState &right) const;
 
+    QString preferenceKey(const QString &id) const;
+    QString m_mediaType;
+    QString m_errorText;
+    QString m_syncError;
+    bool m_syncLoading = false;
+    std::function<QList<Core::ChannelCategory>(const QUuid &)> m_loader;
+    QHash<QString, QString> m_searchByProfile;
     Core::SettingsManager *m_settings;
     Core::DatabaseService *m_database;
     QString m_profileId;

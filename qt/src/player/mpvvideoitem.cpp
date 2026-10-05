@@ -82,6 +82,10 @@ QString visibilityLabel(const QWindow::Visibility visibility)
 class MpvVideoRenderer final : public QQuickFramebufferObject::Renderer, protected QOpenGLFunctions
 {
 public:
+    ~MpvVideoRenderer() override
+    {
+        if (m_player && m_player->nativeRenderSurface()) m_player->releaseRenderContext();
+    }
     QOpenGLFramebufferObject *createFramebufferObject(const QSize &size) override
     {
         QOpenGLFramebufferObjectFormat format;
@@ -112,7 +116,9 @@ public:
         }
 
         m_playerController = qobject_cast<App::PlayerController *>(m_item->playerController());
-        m_player = qobject_cast<MpvPlayer *>(m_item->playerObject());
+        auto *nextPlayer = qobject_cast<MpvPlayer *>(m_item->playerObject());
+        if (m_player && m_player != nextPlayer && m_player->nativeRenderSurface()) m_player->releaseRenderContext();
+        m_player = nextPlayer;
         if (m_player == nullptr && m_playerController != nullptr) {
             m_player = m_playerController->player();
         }
@@ -147,7 +153,7 @@ private:
     bool m_initialized { false };
     QPointer<MpvVideoItem> m_item;
     App::PlayerController *m_playerController = nullptr;
-    MpvPlayer *m_player = nullptr;
+    QPointer<MpvPlayer> m_player;
     QSize m_lastRenderSize;
 };
 

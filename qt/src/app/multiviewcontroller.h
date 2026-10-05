@@ -68,6 +68,9 @@ public:
     QObject *pipControllerObject() const;
     PlayerController *prepareCatchupPictureInPicture();
     void shutdownPlaybackSessions();
+    bool hasRecordingForHandoff() const;
+    void releasePlaybackForHandoff(const QUuid &, std::function<void(bool)>);
+    std::function<bool(std::function<void()>)> playbackStartGate;
     void runStartupPlayerCleanup();
     quint64 pipRevision() const { return m_pipRevision; }
     bool isActive() const;

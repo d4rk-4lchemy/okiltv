@@ -6,10 +6,11 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPainter>
+#include <QThread>
 #include <QTimer>
 
-#include <chrono>
-#include <future>
+#include <exception>
+#include <memory>
 
 namespace OKILTV::App {
 namespace {
@@ -83,15 +84,24 @@ void runDatabaseStartup(const std::function<void(const std::function<void()> &)>
             if (!qEnvironmentVariableIsSet("OKILTV_HEADLESS_TEST")) dialog.show();
         }, Qt::QueuedConnection);
     };
-    auto worker = std::async(std::launch::async, [task, rebuildStarted]() { task(rebuildStarted); });
-    QTimer completionTimer;
-    QObject::connect(&completionTimer, &QTimer::timeout, &eventLoop, [&]() {
-        if (worker.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) eventLoop.quit();
-    });
-    completionTimer.start(20);
+    std::exception_ptr failure;
+    // Keep Qt/SQLite work on a Qt-owned thread. In Windows MinGW builds,
+    // adopted std::async threads can crash during Qt's thread-local cleanup.
+    const std::unique_ptr<QThread> worker(QThread::create([&]() {
+        try {
+            task(rebuildStarted);
+        } catch (...) {
+            failure = std::current_exception();
+        }
+    }));
+    QObject::connect(worker.get(), &QThread::finished, &eventLoop, &QEventLoop::quit,
+                     Qt::QueuedConnection);
+    worker->start();
     eventLoop.exec();
-    // Joining before dialog destruction also protects queued callback lifetime.
-    worker.get();
+    // finished precedes native/TLS teardown; wait before releasing captures or
+    // propagating an error to the GUI thread.
+    worker->wait();
+    if (failure) std::rethrow_exception(failure);
 }
 
 } // namespace OKILTV::App

@@ -67,6 +67,15 @@ set_tests_properties(
 
 qt_add_executable(OKILTVQtAppTests
     tst_app_models.cpp
+    ../src/app/vod/vodruntime.cpp
+    ../src/app/vod/vodruntimesubtitles.cpp
+    ../src/app/vod/vodsubtitlecache.cpp
+    ../src/app/vod/vodmediaprobe.cpp
+    ../src/app/vod/vodmediaprobe.h
+    ../src/app/vod/vodartworkcache.cpp
+    ../src/app/vod/vodcatalogmodel.cpp
+    ../src/app/vod/vodepisodesmodel.cpp
+    ../src/player/mpvplaybackengine.cpp
     ../src/app/catchupdownloadcontroller.cpp
     ../src/app/catchuparchivetransfer.cpp
     ../src/app/catchuparchivetransfer.h
@@ -163,14 +172,22 @@ qt_add_executable(OKILTVQtAppTests
     ../src/player/livebuffertuner.h
     ../src/player/cachepolicy.cpp
     ../src/player/mpvplayer.cpp
+    ../src/player/vodrangestream.cpp
     ../src/player/mpvplayer.h
     ../src/player/mpvvideoitem.cpp
     ../src/player/mpvvideoitem.h
 )
 
+# The large Debug test translation unit exceeds the standard PE/COFF section limit.
+if (MINGW)
+    set_source_files_properties(tst_app_models.cpp PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")
+endif ()
+
 target_include_directories(OKILTVQtAppTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 
 target_link_libraries(OKILTVQtAppTests PRIVATE
+    OKILTVVodApplication
+    OKILTVVodInfrastructure
     Qt6::Widgets
     Qt6::Concurrent
     Qt6::Core
@@ -227,6 +244,18 @@ endif ()
 if (NOT CMAKE_CROSSCOMPILING)
     find_program(OKILTV_QMLTESTRUNNER qmltestrunner HINTS "${Qt6_DIR}/../../../bin" REQUIRED)
     if (OKILTV_QMLTESTRUNNER)
+        add_test(NAME OKILTVQtMediaModeSwitchTests
+            COMMAND "${OKILTV_QMLTESTRUNNER}" -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_mediamodeswitch.qml")
+        set_tests_properties(OKILTVQtMediaModeSwitchTests PROPERTIES LABELS qml TIMEOUT 60
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+        add_test(NAME OKILTVQtPlaybackSearchHeaderTests
+            COMMAND "${OKILTV_QMLTESTRUNNER}" -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_playbacksearchheader.qml")
+        set_tests_properties(OKILTVQtPlaybackSearchHeaderTests PROPERTIES LABELS qml TIMEOUT 60
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+        add_test(NAME OKILTVQtChannelNumberTests
+            COMMAND "${OKILTV_QMLTESTRUNNER}" -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_channelnumber.qml")
+        set_tests_properties(OKILTVQtChannelNumberTests PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
         add_test(NAME OKILTVQtUiTransparencyTests
             COMMAND "${OKILTV_QMLTESTRUNNER}" -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_uitransparency.qml")
         set_tests_properties(OKILTVQtUiTransparencyTests PROPERTIES
@@ -300,7 +329,9 @@ if (OKILTV_BUILD_UI_TESTS)
         08-ui-transparency
         09-catchup-download
         10-multiview-keyboard
-        11-multiview-controls)
+        11-multiview-controls
+        12-vod-movies
+        13-vod-series)
         add_test(NAME "UI-${scenario}"
             COMMAND "${OKILTV_TEST_BASH}" "${CMAKE_SOURCE_DIR}/scripts/ci/run_ui_test.sh"
                 "${CMAKE_SOURCE_DIR}/ui-tests/tests/${scenario}.py"
@@ -357,5 +388,84 @@ if (NOT CMAKE_CROSSCOMPILING AND OKILTV_QMLTESTRUNNER)
     add_test(NAME OKILTVQtUpdateUiTests COMMAND "${OKILTV_QMLTESTRUNNER}"
         -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_updateavailable.qml")
     set_tests_properties(OKILTVQtUpdateUiTests PROPERTIES LABELS qml TIMEOUT 60
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+endif ()
+
+# Stage A VOD contracts: Qt Core-only domain, fake ports/engine, no Qt Quick/mpv.
+qt_add_executable(OKILTVQtVodDomainTests vod/tst_vod_domain.cpp)
+target_link_libraries(OKILTVQtVodDomainTests PRIVATE OKILTVVodDomain Qt6::Test)
+add_test(NAME OKILTVQtVodDomainTests COMMAND OKILTVQtVodDomainTests)
+set_tests_properties(OKILTVQtVodDomainTests PROPERTIES LABELS "core;vod")
+qt_add_executable(OKILTVQtVodContractTests vod/tst_vod_contracts.cpp)
+target_link_libraries(OKILTVQtVodContractTests PRIVATE OKILTVVodApplication Qt6::Test)
+add_test(NAME OKILTVQtVodContractTests COMMAND OKILTVQtVodContractTests)
+set_tests_properties(OKILTVQtVodContractTests PROPERTIES LABELS "app;vod" TIMEOUT 60)
+
+qt_add_executable(OKILTVQtVodProviderTests vod/tst_vod_provider.cpp)
+target_link_libraries(OKILTVQtVodProviderTests PRIVATE OKILTVVodInfrastructure Qt6::Network Qt6::Test)
+add_test(NAME OKILTVQtVodProviderTests COMMAND OKILTVQtVodProviderTests)
+set_tests_properties(OKILTVQtVodProviderTests PROPERTIES LABELS "core;vod" TIMEOUT 60)
+
+qt_add_executable(OKILTVQtVodStorageTests vod/tst_vod_storage.cpp ../src/app/vod/vodsubtitlecache.cpp)
+target_link_libraries(OKILTVQtVodStorageTests PRIVATE OKILTVVodInfrastructure Qt6::Sql Qt6::Test)
+add_test(NAME OKILTVQtVodStorageTests COMMAND OKILTVQtVodStorageTests)
+set_tests_properties(OKILTVQtVodStorageTests PROPERTIES LABELS "core;vod" TIMEOUT 120)
+
+qt_add_executable(OKILTVQtVodMpvTests vod/tst_vod_mpv.cpp
+    ../src/player/mpvplaybackengine.cpp ../src/player/mpvplayer.cpp
+    ../src/player/vodrangestream.cpp
+    ../src/player/cachepolicy.cpp ../src/player/livebuffertuner.cpp
+    ../src/player/catchupstreamsession.cpp ../src/player/catchuptsjoiner.cpp
+    ../src/player/mpegtstimestampnormalizer.cpp
+    ../src/core/models.cpp ../src/core/models_variant.cpp ../src/core/datetimeformat.cpp
+    ../src/core/catchupurlresolver.cpp ../src/core/debuglogger.cpp
+    ../src/core/appdatapaths.cpp ../src/core/redaction.cpp)
+target_include_directories(OKILTVQtVodMpvTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(OKILTVQtVodMpvTests PRIVATE Qt6::Core Qt6::Gui Qt6::OpenGL Qt6::Quick Qt6::Network Qt6::Test)
+qt_add_executable(OKILTVQtVodRangeTests vod/tst_vod_range.cpp ../src/player/vodrangestream.cpp)
+target_include_directories(OKILTVQtVodRangeTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(OKILTVQtVodRangeTests PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent Qt6::Test)
+add_test(NAME OKILTVQtVodRangeTests COMMAND OKILTVQtVodRangeTests)
+set_tests_properties(OKILTVQtVodRangeTests PROPERTIES LABELS "playback;vod" TIMEOUT 60)
+find_program(OKILTV_VOD_XVFB_RUN xvfb-run)
+if (OKILTV_VOD_XVFB_RUN AND NOT CMAKE_CROSSCOMPILING)
+    add_test(NAME OKILTVQtVodMpvTests COMMAND ${OKILTV_VOD_XVFB_RUN} -a $<TARGET_FILE:OKILTVQtVodMpvTests>)
+    add_test(NAME OKILTVQtVodRuntimeTests COMMAND ${OKILTV_VOD_XVFB_RUN} -a $<TARGET_FILE:OKILTVQtAppTests> vodRuntimeNativePlayback)
+    set_tests_properties(OKILTVQtVodRuntimeTests PROPERTIES LABELS "app;vod" TIMEOUT 90
+        ENVIRONMENT "QT_QPA_PLATFORM=xcb;QSG_RHI_BACKEND=opengl;OKILTV_HEADLESS_TEST=0;OKILTV_VOD_RENDER_TEST=1;LIBGL_ALWAYS_SOFTWARE=1;GALLIUM_DRIVER=softpipe")
+    # The container's llvmpipe intermittently renders black despite valid decoded
+    # frames. Mesa softpipe exercises the same real OpenGL/render-API path reliably.
+    set_tests_properties(OKILTVQtVodMpvTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=xcb;OKILTV_HEADLESS_TEST=0;LIBGL_ALWAYS_SOFTWARE=1;GALLIUM_DRIVER=softpipe")
+else ()
+    add_test(NAME OKILTVQtVodMpvTests COMMAND OKILTVQtVodMpvTests)
+endif ()
+set_tests_properties(OKILTVQtVodMpvTests PROPERTIES LABELS "playback;vod" TIMEOUT 90)
+
+add_test(NAME OKILTVQtVodSeriesTests COMMAND OKILTVQtAppTests vodSeriesRuntime)
+set_tests_properties(OKILTVQtVodSeriesTests PROPERTIES LABELS "app;vod" TIMEOUT 90 ENVIRONMENT "QT_QPA_PLATFORM=offscreen;OKILTV_HEADLESS_TEST=1")
+add_test(NAME OKILTVQtVodStorageStartupTests COMMAND OKILTVQtAppTests vodLibraryWaitsForStorage)
+set_tests_properties(OKILTVQtVodStorageStartupTests PROPERTIES LABELS "app;vod" TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=offscreen;OKILTV_HEADLESS_TEST=1")
+
+if (OKILTV_QMLTESTRUNNER)
+    add_test(NAME OKILTVQtVodPlaybackUiTests COMMAND "${OKILTV_QMLTESTRUNNER}"
+        -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_vodplaybackpanels.qml")
+    add_test(NAME OKILTVQtVodMarqueeTests COMMAND "${OKILTV_QMLTESTRUNNER}"
+        -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_vodmarquee.qml")
+    set_tests_properties(OKILTVQtVodMarqueeTests PROPERTIES LABELS "qml;vod" TIMEOUT 60
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+    set_tests_properties(OKILTVQtVodPlaybackUiTests PROPERTIES LABELS "qml;vod" TIMEOUT 60
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/qml-artifacts/vod-movies")
+    add_test(NAME OKILTVQtVodUiTests COMMAND "${OKILTV_QMLTESTRUNNER}"
+        -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_vodmovies.qml")
+    set_tests_properties(OKILTVQtVodUiTests PROPERTIES LABELS "qml;vod" TIMEOUT 60
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/qml-artifacts/vod-movies"
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+endif ()
+
+if (NOT CMAKE_CROSSCOMPILING AND OKILTV_QMLTESTRUNNER)
+    add_test(NAME OKILTVQtSourceMediaUiTests COMMAND "${OKILTV_QMLTESTRUNNER}"
+        -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_sourcemedia.qml")
+    set_tests_properties(OKILTVQtSourceMediaUiTests PROPERTIES LABELS "qml;vod" TIMEOUT 60
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
 endif ()

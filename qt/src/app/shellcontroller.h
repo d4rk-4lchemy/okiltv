@@ -9,6 +9,7 @@ namespace OKILTV::App {
 class ShellController final : public QObject
 {
     Q_OBJECT
+    Q_PROPERTY(int vodLibrarySidebarWidth READ vodLibrarySidebarWidth NOTIFY vodLibrarySidebarWidthChanged)
     Q_PROPERTY(bool overlaysVisible READ overlaysVisible WRITE setOverlaysVisible NOTIFY overlaysVisibleChanged)
     Q_PROPERTY(bool fullscreen READ fullscreen WRITE setFullscreen NOTIFY fullscreenChanged)
     Q_PROPERTY(QString layoutBand READ layoutBand NOTIFY layoutBandChanged)
@@ -19,6 +20,8 @@ class ShellController final : public QObject
 public:
     explicit ShellController(Core::SettingsManager *settings, QObject *parent = nullptr);
 
+    int vodLibrarySidebarWidth() const;
+    Q_INVOKABLE bool setVodLibrarySidebarWidth(int width);
     bool overlaysVisible() const;
     bool fullscreen() const;
     QString layoutBand() const;
@@ -41,6 +44,7 @@ public slots:
     Q_INVOKABLE void setReopenMaximizedOnLaunch(bool value);
 
 signals:
+    void vodLibrarySidebarWidthChanged();
     void userActivity();
     void overlaysVisibleChanged();
     void fullscreenChanged();

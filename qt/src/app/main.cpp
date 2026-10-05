@@ -1,4 +1,6 @@
 #include "appcontroller.h"
+#include "vod/vodruntime.h"
+#include "vod/vodcatalogmodel.h"
 #include "updatecheckcontroller.h"
 #include "catchupdownloadcontroller.h"
 #include "databasestartup.h"
@@ -44,6 +46,7 @@
 #include <QTimer>
 
 #include <clocale>
+#include <QLocale>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -118,7 +121,8 @@ void updateDisplaySleepBlockerForWindowState(
     OKILTV::App::DisplaySleepBlocker *blocker,
     const OKILTV::App::SettingsController *settingsController,
     const OKILTV::App::PlayerController *playerController,
-    const QQuickWindow *window)
+    const QQuickWindow *window,
+    bool vodPlaying = false)
 {
     if (blocker == nullptr) {
         return;
@@ -133,7 +137,7 @@ void updateDisplaySleepBlockerForWindowState(
     const auto windowAllowsBlocking = visibility != QWindow::Hidden
         && visibility != QWindow::Minimized;
     const auto shouldBlock = settingsController->preventDisplaySleep()
-        && playerController->isPlaying()
+        && (playerController->isPlaying() || vodPlaying)
         && windowAllowsBlocking;
     blocker->setBlocked(shouldBlock);
 }
@@ -435,6 +439,8 @@ void registerQmlContextProperties(
     engine.rootContext()->setContextProperty(QStringLiteral("catchupDownloadController"), appController->downloadController());
     engine.rootContext()->setContextProperty(QStringLiteral("profilesModel"), services.profilesModel.get());
     engine.rootContext()->setContextProperty(QStringLiteral("channelListModel"), services.channelListModel.get());
+    engine.rootContext()->setContextProperty(QStringLiteral("channelDecimalSeparator"),
+        QCoreApplication::instance()->property("channelDecimalSeparator"));
     engine.rootContext()->setContextProperty(QStringLiteral("nowNextModel"), services.nowNextModel.get());
     engine.rootContext()->setContextProperty(QStringLiteral("playbackNowNextModel"), services.playbackNowNextModel.get());
     engine.rootContext()->setContextProperty(QStringLiteral("epgGridModel"), services.epgGridModel.get());
@@ -515,6 +521,7 @@ int main(int argc, char *argv[])
     auto resolvedStartupOptions = startupOptions;
     resolvePortableRuntimeContext(&resolvedStartupOptions);
     OKILTV::Core::AppDataPaths::initializeRuntime(resolvedStartupOptions.runtimeContext);
+    application.setProperty("channelDecimalSeparator", QLocale::system().decimalPoint());
     std::setlocale(LC_NUMERIC, "C");
     application.setOrganizationName(QStringLiteral("OKILTV"));
     application.setApplicationName(QStringLiteral("OKILTV"));
@@ -570,6 +577,52 @@ int main(int argc, char *argv[])
                 appServices.uiTestBridge->setPlayerController(appServices.multiViewController->primaryController());
             });
 
+        // Per-source availability controls VOD independently of the legacy technical flag.
+        OKILTV::Vod::VodRuntime vodRuntime(coreServices.settings.get(), appServices.multiViewController.get(),
+            appServices.dvrController.get(), appServices.timeshiftController.get());
+        QObject::connect(appServices.settingsController.get(), &OKILTV::App::SettingsController::saved,
+            &vodRuntime, &OKILTV::Vod::VodRuntime::applyPictureSettings);
+        QObject::connect(&vodRuntime, &OKILTV::Vod::VodRuntime::errorOccurred,
+            appServices.multiViewController.get(), &OKILTV::App::MultiViewController::statusMessageRequested);
+        QObject::connect(&vodRuntime, &OKILTV::Vod::VodRuntime::sourcesReconciled,
+            appServices.profilesModel.get(), &OKILTV::App::ProfilesModel::reload);
+
+        QObject::connect(appController.get(), &OKILTV::App::AppController::sourceRefreshRequested,
+            &vodRuntime, &OKILTV::Vod::VodRuntime::synchronizeSource);
+        OKILTV::App::SourceGroupsModel movieSourceGroups(coreServices.settings.get(), coreServices.database.get(), nullptr,
+            QStringLiteral("movies"), [&vodRuntime](const QUuid &id) { return vodRuntime.sourceCategories(id, OKILTV::Vod::CatalogKind::Movies); });
+        OKILTV::App::SourceGroupsModel seriesSourceGroups(coreServices.settings.get(), coreServices.database.get(), nullptr,
+            QStringLiteral("series"), [&vodRuntime](const QUuid &id) { return vodRuntime.sourceCategories(id, OKILTV::Vod::CatalogKind::Series); });
+        for (auto *groups : {&movieSourceGroups, &seriesSourceGroups}) {
+            groups->setAutoPersist(false);
+            const auto updateSyncState = [&vodRuntime, groups]() {
+                const QUuid id(groups->profileId());
+                groups->setSyncState(vodRuntime.syncing(id), vodRuntime.syncError(id));
+            };
+            QObject::connect(&vodRuntime, &OKILTV::Vod::VodRuntime::sourceSyncChanged, groups,
+                [updateSyncState](const QUuid &) { updateSyncState(); });
+            QObject::connect(groups, &OKILTV::App::SourceGroupsModel::profileIdChanged, groups, updateSyncState);
+            QObject::connect(&vodRuntime, &OKILTV::Vod::VodRuntime::categoriesUpdated, groups, [groups](const QUuid &id) {
+                if (QUuid(groups->profileId()) == id) groups->reload();
+            });
+            QObject::connect(&vodRuntime, &OKILTV::Vod::VodRuntime::sourcesReconciled, groups, &OKILTV::App::SourceGroupsModel::reload);
+        }
+        QObject::connect(&seriesSourceGroups, &OKILTV::App::SourceGroupsModel::groupsSaved, &vodRuntime,
+            [&vodRuntime](const QString &id, bool selectionChanged) { if (selectionChanged) vodRuntime.policyChanged(QUuid(id)); else emit vodRuntime.sourceUpdated(QUuid(id)); });
+        QObject::connect(&movieSourceGroups, &OKILTV::App::SourceGroupsModel::groupsSaved, &vodRuntime,
+            [&vodRuntime](const QString &id, bool selectionChanged) {
+                if (selectionChanged) vodRuntime.policyChanged(QUuid(id));
+                else emit vodRuntime.sourceUpdated(QUuid(id));
+            });
+        OKILTV::Vod::VodCatalogModel vodCatalog(&vodRuntime, coreServices.settings.get());
+        OKILTV::Vod::VodCatalogModel vodSeriesCatalog(&vodRuntime, coreServices.settings.get(), nullptr,
+            OKILTV::Vod::VodCatalogModel::Purpose::Library, OKILTV::Vod::CatalogKind::Series);
+        QObject::connect(&vodRuntime, &OKILTV::Vod::VodRuntime::seriesReturnRequested,
+            &vodSeriesCatalog, &OKILTV::Vod::VodCatalogModel::openSeries);
+        OKILTV::Vod::VodCatalogModel vodPlaybackCatalog(&vodRuntime, coreServices.settings.get(), nullptr,
+            OKILTV::Vod::VodCatalogModel::Purpose::PlaybackSidebar);
+        QObject::connect(appServices.settingsController.get(), &OKILTV::App::SettingsController::saved,
+            &vodCatalog, &OKILTV::Vod::VodCatalogModel::reloadSources);
         startupStep(QStringLiteral("Creating QQmlApplicationEngine."));
         QQmlApplicationEngine engine;
         startupStep(QStringLiteral("Registering QML context properties."));
@@ -578,6 +631,12 @@ int main(int argc, char *argv[])
                 appController.get(), &OKILTV::App::AppController::dismissGroupAutoEnableNotice);
         }
         registerQmlContextProperties(engine, appController.get(), appServices);
+        engine.rootContext()->setContextProperty(QStringLiteral("movieSourceGroupsModel"), &movieSourceGroups);
+        engine.rootContext()->setContextProperty(QStringLiteral("seriesSourceGroupsModel"), &seriesSourceGroups);
+        engine.rootContext()->setContextProperty(QStringLiteral("vodRuntime"), &vodRuntime);
+        engine.rootContext()->setContextProperty(QStringLiteral("vodCatalog"), &vodCatalog);
+        engine.rootContext()->setContextProperty(QStringLiteral("vodSeriesCatalog"), &vodSeriesCatalog);
+        engine.rootContext()->setContextProperty(QStringLiteral("vodPlaybackCatalog"), &vodPlaybackCatalog);
         startupStep(QStringLiteral("QML context properties registered."));
 
         startupStep(QStringLiteral("Loading main QML."));
@@ -616,51 +675,57 @@ int main(int argc, char *argv[])
                 mainWindow,
                 &QWindow::visibilityChanged,
                 &application,
-                [&appServices, mainWindow]() {
+                [&appServices, &vodRuntime, mainWindow]() {
                     updateDisplaySleepBlockerForWindowState(
                         appServices.displaySleepBlocker.get(),
                         appServices.settingsController.get(),
                         appServices.multiViewController->primaryController(),
-                        mainWindow);
+                        mainWindow, vodRuntime.isPlaying());
                 });
             QObject::connect(
                 mainWindow,
                 &QWindow::windowStateChanged,
                 &application,
-                [&appServices, mainWindow]() {
+                [&appServices, &vodRuntime, mainWindow]() {
                     updateDisplaySleepBlockerForWindowState(
                         appServices.displaySleepBlocker.get(),
                         appServices.settingsController.get(),
                         appServices.multiViewController->primaryController(),
-                        mainWindow);
+                        mainWindow, vodRuntime.isPlaying());
                 });
             QObject::connect(
                 appServices.multiViewController.get(),
                 &OKILTV::App::MultiViewController::primaryPlaybackChanged,
                 &application,
-                [&appServices, mainWindow]() {
+                [&appServices, &vodRuntime, mainWindow]() {
                     updateDisplaySleepBlockerForWindowState(
                         appServices.displaySleepBlocker.get(),
                         appServices.settingsController.get(),
                         appServices.multiViewController->primaryController(),
-                        mainWindow);
+                        mainWindow, vodRuntime.isPlaying());
                 });
             QObject::connect(
                 appServices.settingsController.get(),
                 &OKILTV::App::SettingsController::settingsChanged,
                 &application,
-                [&appServices, mainWindow]() {
+                [&appServices, &vodRuntime, mainWindow]() {
                     updateDisplaySleepBlockerForWindowState(
                         appServices.displaySleepBlocker.get(),
                         appServices.settingsController.get(),
                         appServices.multiViewController->primaryController(),
-                        mainWindow);
+                        mainWindow, vodRuntime.isPlaying());
                 });
             updateDisplaySleepBlockerForWindowState(
                 appServices.displaySleepBlocker.get(),
                 appServices.settingsController.get(),
                 appServices.multiViewController->primaryController(),
-                mainWindow);
+                mainWindow, vodRuntime.isPlaying());
+            QObject::connect(&vodRuntime, &OKILTV::Vod::VodRuntime::stateChanged, mainWindow,
+                [&appServices, &vodRuntime, mainWindow]() {
+                    updateDisplaySleepBlockerForWindowState(appServices.displaySleepBlocker.get(),
+                        appServices.settingsController.get(), appServices.multiViewController->primaryController(),
+                        mainWindow, vodRuntime.isPlaying());
+                });
         }
         appServices.uiTestCaptureController->setWindow(engine.rootObjects().constFirst());
         appServices.uiTestBridge->setWindow(engine.rootObjects().constFirst());
@@ -672,6 +737,7 @@ int main(int argc, char *argv[])
                 return;
             }
             shutdownHandled = true;
+            vodRuntime.shutdown();
             appServices.updateCheckController->shutdown();
 
             OKILTV::Core::DebugLogger::instance().log(

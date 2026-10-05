@@ -1,4 +1,5 @@
 #include "m3uservice.h"
+#include "channelnumber.h"
 
 #include <QFile>
 #include <QFileInfo>
@@ -316,6 +317,7 @@ Channel M3UService::parseEntry(
     channel.tvgName = tvgName.trimmed().isEmpty() ? displayName : tvgName.trimmed();
     channel.iconUrl = logo;
     channel.source = ChannelSource::M3U;
+    channel.channelNumber = normalizeChannelNumber(attributeValue(attributes, QStringLiteral("tvg-chno")));
     channel.sortOrder = index + 1;    // 1-based display order
     channel.profileId = profileId;
 

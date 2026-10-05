@@ -17,6 +17,7 @@
 
 #include <optional>
 #include <atomic>
+#include <utility>
 
 namespace OKILTV::App {
 
@@ -91,6 +92,7 @@ public slots:
     void refreshActiveProfile();
     Q_INVOKABLE void refreshActiveEpg();
     Q_INVOKABLE bool activatePreviousChannel();
+    Q_INVOKABLE bool returnToLive();
     Q_INVOKABLE void playCatchup(const QVariantMap &channel, const QVariantMap &program);
     Q_INVOKABLE void resumeCatchup(const QVariantMap &channel, const QVariantMap &program);
     Q_INVOKABLE void playCatchupAtOffset(const QVariantMap &channel, const QVariantMap &program, double targetSeconds);
@@ -103,6 +105,7 @@ public slots:
     Q_INVOKABLE QString debugSummary() const;
 
 signals:
+    void sourceRefreshRequested(const QString &profileId);
     void groupAutoEnableNoticesChanged();
     void timeshiftProgramChanged();
     void timeshiftProgramTitleChanged();
@@ -183,6 +186,7 @@ private:
     Core::EpgCacheService m_epgCacheService;
     Core::IconCacheService m_iconCacheService;
     QList<Core::Channel> m_loadedChannels;
+    std::optional<std::pair<QUuid, int>> m_lastPrimaryChannel;
     QStringList m_groupAutoEnableNoticeProfileIds;
     QString m_statusText { QStringLiteral("Ready") };
     bool m_isBusy { false };

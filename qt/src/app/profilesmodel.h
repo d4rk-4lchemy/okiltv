@@ -40,7 +40,8 @@ public:
         const QString &password,
         const QString &xmltvUrl = {},
         int autoRefreshIntervalHours = 24,
-        int catchupSafetyMinutes = 3);
+        int catchupSafetyMinutes = 3,
+        bool vodEnabled = true);
     Q_INVOKABLE QString addM3uUrlProfile(
         const QString &name,
         const QString &m3uUrl,
@@ -58,6 +59,7 @@ public:
     Q_INVOKABLE void reload();
 
 signals:
+    void profileMutationFailed(const QString &message);
     void profileRemoved(const QString &profileId);
     void activeProfileIdChanged();
     void profileSelectionRequested(const QString &profileId);

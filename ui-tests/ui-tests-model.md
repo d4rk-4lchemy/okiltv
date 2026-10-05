@@ -45,7 +45,7 @@ Endpoints:
 
 `GET /state` returns:
 
-- `window`: dimensions, X11 window id, overlay/layout/focus state
+- `window`: dimensions, X11 window id, overlay/layout/focus state; `chromeAnimationsRunning` includes playback, title-bar and standalone media-navigation transitions, and `navigationFocused` reports media-switch keyboard ownership. `vodTransitioning` identifies the library slide so tests can verify fixed navigation and delayed Live panel reveal. Wait for chrome animations to finish before a key that is intentionally ignored during transitions.
 - `regions`: named regions with absolute + normalized geometry
 - `elements`: semantic UI elements/state
 - `playback`: current channel/playback/timeshift/debug overlay snapshot

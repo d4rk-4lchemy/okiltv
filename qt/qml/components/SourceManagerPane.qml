@@ -3,7 +3,6 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import OKILTV
 import "../theme/Theme.js" as Theme
 
 Item {
@@ -15,16 +14,28 @@ Item {
 
     property int selectedIndex: -1
     // qmllint disable unqualified
-    readonly property var profiles: profilesModel
-    readonly property var groups: settingsSourceGroupsModel
-    readonly property var liveGroups: liveSourceGroupsModel
-    readonly property var dateTime: dateTimeFormatter
-    readonly property var app: appController
-    readonly property var channelList: channelListModel
-    readonly property var shell: shellController
+    property var profiles: profilesModel
+    property var settingsGroups: settingsSourceGroupsModel
+    property var movieGroups: movieSourceGroupsModel
+    property var seriesGroups: seriesSourceGroupsModel
+    readonly property var groups: groupMediaType === 1 ? movieGroups : groupMediaType === 2 ? seriesGroups : settingsGroups
+    property var liveGroups: liveSourceGroupsModel
+    property var dateTime: dateTimeFormatter
+    property var app: appController
+    property var channelList: channelListModel
+    property var shell: shellController
     // qmllint enable unqualified
     property bool createMode: root.profiles.rowCount() === 0
     property int draftType: 0
+    property int groupMediaType: 0
+    property bool draftVodEnabled: true
+    property string saveError: ""
+    readonly property bool mediaTypesVisible: !createMode && draftType === 0 && draftVodEnabled
+    readonly property bool emptyGroupSelection: settingsGroups.hasEmptyDraftSelection
+        || movieGroups.hasEmptyDraftSelection || seriesGroups.hasEmptyDraftSelection
+        || (groups.hasGroups && groups.selectedCount === 0)
+    onMediaTypesVisibleChanged: { if (!mediaTypesVisible) groupMediaType = 0 }
+    onGroupMediaTypeChanged: groupsList.cancelDrag()
     property bool confirmDeleteVisible: false
     property string pendingDeleteProfileId: ""
     property string pendingDeleteProfileName: ""
@@ -47,7 +58,7 @@ Item {
         return root.currentEditorHasUnsavedChanges()
             || Object.keys(root.pendingProfileDrafts).length > 0
             || root.createDraftMapHasMeaningfulValues(root.pendingCreateDraftsByType)
-            || root.groups.dirty
+            || root.settingsGroups.dirty || root.movieGroups.dirty || root.seriesGroups.dirty
     }
 
     function markDirtyStateChanged() {
@@ -87,6 +98,7 @@ Item {
             "m3UUrl": normalizedText(profile.m3UUrl),
             "m3UFilePath": normalizedText(profile.m3UFilePath),
             "xmltvUrl": normalizedText(profile.xmltvUrl),
+            "vodEnabled": profile.vodEnabled ?? true,
             "catchupSafetyMinutes": Number(profile.catchupSafetyMinutes ?? 3),
             "autoRefreshIntervalHours": normalizedAutoRefreshIntervalHours(profile.autoRefreshIntervalHours)
         }
@@ -102,6 +114,7 @@ Item {
             "m3UUrl": normalizedText(m3uUrlField.text),
             "m3UFilePath": normalizedText(m3uFileField.text),
             "xmltvUrl": normalizedText(xmltvField.text),
+            "vodEnabled": root.draftVodEnabled,
             "catchupSafetyMinutes": catchupSafetyMinutesField.value,
             "autoRefreshIntervalHours": normalizedAutoRefreshIntervalHours(autoRefreshIntervalHoursField.value)
         }
@@ -117,6 +130,7 @@ Item {
             "m3UUrl": "",
             "m3UFilePath": "",
             "xmltvUrl": "",
+            "vodEnabled": true,
             "catchupSafetyMinutes": 3,
             "autoRefreshIntervalHours": 24
         }
@@ -135,6 +149,7 @@ Item {
             && normalizedText(left.m3UUrl) === normalizedText(right.m3UUrl)
             && normalizedText(left.m3UFilePath) === normalizedText(right.m3UFilePath)
             && normalizedText(left.xmltvUrl) === normalizedText(right.xmltvUrl)
+            && Boolean(left.vodEnabled ?? true) === Boolean(right.vodEnabled ?? true)
             && Number(left.catchupSafetyMinutes ?? 3) === Number(right.catchupSafetyMinutes ?? 3)
             && normalizedAutoRefreshIntervalHours(left.autoRefreshIntervalHours)
                 === normalizedAutoRefreshIntervalHours(right.autoRefreshIntervalHours)
@@ -158,6 +173,7 @@ Item {
         const hasCommonText = normalizedText(draft.name).length > 0
             || normalizedText(draft.xmltvUrl).length > 0
             || Number(draft.catchupSafetyMinutes ?? 3) !== 3
+            || (normalizedType === 0 && draft.vodEnabled === false)
         if (normalizedType === 0) {
             return hasCommonText
                 || normalizedText(draft.xtreamBaseUrl).length > 0
@@ -217,6 +233,7 @@ Item {
     function applyDraftToForm(draft) {
         const normalizedType = normalizedDraftType(draft.type)
         root.draftType = normalizedType
+        root.draftVodEnabled = draft.vodEnabled ?? true
         nameField.text = draft.name || ""
         xtreamUrlField.text = draft.xtreamBaseUrl || ""
         xtreamUserField.text = draft.xtreamUsername || ""
@@ -288,8 +305,9 @@ Item {
         createMode = false
         selectedIndex = row
         applyDraftToForm(draft)
-        root.groups.searchText = ""
-        root.groups.profileId = profile.id
+        groupsList.cancelDrag()
+        root.groupMediaType = 0
+        for (const model of [root.settingsGroups, root.movieGroups, root.seriesGroups]) model.profileId = profile.id
         markDirtyStateChanged()
     }
 
@@ -301,8 +319,9 @@ Item {
         const typeKey = String(normalizedType)
         const pendingDraft = root.pendingCreateDraftsByType[typeKey]
         applyDraftToForm(pendingDraft ? pendingDraft : createDefaultDraftForType(normalizedType))
-        root.groups.searchText = ""
-        root.groups.profileId = ""
+        groupsList.cancelDrag()
+        root.groupMediaType = 0
+        for (const model of [root.settingsGroups, root.movieGroups, root.seriesGroups]) model.profileId = ""
         markDirtyStateChanged()
     }
 
@@ -453,9 +472,9 @@ Item {
     }
 
     function saveAllChanges() {
+        saveError = ""
         saveCurrentEditorDraft()
 
-        const pendingRefreshIds = []
         const handledProfileIds = []
         const handledCreateTypeKeys = []
 
@@ -465,7 +484,7 @@ Item {
                 const currentDraft = buildDraftFromForm()
                 const persistedDraft = buildDraftFromProfile(selectedProfile)
                 if (!draftEquals(currentDraft, persistedDraft)) {
-                    root.profiles.replaceProfile(selectedProfile.id, {
+                    if (!root.profiles.replaceProfile(selectedProfile.id, {
                         "name": currentDraft.name,
                         "xtreamBaseUrl": currentDraft.xtreamBaseUrl,
                         "xtreamUsername": currentDraft.xtreamUsername,
@@ -473,11 +492,12 @@ Item {
                         "m3UUrl": currentDraft.m3UUrl,
                         "m3UFilePath": currentDraft.m3UFilePath,
                         "xmltvUrl": currentDraft.xmltvUrl,
+                        "vodEnabled": currentDraft.vodEnabled,
                         "catchupSafetyMinutes": currentDraft.catchupSafetyMinutes,
                         "autoRefreshIntervalHours": currentDraft.autoRefreshIntervalHours
-                    })
+                    })) return
                     if (sourceIdentityOrConnectionChanged(currentDraft, persistedDraft)) {
-                        pendingRefreshIds.push(selectedProfile.id)
+                        enqueueRefreshProfile(selectedProfile.id)
                     }
                 }
                 handledProfileIds.push(selectedProfile.id)
@@ -497,7 +517,8 @@ Item {
                                 currentCreateDraft.xtreamPassword,
                                 currentCreateDraft.xmltvUrl,
                                 currentCreateDraft.autoRefreshIntervalHours,
-                                currentCreateDraft.catchupSafetyMinutes)
+                                currentCreateDraft.catchupSafetyMinutes,
+                                currentCreateDraft.vodEnabled)
                 } else if (normalizedDraftType(currentCreateDraft.type) === 1) {
                     createdProfileId = root.profiles.addM3uUrlProfile(
                                 currentCreateDraft.name,
@@ -513,9 +534,10 @@ Item {
                                 currentCreateDraft.catchupSafetyMinutes)
                 }
 
+                if (createdProfileId.length === 0) return
                 if (createdProfileId.length > 0) {
                     addPendingNewSourceProfile(createdProfileId)
-                    pendingRefreshIds.push(createdProfileId)
+                    enqueueRefreshProfile(createdProfileId)
                     selectProfileById(createdProfileId)
                 }
             }
@@ -535,7 +557,7 @@ Item {
             }
 
             const persistedDraft = buildDraftFromProfile(profile)
-            root.profiles.replaceProfile(profileId, {
+            if (!root.profiles.replaceProfile(profileId, {
                 "name": draft.name,
                 "xtreamBaseUrl": draft.xtreamBaseUrl,
                 "xtreamUsername": draft.xtreamUsername,
@@ -543,14 +565,15 @@ Item {
                 "m3UUrl": draft.m3UUrl,
                 "m3UFilePath": draft.m3UFilePath,
                 "xmltvUrl": draft.xmltvUrl,
+                "vodEnabled": draft.vodEnabled,
                 "catchupSafetyMinutes": draft.catchupSafetyMinutes,
                 "autoRefreshIntervalHours": draft.autoRefreshIntervalHours
-            })
+            })) return
 
-            if (sourceIdentityOrConnectionChanged(draft, persistedDraft)
-                && pendingRefreshIds.indexOf(profileId) < 0) {
-                pendingRefreshIds.push(profileId)
+            if (sourceIdentityOrConnectionChanged(draft, persistedDraft)) {
+                enqueueRefreshProfile(profileId)
             }
+            setPendingProfileDraft(profileId, null)
         }
         root.pendingProfileDrafts = ({})
 
@@ -574,7 +597,8 @@ Item {
                             draft.xtreamPassword,
                             draft.xmltvUrl,
                             draft.autoRefreshIntervalHours,
-                            draft.catchupSafetyMinutes)
+                            draft.catchupSafetyMinutes,
+                            draft.vodEnabled)
             } else if (normalizedDraftType(draft.type) === 1) {
                 createdProfileId = root.profiles.addM3uUrlProfile(
                             draft.name,
@@ -590,12 +614,12 @@ Item {
                             draft.catchupSafetyMinutes)
             }
 
+            if (createdProfileId.length === 0) return
             if (createdProfileId.length > 0) {
                 createdProfileIds.push(createdProfileId)
                 addPendingNewSourceProfile(createdProfileId)
-                if (pendingRefreshIds.indexOf(createdProfileId) < 0) {
-                    pendingRefreshIds.push(createdProfileId)
-                }
+                enqueueRefreshProfile(createdProfileId)
+                setPendingCreateDraftForType(draft.type, null)
             }
         }
         root.pendingCreateDraftsByType = ({})
@@ -606,14 +630,10 @@ Item {
             applyDraftToForm(createDefaultDraftForType(root.draftType))
         }
 
-        if (root.groups.dirty) {
-            root.groups.saveDraftChanges()
-            root.syncActiveProfileGroupState()
+        for (const model of [root.settingsGroups, root.movieGroups, root.seriesGroups]) {
+            if (model.dirty && !model.saveDraftChanges()) { root.saveError = model.errorText; return }
         }
-
-        for (let index = 0; index < pendingRefreshIds.length; ++index) {
-            enqueueRefreshProfile(pendingRefreshIds[index])
-        }
+        root.syncActiveProfileGroupState()
 
         if (!root.createMode && root.selectedIndex >= 0) {
             const selectedProfile = root.profiles.get(root.selectedIndex)
@@ -641,7 +661,8 @@ Item {
         root.pendingNewSourceProfileIds = []
         root.refreshProfileQueue = []
         root.refreshQueueInFlight = false
-        root.groups.discardDraftChanges()
+        root.saveError = ""
+        for (const model of [root.settingsGroups, root.movieGroups, root.seriesGroups]) model.discardDraftChanges()
 
         if (root.selectedIndex >= 0 && !root.createMode) {
             loadProfileIntoForm(root.selectedIndex)
@@ -694,8 +715,8 @@ Item {
             return
         }
 
+        if (!root.profiles.removeProfile(pendingDeleteProfileId)) return
         setPendingProfileDraft(pendingDeleteProfileId, null)
-        root.profiles.removeProfile(pendingDeleteProfileId)
         pendingDeleteProfileId = ""
         pendingDeleteProfileName = ""
         confirmDeleteVisible = false
@@ -707,8 +728,12 @@ Item {
         }
     }
 
+    Connections {
+        target: root.profiles
+        function onProfileMutationFailed(message) { root.saveError = message }
+    }
     Component.onCompleted: {
-        root.groups.autoPersist = false
+        for (const model of [root.settingsGroups, root.movieGroups, root.seriesGroups]) model.autoPersist = false
         const initialRow = initialSelectionRow()
         if (initialRow >= 0) {
             loadProfileIntoForm(initialRow)
@@ -1131,11 +1156,37 @@ Item {
                         }
                         FormSpinBox {
                             id: catchupSafetyMinutesField
+                            objectName: "ui.sources.archiveMargin"
                             Layout.preferredWidth: root.shell.layoutBand === "compact" ? 174 : 192
                             from: 0
                             to: 30
                             value: 3
                         }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingM
+                        Text {
+                            Layout.fillWidth: true
+                            text: "Enable VOD"
+                            color: Theme.textSecondary
+                            font.pixelSize: 12
+                        }
+                        FormSwitch {
+                            objectName: "ui.sources.enableVod"
+                            text: "Enable VOD"
+                            checked: root.draftVodEnabled
+                            enabled: root.draftType === 0
+                            onToggled: { root.draftVodEnabled = checked; root.markDirtyStateChanged() }
+                        }
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        visible: root.draftType !== 0
+                        text: "VOD is available for Xtream sources only."
+                        color: Theme.textMuted
+                        font.pixelSize: 12
+                        wrapMode: Text.Wrap
                     }
                 }
 
@@ -1145,6 +1196,32 @@ Item {
                     panelColor: root.sectionSurface
 
                     RowLayout {
+                        Layout.fillWidth: true
+                        visible: root.mediaTypesVisible
+                        spacing: 4
+                        Repeater {
+                            model: ["Live TV", "Movies", "Series"]
+                            delegate: AppButton {
+                                required property string modelData
+                                required property int index
+                                Layout.fillWidth: true
+                                compact: true
+                                objectName: "ui.sources.media." + index
+                                text: modelData
+                                checked: root.groupMediaType === index
+                                onClicked: root.groupMediaType = index
+                            }
+                        }
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        visible: root.saveError.length > 0 || root.groups.errorText.length > 0
+                        text: root.saveError || root.groups.errorText
+                        color: Theme.danger
+                        font.pixelSize: 12
+                        wrapMode: Text.Wrap
+                    }
+                    ColumnLayout {
                         Layout.fillWidth: true
                         spacing: Theme.spacingM
 
@@ -1188,7 +1265,9 @@ Item {
 
                             FormTextField {
                                 id: groupsSearchField
-                                Layout.preferredWidth: root.shell.layoutBand === "compact" ? 220 : 280
+                                objectName: "ui.sources.groupSearch"
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 80
                                 placeholderText: "Search groups"
                                 text: root.groups.searchText
                                 enabled: !root.groups.loading
@@ -1198,7 +1277,8 @@ Item {
                             AppButton {
                                 text: "Select Filtered"
                                 compact: true
-                                Layout.preferredWidth: root.shell.layoutBand === "compact" ? 154 : 170
+                                Layout.preferredWidth: groupsPanel.width < 600 ? 118 : 170
+                                font.pixelSize: groupsPanel.width < 600 ? 12 : 14
                                 enabled: !root.groups.loading && root.groups.visibleGroupIds.length > 0
                                 onClicked: {
                                     root.groups.setGroupsSelected(root.groups.visibleGroupIds, true)
@@ -1208,7 +1288,8 @@ Item {
                             AppButton {
                                 text: "Deselect Filtered"
                                 compact: true
-                                Layout.preferredWidth: root.shell.layoutBand === "compact" ? 168 : 186
+                                Layout.preferredWidth: groupsPanel.width < 600 ? 130 : 186
+                                font.pixelSize: groupsPanel.width < 600 ? 12 : 14
                                 enabled: !root.groups.loading && root.groups.visibleGroupIds.length > 0
                                 onClicked: {
                                     root.groups.setGroupsSelected(root.groups.visibleGroupIds, false)
@@ -1342,7 +1423,8 @@ Item {
                                 enabled: !root.groups.loading
                                 visible: root.groups.hasGroups && root.groups.visibleGroupIds.length > 0
                                 rows: root.groups.visibleGroups
-                                profileId: root.groups.profileId
+                                profileId: root.groups.profileId + "|" + root.groupMediaType
+                                showCounts: root.groupMediaType === 0
                                 reorderEnabled: root.groupReorderEnabled
                                 filterKey: root.groups.searchText + "|" + root.groups.hideUnchecked
                                 onReorderRequested: function(orderedIds) {

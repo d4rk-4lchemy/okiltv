@@ -6,14 +6,14 @@
 
 <p align="center">
   A desktop <strong>IPTV player</strong> built with Qt and libmpv.<br/>
-  <small><em>No VOD support is planned (yet) for this app.</em></small><br/><br/>
-  Current version: <strong>0.5.4</strong>
+  Current version: <strong>0.6.0</strong>
 </p>
 
 
 ## Features
 
 - **Live TV with EPG** - Watch IPTV channels and browse now/next/upcoming programme data.
+- **VOD** - supports Movies and Series VOD from providers.
 - **Xtream + M3U Sources** - Add Xtream Codes providers, M3U URLs, or local M3U files.
 - **Overlay-First UI** - Live video remains the base layer; Guide and Settings open as overlays.
 - **Guide Timeline Navigation** - Move across channels and time in a continuous EPG grid.

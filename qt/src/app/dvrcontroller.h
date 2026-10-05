@@ -13,6 +13,7 @@
 #include <QVariantMap>
 
 #include <memory>
+#include <functional>
 #include <map>
 #include <optional>
 #include <utility>
@@ -52,6 +53,10 @@ public:
     bool attachPlaybackForChannel(const Core::Channel &channel);
     QList<int> recordingChannelIdsForProfile(const QString &profileId) const;
     void shutdownForApplicationExit();
+    // Application-owned asynchronous preparation; no provider/player policy here.
+    std::function<void(std::function<void(bool)>)> prepareRecordingStart;
+    std::function<bool()> automaticPlaybackHandoffAllowed;
+    bool hasRecordingDemand() const;
 
 signals:
     void stateChanged();
@@ -127,6 +132,8 @@ private:
     void emitRecordingChannelsChanged();
     void tick();
     bool startSession(const MergedWindow &window);
+    bool startPreparedSession(const MergedWindow &window);
+    void completeStartPreparation(const MergedWindow &, const QUuid &, bool allowed);
     void maybeAutoHandoffToTap(const Session &session);
     void requestStopSession(const QString &sessionId, const QString &reason = QString {});
     void finalizeStopSession(const QString &sessionId, int exitCode, QProcess::ExitStatus status);
@@ -145,6 +152,7 @@ private:
     std::map<QString, std::unique_ptr<Session>> m_sessions;
     QMap<QString, QDateTime> m_restartNotBeforeByWindowId;
     mutable QMap<QString, QList<int>> m_lastRecordingChannelsByProfile;
+    QMap<QString, QUuid> m_pendingStarts;
     QTimer m_tickTimer;
     bool m_exitShutdownStarted { false };
 };

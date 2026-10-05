@@ -1,4 +1,5 @@
 #include "database_service.h"
+#include "channelnumber.h"
 
 #include "appdatapaths.h"
 #include "m3uservice.h"
@@ -138,6 +139,7 @@ void ensureSchemaOnConnection(QSqlDatabase &database)
                 cached_icon TEXT,
                 source      TEXT    NOT NULL,
                 sort_order  INTEGER NOT NULL DEFAULT 0,
+                channel_number TEXT NOT NULL DEFAULT '',
                 catchup_supported INTEGER NOT NULL DEFAULT 0,
                 catchup_window_hours INTEGER NOT NULL DEFAULT 0,
                 catchup_mode TEXT NOT NULL DEFAULT '',
@@ -197,6 +199,12 @@ void ensureSchemaOnConnection(QSqlDatabase &database)
             throw std::runtime_error(
                 QStringLiteral("Schema migration failed: %1").arg(query.lastError().text()).toStdString());
         }
+    }
+
+    if (!tableHasColumn(database, QStringLiteral("channels"), QStringLiteral("channel_number"))) {
+        QSqlQuery query(database);
+        query.prepare(QStringLiteral("ALTER TABLE channels ADD COLUMN channel_number TEXT NOT NULL DEFAULT ''"));
+        execOrThrow(query, QStringLiteral("Add channel number"));
     }
 
     if (!tableHasColumn(database, QStringLiteral("channels"), QStringLiteral("category_name"))) {
@@ -266,6 +274,7 @@ Channel channelFromQuery(const QSqlQuery &query, const QUuid &profileId)
     channel.cachedIconPath = query.value(QStringLiteral("cached_icon")).toString();
     channel.source = channelSourceFromString(query.value(QStringLiteral("source")).toString());
     channel.sortOrder = query.value(QStringLiteral("sort_order")).toInt();
+    channel.channelNumber = normalizeChannelNumber(query.value(QStringLiteral("channel_number")).toString());
     channel.catchupSupported = query.value(QStringLiteral("catchup_supported")).toBool();
     channel.catchupWindowHours = std::max(0, query.value(QStringLiteral("catchup_window_hours")).toInt());
     channel.catchupMode = query.value(QStringLiteral("catchup_mode")).toString();
@@ -491,10 +500,10 @@ void DatabaseService::upsertChannels(const QList<Channel> &channels) const
         QSqlQuery query(database);
         query.prepare(QStringLiteral(R"sql(
             INSERT INTO channels
-                (id, profile_id, name, stream_url, category_id, category_name, tvg_id, tvg_name, icon_url, source, sort_order,
+                (id, profile_id, name, stream_url, category_id, category_name, tvg_id, tvg_name, icon_url, source, sort_order, channel_number,
                  catchup_supported, catchup_window_hours, catchup_mode, catchup_source_template)
             VALUES
-                (:id, :profile_id, :name, :stream_url, :category_id, :category_name, :tvg_id, :tvg_name, :icon_url, :source, :sort_order,
+                (:id, :profile_id, :name, :stream_url, :category_id, :category_name, :tvg_id, :tvg_name, :icon_url, :source, :sort_order, :channel_number,
                  :catchup_supported, :catchup_window_hours, :catchup_mode, :catchup_source_template)
             ON CONFLICT(id, profile_id) DO UPDATE SET
                 name = excluded.name,
@@ -506,6 +515,7 @@ void DatabaseService::upsertChannels(const QList<Channel> &channels) const
                 icon_url = excluded.icon_url,
                 source = excluded.source,
                 sort_order = excluded.sort_order,
+                channel_number = excluded.channel_number,
                 catchup_supported = excluded.catchup_supported,
                 catchup_window_hours = excluded.catchup_window_hours,
                 catchup_mode = excluded.catchup_mode,
@@ -526,6 +536,8 @@ void DatabaseService::upsertChannels(const QList<Channel> &channels) const
             query.bindValue(QStringLiteral(":icon_url"), channel.iconUrl.isEmpty() ? QVariant {} : QVariant(channel.iconUrl));
             query.bindValue(QStringLiteral(":source"), channelSourceToString(channel.source));
             query.bindValue(QStringLiteral(":sort_order"), channel.sortOrder);
+            const auto number = normalizeChannelNumber(channel.channelNumber);
+            query.bindValue(QStringLiteral(":channel_number"), number.isEmpty() ? QStringLiteral("") : number);
             query.bindValue(QStringLiteral(":catchup_supported"), channel.catchupSupported);
             query.bindValue(QStringLiteral(":catchup_window_hours"), std::max(0, channel.catchupWindowHours));
             query.bindValue(
@@ -565,10 +577,10 @@ void DatabaseService::replaceChannelsForProfile(const QUuid &profileId, const QL
         QSqlQuery query(database);
         query.prepare(QStringLiteral(R"sql(
             INSERT INTO channels
-                (id, profile_id, name, stream_url, category_id, category_name, tvg_id, tvg_name, icon_url, source, sort_order,
+                (id, profile_id, name, stream_url, category_id, category_name, tvg_id, tvg_name, icon_url, source, sort_order, channel_number,
                  catchup_supported, catchup_window_hours, catchup_mode, catchup_source_template)
             VALUES
-                (:id, :profile_id, :name, :stream_url, :category_id, :category_name, :tvg_id, :tvg_name, :icon_url, :source, :sort_order,
+                (:id, :profile_id, :name, :stream_url, :category_id, :category_name, :tvg_id, :tvg_name, :icon_url, :source, :sort_order, :channel_number,
                  :catchup_supported, :catchup_window_hours, :catchup_mode, :catchup_source_template)
             ON CONFLICT(id, profile_id) DO UPDATE SET
                 name = excluded.name,
@@ -580,6 +592,7 @@ void DatabaseService::replaceChannelsForProfile(const QUuid &profileId, const QL
                 icon_url = excluded.icon_url,
                 source = excluded.source,
                 sort_order = excluded.sort_order,
+                channel_number = excluded.channel_number,
                 catchup_supported = excluded.catchup_supported,
                 catchup_window_hours = excluded.catchup_window_hours,
                 catchup_mode = excluded.catchup_mode,
@@ -607,6 +620,8 @@ void DatabaseService::replaceChannelsForProfile(const QUuid &profileId, const QL
             query.bindValue(QStringLiteral(":icon_url"), channel.iconUrl.isEmpty() ? QVariant {} : QVariant(channel.iconUrl));
             query.bindValue(QStringLiteral(":source"), channelSourceToString(channel.source));
             query.bindValue(QStringLiteral(":sort_order"), channel.sortOrder);
+            const auto number = normalizeChannelNumber(channel.channelNumber);
+            query.bindValue(QStringLiteral(":channel_number"), number.isEmpty() ? QStringLiteral("") : number);
             query.bindValue(QStringLiteral(":catchup_supported"), channel.catchupSupported);
             query.bindValue(QStringLiteral(":catchup_window_hours"), std::max(0, channel.catchupWindowHours));
             query.bindValue(

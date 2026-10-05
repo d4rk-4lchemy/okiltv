@@ -224,6 +224,9 @@ QJsonObject toJson(const ServerProfile &profile)
     object.insert(QStringLiteral("xtreamPassword"), profile.xtreamPassword);
     object.insert(QStringLiteral("xtreamServerTimezone"), profile.xtreamServerTimezone);
     object.insert(QStringLiteral("catchupSafetyMinutes"), std::clamp(profile.catchupSafetyMinutes, 0, 30));
+    object.insert(QStringLiteral("vodEnabled"), profile.vodEnabled);
+    object.insert(QStringLiteral("vodCredentialRevision"), QString::number(profile.vodCredentialRevision));
+    object.insert(QStringLiteral("vodDefaultsVersion"), profile.vodDefaultsVersion);
     object.insert(QStringLiteral("m3UUrl"), profile.m3uUrl);
     object.insert(QStringLiteral("m3UFilePath"), profile.m3uFilePath);
     object.insert(QStringLiteral("xmltvUrl"), profile.xmltvUrl);
@@ -251,6 +254,9 @@ ServerProfile serverProfileFromJson(const QJsonObject &object)
     profile.xtreamPassword = object.value(QStringLiteral("xtreamPassword")).toString();
     profile.xtreamServerTimezone = object.value(QStringLiteral("xtreamServerTimezone")).toString().trimmed();
     profile.catchupSafetyMinutes = std::clamp(object.value(QStringLiteral("catchupSafetyMinutes")).toInt(3), 0, 30);
+    profile.vodEnabled = object.value(QStringLiteral("vodEnabled")).toBool(true);
+    profile.vodDefaultsVersion = object.value(QStringLiteral("vodDefaultsVersion")).toInt(0);
+    profile.vodCredentialRevision = std::max(quint64(1), object.value(QStringLiteral("vodCredentialRevision")).toVariant().toULongLong());
     profile.m3uUrl = object.value(QStringLiteral("m3UUrl")).toString();
     profile.m3uFilePath = object.value(QStringLiteral("m3UFilePath")).toString();
     profile.xmltvUrl = object.value(QStringLiteral("xmltvUrl")).toString();
@@ -325,6 +331,8 @@ QJsonObject toJson(const AppSettings &settings)
     object.insert(QStringLiteral("overlayAutoHide"), settings.overlayAutoHide);
     object.insert(QStringLiteral("overlayAutoHideSeconds"), settings.overlayAutoHideSeconds);
     object.insert(QStringLiteral("overlayInactivitySeconds"), settings.overlayInactivitySeconds);
+    object.insert(QStringLiteral("vodLibrarySidebarWidth"),
+                  settings.vodLibrarySidebarWidth >= 208 ? settings.vodLibrarySidebarWidth : 0);
     object.insert(QStringLiteral("uiTransparency"), std::clamp(settings.uiTransparency, 0, 100));
     object.insert(QStringLiteral("guidePastHours"), normalizeGuideHours(settings.guidePastHours));
     object.insert(QStringLiteral("epgLookAheadHours"), normalizeGuideHours(settings.epgLookAheadHours));
@@ -357,6 +365,8 @@ QJsonObject toJson(const AppSettings &settings)
     object.insert(QStringLiteral("mpvDllPath"), settings.mpvDllPath);
     object.insert(QStringLiteral("mpvOptions"), stringMapToJson(settings.mpvOptions));
     object.insert(QStringLiteral("multiviewEnabled"), settings.multiviewEnabled);
+    object.insert(QStringLiteral("vodEnabled"), settings.vodEnabled);
+    object.insert(QStringLiteral("vodSeriesEnabled"), settings.vodSeriesEnabled);
     object.insert(
         QStringLiteral("multiviewMaxTiles"),
         normalizeMultiviewMaxTiles(settings.multiviewMaxTiles));
@@ -372,6 +382,7 @@ QJsonObject toJson(const AppSettings &settings)
     object.insert(QStringLiteral("reopenMaximizedOnLaunch"), settings.reopenMaximizedOnLaunch);
     object.insert(QStringLiteral("dvrRecordingsDirectory"), settings.dvrRecordingsDirectory);
     object.insert(QStringLiteral("dvrRemuxToMkv"), settings.dvrRemuxToMkv);
+    object.insert(QStringLiteral("dvrStopVodBeforeRecording"), settings.dvrStopVodBeforeRecording);
     object.insert(QStringLiteral("dvrStartOffsetMinutes"), settings.dvrStartOffsetMinutes);
     object.insert(QStringLiteral("dvrEndOffsetMinutes"), settings.dvrEndOffsetMinutes);
     QJsonArray dvrSchedules;
@@ -386,6 +397,9 @@ QJsonObject toJson(const AppSettings &settings)
     object.insert(
         QStringLiteral("favoriteChannelIdsByProfile"),
         intListMapToJson(settings.favoriteChannelIdsByProfile));
+    object.insert(
+        QStringLiteral("autoFavoriteExcludedChannelIdsByProfile"),
+        intListMapToJson(settings.autoFavoriteExcludedChannelIdsByProfile));
     object.insert(QStringLiteral("selectedGroupByProfile"), stringMapToJson(settings.selectedGroupByProfile));
     object.insert(QStringLiteral("hiddenGroupsByProfile"), stringListMapToJson(settings.hiddenGroupsByProfile));
     object.insert(QStringLiteral("groupOrderByProfile"), stringListMapToJson(settings.groupOrderByProfile));
@@ -428,6 +442,8 @@ AppSettings appSettingsFromJson(const QJsonObject &object)
         std::max(1, object.value(QStringLiteral("overlayAutoHideSeconds")).toInt(settings.overlayAutoHideSeconds));
     settings.overlayInactivitySeconds =
         std::clamp(object.value(QStringLiteral("overlayInactivitySeconds")).toInt(settings.overlayInactivitySeconds), 1, 3600);
+    settings.vodLibrarySidebarWidth = object.value(QStringLiteral("vodLibrarySidebarWidth")).toInt(0);
+    if (settings.vodLibrarySidebarWidth < 208) settings.vodLibrarySidebarWidth = 0;
     settings.uiTransparency =
         std::clamp(object.value(QStringLiteral("uiTransparency")).toInt(settings.uiTransparency), 0, 100);
     settings.guidePastHours =
@@ -469,6 +485,8 @@ AppSettings appSettingsFromJson(const QJsonObject &object)
     settings.mpvOptions = stringMapFromJson(object.value(QStringLiteral("mpvOptions")).toObject());
     settings.multiviewEnabled =
         object.value(QStringLiteral("multiviewEnabled")).toBool(settings.multiviewEnabled);
+    settings.vodEnabled = object.value(QStringLiteral("vodEnabled")).toBool(false);
+    settings.vodSeriesEnabled = object.value(QStringLiteral("vodSeriesEnabled")).toBool(false);
     settings.multiviewMaxTiles = normalizeMultiviewMaxTiles(
         object.value(QStringLiteral("multiviewMaxTiles")).toInt(settings.multiviewMaxTiles));
     settings.multiviewPreferHwdec = object.value(QStringLiteral("multiviewPreferHwdec"))
@@ -486,6 +504,7 @@ AppSettings appSettingsFromJson(const QJsonObject &object)
     settings.reopenMaximizedOnLaunch =
         object.value(QStringLiteral("reopenMaximizedOnLaunch")).toBool(settings.reopenMaximizedOnLaunch);
     settings.dvrRecordingsDirectory = object.value(QStringLiteral("dvrRecordingsDirectory")).toString();
+    settings.dvrStopVodBeforeRecording = object.value(QStringLiteral("dvrStopVodBeforeRecording")).toBool(true);
     const auto dvrRemuxVal = object.value(QStringLiteral("dvrRemuxToMkv"));
     settings.dvrRemuxToMkv = dvrRemuxVal.isUndefined() ? true : dvrRemuxVal.toBool();
     settings.dvrStartOffsetMinutes =
@@ -522,6 +541,8 @@ AppSettings appSettingsFromJson(const QJsonObject &object)
         intMapFromJson(object.value(QStringLiteral("lastWatchedChannelId")).toObject());
     settings.favoriteChannelIdsByProfile = intListMapFromJson(
         object.value(QStringLiteral("favoriteChannelIdsByProfile")).toObject());
+    settings.autoFavoriteExcludedChannelIdsByProfile = intListMapFromJson(
+        object.value(QStringLiteral("autoFavoriteExcludedChannelIdsByProfile")).toObject());
     settings.selectedGroupByProfile = stringMapFromJson(
         object.value(QStringLiteral("selectedGroupByProfile")).toObject());
     settings.hiddenGroupsByProfile = stringListMapFromJson(

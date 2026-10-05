@@ -28,6 +28,7 @@ QVariantMap toVariantMap(const ServerProfile &profile)
         { QStringLiteral("m3UFilePath"), profile.m3uFilePath },
         { QStringLiteral("xmltvUrl"), profile.xmltvUrl },
         { QStringLiteral("catchupSafetyMinutes"), profile.catchupSafetyMinutes },
+        { QStringLiteral("vodEnabled"), profile.vodEnabled },
         { QStringLiteral("autoRefreshIntervalHours"), normalizeAutoRefreshIntervalHours(profile.autoRefreshIntervalHours) },
         { QStringLiteral("lastRefreshed"), profile.lastRefreshed.toUTC().toString(Qt::ISODateWithMs) },
         { QStringLiteral("isActive"), profile.isActive }
@@ -69,6 +70,7 @@ QVariantMap toVariantMap(const Channel &channel)
         { QStringLiteral("iconUrl"), channel.iconUrl },
         { QStringLiteral("cachedIconPath"), channel.cachedIconPath },
         { QStringLiteral("sortOrder"), channel.sortOrder },
+        { QStringLiteral("channelNumber"), channel.channelNumber },
         { QStringLiteral("profileId"), guidToString(channel.profileId) },
         { QStringLiteral("source"), channelSourceToString(channel.source) },
         { QStringLiteral("streamUrl"), channel.streamUrl },

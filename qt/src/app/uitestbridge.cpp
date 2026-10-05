@@ -878,12 +878,12 @@ QJsonObject UiTestBridge::buildStateSnapshot() const
             const auto tile = value.toMap();
             const auto index = tile.value(QStringLiteral("tileIndex")).toInt();
             auto *backend = qobject_cast<Player::MpvPlayer *>(tile.value(QStringLiteral("playerObject")).value<QObject *>());
+            const auto paused = backend ? backend->pauseState() : std::nullopt;
             const auto *surface = findItemByObjectName(QStringLiteral("multiviewTileVideo_%1").arg(index));
             tileStates.push_back(QJsonObject {
                 { QStringLiteral("index"), index },
                 { QStringLiteral("channelId"), tile.value(QStringLiteral("channelId")).toInt() },
-                { QStringLiteral("paused"), backend && backend->pauseState().has_value()
-                    ? QJsonValue(*backend->pauseState()) : QJsonValue() },
+                { QStringLiteral("paused"), paused ? QJsonValue(*paused) : QJsonValue() },
                 { QStringLiteral("position"), backend ? backend->position() : 0.0 },
                 { QStringLiteral("renderMatchesBackend"), surface && surface->property("playerObject").value<QObject *>() == backend }
             });
@@ -1320,6 +1320,9 @@ QJsonObject UiTestBridge::currentWindowState() const
         { QStringLiteral("height"), m_window != nullptr ? m_window->height() : 0.0 },
         { QStringLiteral("x11WindowId"), m_window != nullptr ? static_cast<qint64>(m_window->winId()) : 0 },
         { QStringLiteral("visibleOverlay"), m_shellController != nullptr ? m_shellController->activeOverlay() : QStringLiteral("none") },
+        { QStringLiteral("chromeAnimationsRunning"), m_rootObject != nullptr && m_rootObject->property("chromeAnimationsRunning").toBool() },
+        { QStringLiteral("navigationFocused"), m_rootObject != nullptr && m_rootObject->property("modeNavigationFocused").toBool() },
+        { QStringLiteral("vodTransitioning"), m_rootObject != nullptr && m_rootObject->property("vodTransitioning").toBool() },
         { QStringLiteral("layoutBand"), m_shellController != nullptr ? m_shellController->layoutBand() : QString {} },
         { QStringLiteral("focusedZone"), m_shellController != nullptr ? m_shellController->focusedZone() : QString {} }
     };

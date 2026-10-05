@@ -89,11 +89,12 @@ QString ProfilesModel::addXtreamProfile(
     const QString &password,
     const QString &xmltvUrl,
     const int autoRefreshIntervalHours, // NOLINT(bugprone-easily-swappable-parameters) — fixed QML positional API.
-    const int catchupSafetyMinutes)
+    const int catchupSafetyMinutes, const bool vodEnabled)
 {
     ServerProfile profile;
     profile.name = name.trimmed();
     profile.type = ProfileType::Xtream;
+    profile.vodEnabled = vodEnabled;
     profile.xtreamBaseUrl = baseUrl.trimmed();
     profile.xtreamUsername = username.trimmed();
     profile.xtreamPassword = password.trimmed();
@@ -102,6 +103,7 @@ QString ProfilesModel::addXtreamProfile(
     profile.autoRefreshIntervalHours = normalizeAutoRefreshIntervalHours(autoRefreshIntervalHours);
 
     if (!m_settings->addProfile(profile)) {
+        emit profileMutationFailed(m_settings->lastSaveError());
         return {};
     }
     reload();
@@ -124,6 +126,7 @@ QString ProfilesModel::addM3uUrlProfile(
     profile.autoRefreshIntervalHours = normalizeAutoRefreshIntervalHours(autoRefreshIntervalHours);
 
     if (!m_settings->addProfile(profile)) {
+        emit profileMutationFailed(m_settings->lastSaveError());
         return {};
     }
     reload();
@@ -140,6 +143,7 @@ QString ProfilesModel::addM3uFileProfile(const QString &name, const QString &fil
     profile.xmltvUrl = xmltvUrl.trimmed();
 
     if (!m_settings->addProfile(profile)) {
+        emit profileMutationFailed(m_settings->lastSaveError());
         return {};
     }
     reload();
@@ -197,6 +201,9 @@ bool ProfilesModel::replaceProfile(const QString &profileId, const QVariantMap &
     if (changes.contains(QStringLiteral("catchupSafetyMinutes"))) {
         profile.catchupSafetyMinutes = std::clamp(changes.value(QStringLiteral("catchupSafetyMinutes")).toInt(), 0, 30);
     }
+    if (changes.contains(QStringLiteral("vodEnabled"))) {
+        profile.vodEnabled = changes.value(QStringLiteral("vodEnabled")).toBool();
+    }
     if (changes.contains(QStringLiteral("m3UUrl"))) {
         profile.m3uUrl = changes.value(QStringLiteral("m3UUrl")).toString().trimmed();
     }
@@ -225,6 +232,7 @@ bool ProfilesModel::replaceProfile(const QString &profileId, const QVariantMap &
     }
 
     if (!m_settings->replaceProfile(summary.id, profile)) {
+        emit profileMutationFailed(m_settings->lastSaveError());
         return false;
     }
     emit dataChanged(index(row, 0), index(row, 0));
@@ -241,6 +249,7 @@ bool ProfilesModel::removeProfile(const QString &profileId)
 
     const auto oldActive = activeProfileId();
     if (!m_settings->removeProfile(parsedId)) {
+        emit profileMutationFailed(m_settings->lastSaveError());
         return false;
     }
     if (oldActive != activeProfileId()) {
