@@ -170,7 +170,8 @@ Test binaries:
 | `0-9` | Direct numeric tune (2s idle commit) |
 | `Ctrl+Up` | Select tile above in grid; otherwise open Guide |
 | `Left` / `Right` | Enter channel/programme pane keyboard navigation |
-| `Tab` / `Ctrl+F` | Focus live channel search |
+| `Tab` | Focus live channel search |
+| `Ctrl+F` | Search programme titles/subtitles across the active source’s local EPG |
 | `Ctrl+S` | Open source picker |
 | `Ctrl+G` | Open group picker |
 | `Ctrl+P` | Toggle PiP |
@@ -184,6 +185,26 @@ Test binaries:
 
 Character shortcuts are disabled while editing search. Guide, Settings, pickers and dialogs
 use their own keyboard context. Plain Tab focuses search; Ctrl+Tab is unbound.
+
+### Live programme search validation
+
+The local EPG UI scenario uses generated media and an isolated XMLTV fixture. Run the
+main routing, focus and responsive-layout checks with:
+
+```bash
+ctest --preset qt-linux-debug -R '^UI-14-epg-search$' --output-on-failure
+```
+
+Additional isolated smoke modes cover PiP/grid preservation, a source without EPG
+and the explicit 256-character query limit (`extended`), 200% scaling (`scale`),
+and the first import's Preparing-to-results transition using a delayed local XMLTV
+response (`preparing`). Each run retains bridge checks, logs and screenshots:
+
+```bash
+OKILTV_EPG_SEARCH_SMOKE=extended bash scripts/ci/run_ui_test.sh ui-tests/tests/14-epg-search.py qt/out/build/qt-linux-debug/app/OKILTV qt/out/build/qt-linux-debug/ui-artifacts/14-epg-search-extended
+QT_SCALE_FACTOR=2 OKILTV_EPG_SEARCH_SMOKE=scale bash scripts/ci/run_ui_test.sh ui-tests/tests/14-epg-search.py qt/out/build/qt-linux-debug/app/OKILTV qt/out/build/qt-linux-debug/ui-artifacts/14-epg-search-scale200
+OKILTV_EPG_SEARCH_SMOKE=preparing bash scripts/ci/run_ui_test.sh ui-tests/tests/14-epg-search.py qt/out/build/qt-linux-debug/app/OKILTV qt/out/build/qt-linux-debug/ui-artifacts/14-epg-search-preparing
+```
 
 ### Mouse Shortcuts
 

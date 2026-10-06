@@ -20,6 +20,8 @@ qt_add_executable(OKILTVQtCoreTests
     ../src/core/epgcache_service.h
     ../src/core/epgstore.cpp
     ../src/core/epgstore.h
+    ../src/core/epgsearchtypes.cpp
+    ../src/core/epgsearchtypes.h
     ../src/core/epgservice.cpp
     ../src/core/epgservice.h
     ../src/core/m3uservice.cpp
@@ -92,6 +94,10 @@ qt_add_executable(OKILTVQtAppTests
     ../src/app/dvrcontroller.h
     ../src/app/epggridmodel.cpp
     ../src/app/epggridmodel.h
+    ../src/app/epgsearchcontroller.cpp
+    ../src/app/epgsearchcontroller.h
+    ../src/app/epgsearchmodel.cpp
+    ../src/app/epgsearchmodel.h
     ../src/app/guidestatemodel.cpp
     ../src/app/guidestatemodel.h
     ../src/app/multiviewcontroller.cpp
@@ -134,6 +140,8 @@ qt_add_executable(OKILTVQtAppTests
     ../src/core/epgcache_service.h
     ../src/core/epgstore.cpp
     ../src/core/epgstore.h
+    ../src/core/epgsearchtypes.cpp
+    ../src/core/epgsearchtypes.h
     ../src/core/epgservice.cpp
     ../src/core/epgservice.h
     ../src/core/iconcache_service.cpp
@@ -244,6 +252,17 @@ endif ()
 if (NOT CMAKE_CROSSCOMPILING)
     find_program(OKILTV_QMLTESTRUNNER qmltestrunner HINTS "${Qt6_DIR}/../../../bin" REQUIRED)
     if (OKILTV_QMLTESTRUNNER)
+        add_test(NAME OKILTVQtEpgSearchOverlayTests
+            COMMAND OKILTVQtEpgSearchQmlTests -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_epgsearchoverlay.qml")
+        find_package(Qt6 REQUIRED COMPONENTS QuickTest)
+        qt_add_executable(OKILTVQtEpgSearchQmlTests tst_epg_search_qml.cpp)
+        target_link_libraries(OKILTVQtEpgSearchQmlTests PRIVATE Qt6::QuickTest)
+        qt_add_resources(OKILTVQtEpgSearchQmlTests epg_search_test_icons
+            PREFIX "/" BASE "${CMAKE_CURRENT_SOURCE_DIR}/.."
+            FILES ../resources/icons/play.svg ../resources/icons/start-from-beginning.svg
+                ../resources/icons/dvr.svg ../resources/icons/movie-info.svg ../resources/icons/download.svg)
+        set_tests_properties(OKILTVQtEpgSearchOverlayTests PROPERTIES LABELS "qml;epg-search" TIMEOUT 60
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
         add_test(NAME OKILTVQtMediaModeSwitchTests
             COMMAND "${OKILTV_QMLTESTRUNNER}" -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_mediamodeswitch.qml")
         set_tests_properties(OKILTVQtMediaModeSwitchTests PROPERTIES LABELS qml TIMEOUT 60
@@ -331,7 +350,8 @@ if (OKILTV_BUILD_UI_TESTS)
         10-multiview-keyboard
         11-multiview-controls
         12-vod-movies
-        13-vod-series)
+        13-vod-series
+        14-epg-search)
         add_test(NAME "UI-${scenario}"
             COMMAND "${OKILTV_TEST_BASH}" "${CMAKE_SOURCE_DIR}/scripts/ci/run_ui_test.sh"
                 "${CMAKE_SOURCE_DIR}/ui-tests/tests/${scenario}.py"
@@ -348,6 +368,8 @@ qt_add_executable(OKILTVQtDownloadTests
     tst_catchup_downloads.cpp
     ../src/core/epgcache_service.cpp
     ../src/core/epgstore.cpp
+    ../src/core/epgservice.cpp
+    ../src/core/epgsearchtypes.cpp
     ../src/player/catchuptsjoiner.cpp
     ../src/core/database_service.cpp
     ../src/app/catchupdownloadcontroller.cpp
@@ -370,7 +392,7 @@ qt_add_executable(OKILTVQtDownloadTests
     ../src/core/sourcestore.cpp)
 target_include_directories(OKILTVQtDownloadTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_definitions(OKILTVQtDownloadTests PRIVATE OKILTV_SECURITY_TESTS)
-target_link_libraries(OKILTVQtDownloadTests PRIVATE Qt6::Widgets Qt6::Core Qt6::Network Qt6::Sql Qt6::Test ${OKILTV_SECRET_LIB})
+target_link_libraries(OKILTVQtDownloadTests PRIVATE Qt6::Widgets Qt6::Core Qt6::Network Qt6::Concurrent Qt6::Sql Qt6::Test ${OKILTV_SECRET_LIB} ${OKILTV_ZLIB_LINK_LIB})
 add_test(NAME OKILTVQtDownloadTests COMMAND OKILTVQtDownloadTests)
 # Real 10/30-second retry cooldowns and the 60-second stall case put this suite
 # near nine minutes locally. Leave room for slower hosted runners.
@@ -469,3 +491,29 @@ if (NOT CMAKE_CROSSCOMPILING AND OKILTV_QMLTESTRUNNER)
     set_tests_properties(OKILTVQtSourceMediaUiTests PROPERTIES LABELS "qml;vod" TIMEOUT 60
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
 endif ()
+
+# Both suites use real core search code; the controller's injected ports keep
+# the focused state-machine tests independent of playback/provider services.
+set(OKILTV_EPG_SEARCH_TEST_CORE
+    ../src/core/epgcache_service.cpp
+    ../src/core/epgstore.cpp
+    ../src/core/epgservice.cpp
+    ../src/core/epgsearchtypes.cpp
+    ../src/core/models.cpp
+    ../src/core/models_variant.cpp
+    ../src/core/datetimeformat.cpp
+    ../src/core/debuglogger.cpp
+    ../src/core/appdatapaths.cpp
+    ../src/core/redaction.cpp)
+qt_add_executable(OKILTVQtEpgSearchStoreTests tst_epg_search_store.cpp ${OKILTV_EPG_SEARCH_TEST_CORE})
+qt_add_executable(OKILTVQtEpgSearchModelTests tst_epg_search_model.cpp
+    ../src/app/epgsearchcontroller.cpp ../src/app/epgsearchmodel.cpp ${OKILTV_EPG_SEARCH_TEST_CORE})
+foreach(target OKILTVQtEpgSearchStoreTests OKILTVQtEpgSearchModelTests)
+    target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+    target_link_libraries(${target} PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent Qt6::Sql Qt6::Test ${OKILTV_ZLIB_LINK_LIB})
+    add_test(NAME ${target} COMMAND ${target})
+    set_tests_properties(${target} PROPERTIES LABELS "epg-search" TIMEOUT 120
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;OKILTV_HEADLESS_TEST=1")
+endforeach()
+set_property(TEST OKILTVQtEpgSearchStoreTests APPEND PROPERTY LABELS core)
+set_property(TEST OKILTVQtEpgSearchModelTests APPEND PROPERTY LABELS app)

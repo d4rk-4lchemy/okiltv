@@ -128,6 +128,84 @@ Display date/time changes reformat retained timestamps without changing provider
 time, programme identity or playback. Use the shared formatting helpers described
 in [UI and interaction](ui-and-interaction.md).
 
+## Live EPG search
+
+`Ctrl+F` in the Live context opens the exclusive `epg-search` overlay. Search
+covers all eligible channels in the active source, excluding hidden groups,
+independently of the channel rail's query/category and the Guide time horizon.
+It searches the complete published local EPG generation, without provider calls
+while typing. One result represents one airing on one playback channel; shared
+XMLTV IDs produce separate channel results and exact duplicates are removed.
+
+[EpgSearchController](../qt/src/app/epgsearchcontroller.h) owns the session,
+150 ms debounce, one search worker and the latest queued request. Its separate
+[EpgSearchModel](../qt/src/app/epgsearchmodel.h) publishes bounded pages of 50
+results on the UI thread. Query/filter/context edits immediately invalidate old
+actions. Request, source, channel revision and EPG generation checks reject stale
+responses; closing cancels work and shutdown joins the worker. Details are loaded
+only for the selected result using the existing generation-checked detail API.
+The model publishes cached station logos as `file:` URLs via `QUrl::fromLocalFile`,
+preserving spaces and URL punctuation; uncached logos retain their source URL.
+
+The core contract lives in [epgsearchtypes.h](../qt/src/core/epgsearchtypes.h).
+Normalization folds case and accents (including Polish ł), preserves other
+alphabets and splits punctuation into word boundaries. Every token must match
+in the title/subtitle as a word prefix, including single-character fragments in
+an otherwise valid query: `Spider-M` finds `Spider-Man`. Hyphens, Unicode dashes,
+dots, slashes, colons, parentheses and quotes act as word separators rather than
+literal search operators. At least one token must have two characters, so `M`
+alone does not start a search. Queries exceeding 256 input
+characters or 16 tokens show a validation error. User text never becomes raw
+FTS syntax. Highlight ranges map back to the original Unicode text.
+
+SQLite FTS5 indexes normalized titles/subtitles in each new immutable generation.
+Search schema 2 and normalization version 1 are separate from the ordinary EPG
+metadata version 1, which remains readable by rollback builds. Chronological FTS
+row IDs support forward/backward reads within time groups; filtering and
+shared-channel mapping happen before the bounded result heap cuts a page.
+Every title/subtitle match is read in chronological FTS row-ID order, without
+separate match-quality buckets; the existing exact-title index remains in schema 2
+for cache compatibility but no longer controls result ordering. FTS population checks cancellation
+per document and commits in batches of 1000; SQL sorting/integrity statements
+finish before their next cancellation check.
+Older generations remain available to Guide while a local background replacement
+builds the index; only a verified complete replacement may update the manifest.
+At application shutdown, `shutdownSearchPreparations()` fences new imports and
+upgrades, cancels their tokens and joins the import pool before Qt SQL teardown.
+A missing FTS5 capability reports a search error. Linux and Windows acceptance
+must exercise the shipped QSQLITE plugin rather than the system sqlite CLI.
+
+All results group Now, Upcoming, then Past. Start dates are the primary order
+within each group: Now/Upcoming ascend (upcoming nearest first), while Past
+descends (newest first). Individual time filters use the same date order. Only
+equal start dates use exact normalized titles, all-title prefix matches and then
+subtitle matches as tiebreakers, followed by channel order and stable airing
+identity. The indexed reader consumes every boundary timestamp before cutting a
+page, so a later exact title cannot displace an earlier prefix/subtitle match.
+Pages share a frozen UTC clock and request context. Channel mapping,
+filtering and deduplication precede visible pagination. Current action availability
+is reevaluated at activation, independently of the frozen list ordering.
+
+Past means ended programmes retained in local EPG, not guaranteed archive
+availability. Live, catch-up, DVR and downloads use AppController's existing
+validation. Past airings expose Play from beginning only with a valid saved resume
+point (primary Resume); unstarted/completed/expired or sub-minute progress uses
+primary Play at zero without a duplicate restart action. The selected action map
+sets `recordingVisible` false for unscheduled past airings, avoiding a disabled
+Schedule recording control; existing scheduled jobs retain their cancellation. Current airings retain
+their available catch-up restart. Ctrl+Enter routes through
+`EpgSearchController::activateSelectedFromBeginningOrDefault`, which revalidates
+the current restart availability before choosing restart or the primary action;
+a stale/expired resume point cannot suppress the fallback. Future/unavailable airings open details. Explicit Live activation
+resolves source/channel identity without changing rail filters and follows the
+focused multiview destination. Archive playback is visibly unavailable in grid
+multiview because the legacy archive path would dismantle the grid; PiP retains
+its existing destination policy. Ctrl+R in search never falls back to manual
+recording. Opening, closing and selection do not tune or pause any player.
+Native download completion revalidates the selected airing and request identity
+before enqueueing. Deferred catch-up handoff also checks the source, channel scope
+and EPG generation before accepting playback.
+
 ## Verification focus
 
 Cover stable M3U IDs, reordered/empty imports, source edits/removal during jobs,

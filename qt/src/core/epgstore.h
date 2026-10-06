@@ -1,6 +1,7 @@
 #pragma once
 
 #include "models.h"
+#include "epgsearchtypes.h"
 #include <QCache>
 #include <QMutex>
 #include <functional>
@@ -40,6 +41,12 @@ public:
     QDateTime maxStop(const QString &channel) const;
     int cachedBytes() const;
     QString diagnostics() const;
+    EpgSearchResult search(const EpgSearchRequest &request, const Cancelled &cancelled = {}) const;
+    bool searchReady() const;
+    static bool supportsFts5(); // Tests the actual application's QSQLITE plugin.
+    std::shared_ptr<EpgStore> withSearchIndex(const QString &path, const Cancelled &cancelled = {}) const;
+    void useSearchIndex(const std::shared_ptr<EpgStore> &replacement);
+    void setSearchPreparationError(const QString &code);
 
 private:
     EpgStore(QString path, Metadata metadata, bool temporary);
@@ -47,6 +54,10 @@ private:
     Metadata m_metadata;
     mutable QMutex m_mutex;
     bool m_temporary;
+    bool m_searchReady = false;
+    qint64 m_maximumSearchDuration = 0;
+    std::shared_ptr<EpgStore> m_searchReplacement;
+    QString m_searchPreparationError;
     mutable qint64 m_cacheHits = 0, m_queryCount = 0, m_queryMilliseconds = 0;
     mutable QCache<QString, QList<EpgEntry>> m_cache { 32LL * 1024 * 1024 };
 };

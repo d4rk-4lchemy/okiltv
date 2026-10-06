@@ -13,6 +13,7 @@
 
 #include "../core/redaction.h"
 
+#include <QAbstractItemModel>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -905,7 +906,38 @@ QJsonObject UiTestBridge::buildStateSnapshot() const
         { QStringLiteral("pickerOpen"), livePage->property("leftPickerOpen").toBool() },
         { QStringLiteral("chromeAnimating"), livePage->property("chromeAnimationsRunning").toBool() }
     } : QJsonObject {};
+    QJsonObject searchState;
+    const auto *searchOverlay = m_rootObject ? m_rootObject->findChild<QObject *>(QStringLiteral("ui.epgSearch.overlay")) : nullptr;
+    auto *search = searchOverlay ? searchOverlay->property("controller").value<QObject *>() : nullptr;
+    if (search) {
+        const QStringList properties {QStringLiteral("active"), QStringLiteral("status"),
+            QStringLiteral("busy"), QStringLiteral("detailsBusy"), QStringLiteral("resultsCurrent"), QStringLiteral("expanded"),
+            QStringLiteral("selectedKey"), QStringLiteral("selectedIndex"), QStringLiteral("hasMore"),
+            QStringLiteral("timeFilter"), QStringLiteral("query"), QStringLiteral("errorText")};
+        for (const auto &property : properties)
+            searchState.insert(property, redactedJsonValue(QJsonValue::fromVariant(search->property(property.toUtf8().constData()))));
+        const auto details = search->property("selectedDetails").toMap();
+        QJsonObject actions;
+        for (const auto &key : {QStringLiteral("primaryEnabled"), QStringLiteral("downloadEnabled"),
+                 QStringLiteral("recordingEnabled"), QStringLiteral("fromBeginningEnabled"), QStringLiteral("actionKind")})
+            actions.insert(key, QJsonValue::fromVariant(details.value(key)));
+        searchState.insert(QStringLiteral("actions"), actions);
+        if (auto *model = qobject_cast<QAbstractItemModel *>(search->property("model").value<QObject *>())) {
+            QJsonArray rows;
+            const auto roles = model->roleNames();
+            for (int row = 0; row < model->rowCount(); ++row) {
+                QJsonObject record;
+                for (auto it = roles.cbegin(); it != roles.cend(); ++it) {
+                    if (it.value() == "resultKey" || it.value() == "title" || it.value() == "channelName" || it.value() == "sectionKey")
+                        record.insert(QString::fromUtf8(it.value()), redactedJsonValue(QJsonValue::fromVariant(model->data(model->index(row, 0), it.key()))));
+                }
+                rows.append(record);
+            }
+            searchState.insert(QStringLiteral("rows"), rows);
+        }
+    }
     return {
+        { QStringLiteral("epgSearch"), searchState },
         { QStringLiteral("multiview"), multiview },
         { QStringLiteral("timestamp"), timestampUtc() },
         { QStringLiteral("window"), currentWindowState() },
@@ -1140,6 +1172,7 @@ QJsonArray UiTestBridge::buildVisibleTextInventory() const
             };
             if (auto *item = qobject_cast<QQuickItem *>(object)) {
                 record.insert(QStringLiteral("enabled"), item->isEnabled());
+                record.insert(QStringLiteral("activeFocus"), item->hasActiveFocus());
                 if (object->metaObject()->indexOfProperty("hovered") >= 0) {
                     record.insert(QStringLiteral("hovered"), object->property("hovered").toBool());
                 }
@@ -1327,6 +1360,8 @@ QJsonObject UiTestBridge::currentWindowState() const
 {
     return {
         { QStringLiteral("active"), m_window != nullptr && m_window->isActive() },
+        { QStringLiteral("fullscreen"), m_window != nullptr && m_window->visibility() == QWindow::FullScreen },
+        { QStringLiteral("activeFocusObject"), m_window != nullptr && m_window->activeFocusItem() ? m_window->activeFocusItem()->objectName() : QString {} },
         { QStringLiteral("width"), m_window != nullptr ? m_window->width() : 0.0 },
         { QStringLiteral("height"), m_window != nullptr ? m_window->height() : 0.0 },
         { QStringLiteral("x11WindowId"), m_window != nullptr ? static_cast<qint64>(m_window->winId()) : 0 },
@@ -1345,7 +1380,12 @@ QJsonObject UiTestBridge::currentPlaybackState() const
         return {};
     }
 
+    const auto *backend = m_playerController->player();
+    const auto paused = backend ? backend->pauseState() : std::nullopt;
     auto playback = QJsonObject {
+        { QStringLiteral("isPlaying"), m_playerController->isPlaying() },
+        { QStringLiteral("isRecording"), m_playerController->isRecording() },
+        { QStringLiteral("paused"), paused ? QJsonValue(*paused) : QJsonValue() },
         { QStringLiteral("currentChannel"), redactedJsonValue(QJsonValue::fromVariant(m_playerController->currentChannel())) },
         { QStringLiteral("playbackUrl"), Core::redactSensitiveUrl(m_playerController->currentPlaybackUrl()) },
         { QStringLiteral("debugOverlay"), redactedJsonValue(QJsonValue::fromVariant(m_playerController->debugOverlaySnapshot())) },

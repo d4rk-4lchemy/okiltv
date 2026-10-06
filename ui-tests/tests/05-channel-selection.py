@@ -321,7 +321,7 @@ def main():
         outside()
         time.sleep(3)
         wait("source switch clears old mouse lock", lambda s: not visible(s))
-        key("ctrl+f")
+        key("Tab")
         wait("search opens from video-only mode", visible)
         runner.xdotool("type", "--window", runner.window_id, "Fixture 02")
         wait("search receives typed text", lambda s: element(s, "left.search")["value"] == "Fixture 02")

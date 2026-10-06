@@ -356,6 +356,19 @@ AppController::AppController(
     , m_iconCacheService(*database, m_network)
 {
     m_downloadController = new CatchupDownloadController(settings, this);
+    const auto searchScopeChanged = [this] {
+        ++m_searchChannelRevision;
+        emit epgSearchContextChanged();
+    };
+    connect(m_channelListModel, &QAbstractItemModel::modelReset, this, searchScopeChanged);
+    connect(m_settingsController, &SettingsController::saved, this, searchScopeChanged);
+    connect(this, &AppController::activeProfileIdChanged, this, searchScopeChanged);
+    connect(this, &AppController::epgRefreshStateChanged, this, &AppController::epgSearchContextChanged);
+    connect(this, &AppController::catchupProgressChanged, this, &AppController::epgSearchActionsChanged);
+    connect(m_dvrController, &DvrController::stateChanged, this, &AppController::epgSearchActionsChanged);
+    connect(m_multiViewController, &MultiViewController::layoutModeChanged, this, &AppController::epgSearchActionsChanged);
+    connect(m_multiViewController, &MultiViewController::focusedPlaybackChanged, this, &AppController::epgSearchActionsChanged);
+
     connect(m_timeshiftController, &TimeshiftController::stateChanged, this, &AppController::refreshTimeshiftProgram);
     connect(this, &AppController::epgRefreshStateChanged, this, &AppController::refreshTimeshiftProgram);
     connect(m_multiViewController, &MultiViewController::focusedPlaybackChanged, this, &AppController::refreshTimeshiftProgram);
@@ -543,6 +556,7 @@ AppController::AppController(
 
 void AppController::connectPlaybackSession(PlayerController *controller)
 {
+    connect(controller, &PlayerController::isRecordingChanged, this, &AppController::epgSearchActionsChanged);
     auto *formatter = m_settingsController->dateTimeFormatter();
     controller->setDateTimeFormat(formatter->options());
     connect(formatter, &DateTimeFormatter::formatChanged,
@@ -1259,6 +1273,7 @@ void AppController::applyEpgSnapshot(
     m_catchupEpgWindows.clear();
     m_pendingCatchupSamples.clear();
     m_epgService->applySnapshot(snapshot);
+    ++m_searchEpgGeneration;
     m_epgLoadedProfileId = profileId;
     m_epgFetchedAt = fetchedAt;
     m_epgNextRefreshAt = scheduleRefresh
@@ -1301,6 +1316,7 @@ void AppController::applyEpgSnapshot(
 void AppController::clearEpg(const QUuid &profileId, const QString &errorText)
 {
     m_epgService->clear();
+    ++m_searchEpgGeneration;
     m_epgLoadedProfileId = profileId;
     m_epgFetchedAt = {};
     m_epgNextRefreshAt = {};
@@ -2064,10 +2080,11 @@ void AppController::playCatchupAtOffset(
     } else playCatchupAtOffsetInternal(channelVariant, programVariant, targetSeconds);
 }
 
-void AppController::playCatchupAtOffsetInternal(
+bool AppController::playCatchupAtOffsetInternal(
     const QVariantMap &channelVariant, const QVariantMap &programVariant,
-    const double targetSeconds)
+    const double targetSeconds, const std::function<bool()> &stillCurrent)
 {
+    if (stillCurrent && !stillCurrent()) return false;
     DebugLogger::instance().log(
         QStringLiteral("catchup.resolve.input"),
         QStringLiteral("rawStart=%1 rawStop=%2 channelId=%3 profileId=%4")
@@ -2086,7 +2103,7 @@ void AppController::playCatchupAtOffsetInternal(
             QStringLiteral("catchup.resolve.failure"),
             validation.reason.isEmpty() ? QStringLiteral("Catch-up validation failed.") : validation.reason);
         setStatusText(validation.reason.isEmpty() ? QStringLiteral("Catch-up is unavailable.") : validation.reason);
-        return;
+        return false;
     }
 
     DebugLogger::instance().log(
@@ -2112,7 +2129,7 @@ void AppController::playCatchupAtOffsetInternal(
             QStringLiteral("catchup.resolve.failure"),
             QStringLiteral("%1 channel=%2").arg(reason, validation.channel->name));
         setStatusText(reason);
-        return;
+        return false;
     }
 
     const bool pipActive = m_multiViewController->layoutMode() == QStringLiteral("pip");
@@ -2121,7 +2138,7 @@ void AppController::playCatchupAtOffsetInternal(
     if (pictureInPicture) {
         destination = m_multiViewController->prepareCatchupPictureInPicture();
         if (!destination) {
-            return;
+            return false;
         }
     }
     const auto pipRevision = m_multiViewController->pipRevision();
@@ -2141,7 +2158,7 @@ void AppController::playCatchupAtOffsetInternal(
     const auto initialWindow = resolver.resolveWindow(catchupChannel, requestedStart, safeEdge, &catchupResolveReason);
     if (!initialWindow) {
         setStatusText(catchupResolveReason);
-        return;
+        return false;
     }
     const auto initialCatchupUrl = initialWindow->url;
     const std::optional<double> initialStreamBaseOffsetSeconds =
@@ -2150,12 +2167,14 @@ void AppController::playCatchupAtOffsetInternal(
         static_cast<double>(playbackTarget.programStartUtc.msecsTo(catchupProgram.start)) / 1000.0 + boundedTarget;
     const std::optional<double> initialSeekSeconds = std::nullopt;
     const bool endless = true;
-    auto startCatchupPlayback = [this, destination, pictureInPicture, pipActive, pipRevision, catchupChannel, catchupProgram, playbackTarget, resolvedCatchupUrl, initialCatchupUrl, initialSeekSeconds, initialStreamBaseOffsetSeconds, initialTimelinePositionSeconds, endless](
+    auto startCatchupPlayback = [this, destination, pictureInPicture, pipActive, pipRevision, catchupChannel, catchupProgram, playbackTarget, resolvedCatchupUrl, initialCatchupUrl, initialSeekSeconds, initialStreamBaseOffsetSeconds, initialTimelinePositionSeconds, endless, stillCurrent](
                                     const quint64 generation,
                                     const QString &resolvedInitialUrl,
                                     const bool redirectApplied,
                                     const QString &redirectResolutionError) {
         if (generation != m_catchupPlayGeneration || !destination
+            || (stillCurrent && !stillCurrent())
+            || guidToString(catchupChannel.profileId) != activeProfileId()
             || (pictureInPicture && (m_multiViewController->layoutMode() != QStringLiteral("pip")
                 || m_multiViewController->pipControllerObject() != destination))
             || (pipActive && m_multiViewController->pipRevision() != pipRevision)
@@ -2205,7 +2224,7 @@ void AppController::playCatchupAtOffsetInternal(
         validation.profile.has_value() && validation.profile->type == ProfileType::Xtream;
     if (!shouldResolveRedirect) {
         startCatchupPlayback(catchupGeneration, initialCatchupUrl, false, QString {});
-        return;
+        return true;
     }
 
     m_backgroundTasks.addFuture(QtConcurrent::run([this, catchupGeneration, initialCatchupUrl, startCatchupPlayback]() {
@@ -2228,6 +2247,7 @@ void AppController::playCatchupAtOffsetInternal(
             },
             Qt::QueuedConnection);
     }));
+    return true;
 }
 
 void AppController::activateChannel(const int channelId)
@@ -2534,4 +2554,155 @@ QList<ChannelCategory> AppController::buildM3uCategories(const QList<Channel> &c
     return result;
 }
 
+} // namespace OKILTV::App
+
+namespace OKILTV::App {
+EpgSearchController::EpgSearchController(AppController* app, QObject* parent)
+    : EpgSearchController([app] {
+          auto context = app->epgSearchContext();
+          if (context.snapshot && context.snapshot->store && !context.snapshot->store->searchReady())
+              Core::EpgCacheService::prepareSearch(context.snapshot->store);
+          return context;
+      },
+          [](const auto& snapshot, const auto& request, const auto& cancelled) {
+              return Core::EpgService::search(snapshot, request, cancelled);
+          },
+          Actions { [app](const auto& channel, const auto& program) {
+                       return app->epgSearchActionState(channel, program);
+                   },
+              [app](const auto& channel, const auto& program, bool beginning) {
+                  return app->activateEpgSearchResult(channel, program, beginning);
+              },
+              [app](const auto& channel, const auto& program) {
+                  return app->toggleEpgSearchRecording(channel, program);
+              },
+              [app](const auto& channel, const auto& program) {
+                  return app->requestEpgDetails(channel, program);
+              } },
+          parent)
+{
+    connect(app, &AppController::epgSearchContextChanged, this, &EpgSearchController::refreshContext);
+    connect(app, &AppController::epgSearchActionsChanged, this, &EpgSearchController::refreshActions);
+    connect(app, &AppController::epgDetailsReady, this, &EpgSearchController::completeDetails);
+}
+EpgSearchController::Context AppController::epgSearchContext() const
+{
+    EpgSearchController::Context context;
+    context.request.profileId = activeProfileId();
+    context.request.epgGeneration = m_searchEpgGeneration;
+    context.request.channelRevision = m_searchChannelRevision;
+    context.snapshot = m_epgService->snapshot();
+    context.format = m_settingsController->dateTimeFormatter()->options();
+    // Initial XMLTV fetch/import also prepares an empty local generation.
+    // A refresh with usable previous data must keep that snapshot searchable.
+    const bool emptyGeneration = !context.snapshot || context.snapshot->totalEntries == 0;
+    context.preparing = m_epgCacheBootstrapPending || (m_epgRefreshInProgress && emptyGeneration);
+    context.fetchedAt = m_epgFetchedAt;
+    if (const auto profile = m_settings->activeProfile())
+        context.sourceName = profile->name;
+    const auto hidden = m_settings->current().hiddenGroupsByProfile.value(activeProfileId());
+    for (const auto& channel : m_loadedChannels) {
+        if (guidToString(channel.profileId) == context.request.profileId
+            && !hidden.contains(normalizeChannelCategoryId(channel.categoryId)))
+            context.request.eligibleChannels.append(channel);
+    }
+    return context;
+}
+QVariantMap AppController::epgSearchActionState(const QVariantMap& channel, const QVariantMap& program) const
+{
+    const auto context = epgSearchContext();
+    const auto channelId = channel.value(QStringLiteral("id")).toInt();
+    const auto profileId = channel.value(QStringLiteral("profileId")).toString();
+    const auto eligible = std::find_if(context.request.eligibleChannels.cbegin(),
+        context.request.eligibleChannels.cend(), [&](const auto& entry) {
+            return entry.id == channelId && guidToString(entry.profileId) == profileId;
+        });
+    const auto start = parseIsoUtc(program.value(QStringLiteral("start")).toString());
+    const auto stop = parseIsoUtc(program.value(QStringLiteral("stop")).toString());
+    const bool valid = !m_stopping && eligible != context.request.eligibleChannels.cend() && start.isValid()
+        && stop > start
+        && eligible->tvgId.trimmed().compare(
+               program.value(QStringLiteral("channelId")).toString().trimmed(), Qt::CaseInsensitive)
+            == 0;
+    const auto now = QDateTime::currentDateTimeUtc();
+    const bool live = valid && start <= now && now < stop;
+    const bool past = valid && stop <= now;
+    const bool scheduled = valid && m_dvrController->isProgramScheduled(channel, program);
+    const auto catchup = catchupActionState(channel, program);
+    const auto download = catchupDownloadActionState(channel, program);
+    const bool grid
+        = m_multiViewController->isActive() && m_multiViewController->layoutMode() != QStringLiteral("pip");
+    const auto* destination = m_multiViewController->isActive()
+        ? m_multiViewController->focusedController()
+        : m_playerController;
+    const bool protectedRecording = destination && destination->isRecording();
+    const bool catchupEnabled
+        = valid && catchup.value(QStringLiteral("enabled")).toBool() && !grid && !protectedRecording;
+    QString reason;
+    if (!valid)
+        reason = tr("The selected programme is no longer available.");
+    else if (protectedRecording)
+        reason = tr("Stop the playback recording before switching programmes.");
+    else if (grid && !live)
+        reason = tr("Archive playback is unavailable in grid multiview. Switch to Live or PiP first.");
+    else if (!live && !catchupEnabled)
+        reason = catchup.value(QStringLiteral("reason")).toString();
+    const QString kind = live    ? QStringLiteral("live")
+        : past && catchupEnabled ? QStringLiteral("catchup")
+                                 : QStringLiteral("details");
+    const QString label = live ? tr("Watch live")
+        : kind == QStringLiteral("catchup")
+        ? (catchup.value(QStringLiteral("resumeAvailable")).toBool() ? tr("Resume") : tr("Play"))
+        : tr("Show details");
+    return { { QStringLiteral("actionKind"), kind }, { QStringLiteral("primaryLabel"), label },
+        { QStringLiteral("primaryEnabled"),
+            valid && (kind == QStringLiteral("details") || !protectedRecording) },
+        { QStringLiteral("fromBeginningEnabled"),
+            catchupEnabled && (!past || catchup.value(QStringLiteral("resumeAvailable")).toBool()) },
+        { QStringLiteral("recordingLabel"), scheduled ? tr("Cancel recording") : tr("Schedule recording") },
+        { QStringLiteral("recordingVisible"), valid && (!past || scheduled) },
+        { QStringLiteral("recordingEnabled"),
+            valid && !eligible->streamUrl.isEmpty() && (scheduled || stop > now) },
+        { QStringLiteral("downloadEnabled"),
+            valid && past && download.value(QStringLiteral("enabled")).toBool() },
+        { QStringLiteral("reason"), reason } };
+}
+bool AppController::activateEpgSearchResult(
+    const QVariantMap& channel, const QVariantMap& program, bool fromBeginning)
+{
+    const auto state = epgSearchActionState(channel, program);
+    if (!state
+            .value(fromBeginning ? QStringLiteral("fromBeginningEnabled") : QStringLiteral("primaryEnabled"))
+            .toBool()
+        || program.value(QStringLiteral("detailsPending")).toBool())
+        return false;
+    if (!fromBeginning && state.value(QStringLiteral("actionKind")).toString() == QStringLiteral("live")) {
+        const auto resolved = m_channelListModel->channelById(channel.value(QStringLiteral("id")).toInt());
+        if (!resolved || guidToString(resolved->profileId) != activeProfileId())
+            return false;
+        if (m_multiViewController->isActive())
+            return m_multiViewController->assignResolvedChannel(*resolved);
+        activatePrimaryChannel(*resolved);
+        return true;
+    }
+    if (!fromBeginning && state.value(QStringLiteral("actionKind")).toString() != QStringLiteral("catchup"))
+        return false;
+    const auto resume
+        = catchupActionState(channel, program).value(QStringLiteral("resumeSeconds")).toDouble();
+    const auto sourceId = activeProfileId();
+    const auto channelRevision = m_searchChannelRevision;
+    const auto epgGeneration = m_searchEpgGeneration;
+    // Accepted playback deliberately outlives the search overlay. Keep only
+    // source/scope/EPG identity here, never the controller's browsing session.
+    const auto stillCurrent = [this, sourceId, channelRevision, epgGeneration] {
+        return !m_stopping && activeProfileId() == sourceId
+            && m_searchChannelRevision == channelRevision && m_searchEpgGeneration == epgGeneration;
+    };
+    return playCatchupAtOffsetInternal(channel, program, fromBeginning ? 0.0 : resume, stillCurrent);
+}
+bool AppController::toggleEpgSearchRecording(const QVariantMap& channel, const QVariantMap& program)
+{
+    return epgSearchActionState(channel, program).value(QStringLiteral("recordingEnabled")).toBool()
+        && !program.value(QStringLiteral("detailsPending")).toBool() && toggleEpgRecording(channel, program);
+}
 } // namespace OKILTV::App

@@ -120,7 +120,7 @@ def main():
         key("Escape")
         wait("picker fully closed", lambda s: not s["multiview"]["pickerOpen"]
              and not s["multiview"]["chromeAnimating"])
-        key("ctrl+f")
+        key("Tab")
         wait("search focused and enabled", lambda s: s["multiview"]["searchFocused"]
              and not s["multiview"]["chromeAnimating"])
         runner.xdotool("type", "--window", runner.window_id, "Fixture")
@@ -130,9 +130,8 @@ def main():
         grid("search protects input", 2)
         key("ctrl+Return")
         grid("search protects promotion", 2)
-        # Enter keeps the search field's existing action: move into the channel list.
-        key("ctrl+f")
-        wait("search refocused after its native Enter action", lambda s:
+        # Modified Enter preserves editor focus; Tab here would move to media navigation.
+        wait("modified Enter keeps search focus", lambda s:
              s["multiview"]["searchFocused"] and not s["multiview"]["chromeAnimating"])
         key("ctrl+Up")
         wait("search can still open Guide", lambda s: s["window"]["visibleOverlay"] == "guide")

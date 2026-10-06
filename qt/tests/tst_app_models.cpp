@@ -622,6 +622,11 @@ private slots:
     void multiviewFocusedControlsAndEpgFollowSlotWithoutRetune();
     void multiviewPrimaryTileReflectsPlaybackPlayerObjectChanges();
     void mpvVideoItemSharedPlayerDetachDoesNotClearOtherRenderTarget();
+    void epgSearchScopeAndValidatedActions();
+    void epgSearchArchiveRestartRequiresResume();
+    void epgSearchPreparingTracksEmptyActiveRefresh();
+    void epgSearchPendingCatchupRejectsChangedContext_data();
+    void epgSearchPendingCatchupRejectsChangedContext();
     void appControllerRoutesActivationToFocusedMultiviewTile();
     void appControllerActivatingPipChannelSwapsWithoutRetune();
     void appControllerSameChannelActivationSkipsRetuneWhileActiveOrInFlight();
@@ -14945,6 +14950,240 @@ void AppModelTests::updateCheckTimeoutAndShutdown()
     QCOMPARE(closedFinished.count(), 0);
     QVERIFY(!closing.pending());
     QCOMPARE(server.requests, 2);
+}
+
+
+void AppModelTests::epgSearchScopeAndValidatedActions()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    harness.appController->initialize();
+    QTRY_VERIFY_WITH_TIMEOUT(!harness.appController->isBusy(), 5000);
+    const auto channels = harness.channelListModel->allChannels();
+    QCOMPARE(channels.size(), 2);
+    auto foreign = channels.first();
+    foreign.profileId = QUuid::createUuid();
+    harness.appController->m_loadedChannels.append(foreign);
+    const auto source = guidToString(harness.activeProfileId());
+    harness.settings->current().hiddenGroupsByProfile[source] = { QStringLiteral("Sports") };
+    harness.channelListModel->setSelectedCategoryId(QStringLiteral("__favourites__"));
+    harness.channelListModel->setSearchText(QStringLiteral("no matching channel"));
+    QCOMPARE(harness.channelListModel->rowCount(), 0);
+    const auto context = harness.appController->epgSearchContext();
+    QCOMPARE(context.request.eligibleChannels.size(), 1);
+    QCOMPARE(context.request.eligibleChannels.first().id, channels.first().id);
+    QCOMPARE(context.request.eligibleChannels.first().profileId, harness.activeProfileId());
+    EpgEntry entry;
+    entry.channelId = channels.first().tvgId;
+    entry.title = QStringLiteral("Future show");
+    entry.start = QDateTime::currentDateTimeUtc().addSecs(1800);
+    entry.stop = entry.start.addSecs(3600);
+    const auto channel = toVariantMap(channels.first());
+    auto program = toVariantMap(entry);
+    QCOMPARE(harness.appController->epgSearchActionState(channel, program).value("actionKind").toString(),
+        QStringLiteral("details"));
+    QVERIFY(!harness.appController->activateEpgSearchResult(channel, program, false));
+    QVERIFY(!harness.playerController->currentChannelValue());
+    entry.title = QStringLiteral("Live show");
+    entry.start = QDateTime::currentDateTimeUtc().addSecs(-1800);
+    entry.stop = entry.start.addSecs(3600);
+    program = toVariantMap(entry);
+    QVERIFY(!harness.appController->activateEpgSearchResult(toVariantMap(foreign), program, false));
+    auto hiddenProgram = program;
+    hiddenProgram.insert(QStringLiteral("channelId"), channels.last().tvgId);
+    QVERIFY(!harness.appController->activateEpgSearchResult(toVariantMap(channels.last()), hiddenProgram, false));
+    harness.playerController->m_isRecording = true;
+    QVERIFY(!harness.appController->epgSearchActionState(channel, program).value("primaryEnabled").toBool());
+    QVERIFY(!harness.appController->activateEpgSearchResult(channel, program, false));
+    harness.playerController->m_isRecording = false;
+    QVERIFY(harness.appController->activateEpgSearchResult(channel, program, false));
+    QCOMPARE(harness.playerController->currentChannelValue()->id, channels.first().id);
+    QCOMPARE(harness.channelListModel->searchText(), QStringLiteral("no matching channel"));
+    QCOMPARE(harness.channelListModel->selectedCategoryId(), QStringLiteral("__favourites__"));
+    harness.multiViewController->m_layoutMode = QStringLiteral("grid2x2");
+    entry.stop = QDateTime::currentDateTimeUtc().addSecs(-600);
+    entry.start = entry.stop.addSecs(-3600);
+    const auto archiveState = harness.appController->epgSearchActionState(channel, toVariantMap(entry));
+    QCOMPARE(archiveState.value("actionKind").toString(), QStringLiteral("details"));
+    QVERIFY(!archiveState.value("fromBeginningEnabled").toBool());
+    QVERIFY(archiveState.value("reason").toString().contains(QStringLiteral("grid")));
+    QVERIFY(!harness.appController->activateEpgSearchResult(channel, toVariantMap(entry), true));
+    QCOMPARE(harness.multiViewController->layoutMode(), QStringLiteral("grid2x2"));
+    harness.multiViewController->m_layoutMode = QStringLiteral("off");
+}
+
+void AppModelTests::epgSearchArchiveRestartRequiresResume()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    harness.appController->initialize();
+    QTRY_VERIFY_WITH_TIMEOUT(!harness.appController->isBusy(), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(!harness.appController->epgRefreshInProgress(), 5000);
+    auto channels = harness.channelListModel->allChannels();
+    QVERIFY(!channels.isEmpty());
+    auto& channel = channels[0];
+    channel.catchupSupported = true;
+    channel.catchupWindowHours = 72;
+    channel.catchupMode = QStringLiteral("append");
+    channel.catchupSourceTemplate = QStringLiteral("utc={utc}&lutc={lutc}");
+    harness.channelListModel->setChannels(channels, {});
+    harness.appController->m_loadedChannels = channels;
+    EpgEntry entry;
+    entry.channelId = channel.tvgId;
+    entry.title = QStringLiteral("Archive fixture");
+    entry.start = QDateTime::currentDateTimeUtc().addSecs(-7200);
+    entry.stop = entry.start.addSecs(3600);
+    const auto channelMap = toVariantMap(channel);
+    const auto program = toVariantMap(entry);
+    const auto state = [&] { return harness.appController->epgSearchActionState(channelMap, program); };
+    QCOMPARE(state().value("actionKind").toString(), QStringLiteral("catchup"));
+    QCOMPARE(state().value("primaryLabel").toString(), QStringLiteral("Play"));
+    QVERIFY(!state().value("recordingVisible").toBool());
+    QVERIFY(!state().value("recordingEnabled").toBool());
+    QVERIFY(!state().value("fromBeginningEnabled").toBool());
+    QVERIFY(!harness.appController->activateEpgSearchResult(channelMap, program, true));
+    const auto observe = [&](qint64 seconds) {
+        emit harness.playerController->catchupProgressObserved(
+            { channel, entry.start, entry.stop, entry.start.addSecs(seconds), false });
+    };
+    observe(1427);
+    QCOMPARE(state().value("primaryLabel").toString(), QStringLiteral("Resume"));
+    QVERIFY(state().value("fromBeginningEnabled").toBool());
+    observe(3595);
+    QCOMPARE(state().value("primaryLabel").toString(), QStringLiteral("Play"));
+    QVERIFY(!state().value("fromBeginningEnabled").toBool());
+    observe(30);
+    QVERIFY(!state().value("fromBeginningEnabled").toBool());
+    entry.start = QDateTime::currentDateTimeUtc().addSecs(-600);
+    entry.stop = entry.start.addSecs(1800);
+    const auto live = harness.appController->epgSearchActionState(channelMap, toVariantMap(entry));
+    QCOMPARE(live.value("primaryLabel").toString(), QStringLiteral("Watch live"));
+    QVERIFY(live.value("recordingVisible").toBool());
+    QVERIFY(live.value("fromBeginningEnabled").toBool());
+}
+
+void AppModelTests::epgSearchPreparingTracksEmptyActiveRefresh()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    harness.appController->initialize();
+    QTRY_VERIFY_WITH_TIMEOUT(!harness.appController->isBusy(), 5000);
+    const auto channels = harness.channelListModel->allChannels();
+    QVERIFY(!channels.isEmpty());
+    harness.epgService->clear();
+    harness.appController->m_epgCacheBootstrapPending = false;
+    harness.appController->m_epgRefreshInProgress = true;
+    QVERIFY(harness.appController->epgSearchContext().preparing);
+    EpgSearchController search(harness.appController.get());
+    search.openSession();
+    search.setQuery(QStringLiteral("Fixture"));
+    QTRY_COMPARE(search.status(), QStringLiteral("preparing"));
+    QVERIFY(!search.resultsCurrent());
+    EpgEntry entry;
+    entry.channelId = channels.first().tvgId;
+    entry.title = QStringLiteral("Fixture programme");
+    entry.start = QDateTime::currentDateTimeUtc().addSecs(-60);
+    entry.stop = entry.start.addSecs(3600);
+    const auto snapshot = std::make_shared<EpgService::Snapshot>(EpgService::buildSnapshot({ entry }));
+    harness.appController->applyEpgSnapshot(harness.appController->m_epgLoadGeneration,
+        harness.activeProfileId(), snapshot, QDateTime::currentDateTimeUtc());
+    QTRY_VERIFY(search.resultsCurrent());
+    QCOMPARE(search.model()->rowCount(), 1);
+    const auto key = search.selectedKey();
+    harness.appController->m_epgRefreshInProgress = true;
+    emit harness.appController->epgRefreshStateChanged();
+    QVERIFY(!harness.appController->epgSearchContext().preparing);
+    QVERIFY(search.resultsCurrent());
+    QCOMPARE(search.selectedKey(), key);
+    QCOMPARE(search.model()->rowCount(), 1);
+    // A completed empty generation is NoEpg, rather than ongoing preparation.
+    harness.appController->clearEpg(harness.activeProfileId());
+    QVERIFY(!harness.appController->epgSearchContext().preparing);
+    QTRY_COMPARE(search.status(), QStringLiteral("no-epg"));
+    QVERIFY(!search.resultsCurrent());
+}
+
+void AppModelTests::epgSearchPendingCatchupRejectsChangedContext_data()
+{
+    QTest::addColumn<QString>("mutation");
+    QTest::newRow("scope") << QStringLiteral("scope");
+    QTest::newRow("epg") << QStringLiteral("epg");
+    QTest::newRow("source") << QStringLiteral("source");
+}
+
+void AppModelTests::epgSearchPendingCatchupRejectsChangedContext()
+{
+    QFETCH(QString, mutation);
+    QTcpServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+    QPointer<QTcpSocket> pending;
+    connect(&server, &QTcpServer::newConnection, &server, [&] {
+        while (server.hasPendingConnections()) {
+            auto *socket = server.nextPendingConnection();
+            connect(socket, &QTcpSocket::readyRead, socket, [&, socket] {
+                const auto request = socket->readAll();
+                if (request.startsWith("HEAD ") && !pending) {
+                    pending = socket;
+                    return;
+                }
+                socket->write("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                socket->disconnectFromHost();
+            });
+        }
+    });
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    harness.appController->initialize();
+    QTRY_VERIFY_WITH_TIMEOUT(!harness.appController->isBusy(), 5000);
+    auto profile = harness.settings->activeProfile().value();
+    profile.type = ProfileType::Xtream;
+    profile.xtreamBaseUrl = QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort());
+    profile.xtreamUsername = QStringLiteral("fixture-user");
+    profile.xtreamPassword = QStringLiteral("fixture-password");
+    QVERIFY(harness.settings->replaceProfile(profile.id, profile));
+    auto channels = harness.channelListModel->allChannels();
+    QVERIFY(!channels.isEmpty());
+    channels[0].source = ChannelSource::Xtream;
+    channels[0].id = 1953;
+    channels[0].catchupSupported = true;
+    channels[0].catchupWindowHours = 72;
+    channels[0].streamUrl = QStringLiteral("http://127.0.0.1:%1/live/fixture").arg(server.serverPort());
+    harness.appController->m_loadedChannels = channels;
+    harness.channelListModel->setChannels(channels, {
+        { QStringLiteral("News"), QStringLiteral("News"), 0 },
+        { QStringLiteral("Sports"), QStringLiteral("Sports"), 0 }
+    });
+    EpgEntry entry;
+    entry.channelId = channels.first().tvgId;
+    entry.title = QStringLiteral("Past fixture show");
+    entry.start = QDateTime::currentDateTimeUtc().addSecs(-3600);
+    entry.stop = entry.start.addSecs(1800);
+    QSignalSpy activated(harness.playerController.get(), &PlayerController::playbackChannelActivated);
+    QVERIFY(harness.appController->activateEpgSearchResult(toVariantMap(channels.first()), toVariantMap(entry), false));
+    const auto playbackFuture = harness.appController->m_backgroundTasks.futures().constLast();
+    QTRY_VERIFY_WITH_TIMEOUT(pending, 1000);
+    if (mutation == QStringLiteral("scope")) {
+        harness.settings->current().hiddenGroupsByProfile[guidToString(profile.id)] = { channels.first().categoryId };
+        emit harness.settingsController->saved();
+    } else if (mutation == QStringLiteral("epg")) {
+        const auto snapshot = std::make_shared<EpgService::Snapshot>(EpgService::buildSnapshot({ entry }));
+        harness.appController->applyEpgSnapshot(harness.appController->m_epgLoadGeneration,
+            profile.id, snapshot, QDateTime::currentDateTimeUtc());
+    } else {
+        ServerProfile other;
+        other.id = QUuid::createUuid();
+        other.name = QStringLiteral("Other fixture source");
+        other.type = ProfileType::M3UFile;
+        other.m3uFilePath = harness.playlistPath;
+        QVERIFY(harness.settings->addProfile(other));
+        harness.settings->setActiveProfileId(other.id);
+    }
+    pending->write("HTTP/1.1 302 Found\r\nLocation: /archive/final.m3u8\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    pending->disconnectFromHost();
+    QTRY_VERIFY_WITH_TIMEOUT(playbackFuture.isFinished(), 5000);
+    QCoreApplication::processEvents();
+    QCOMPARE(activated.count(), 0);
+    QVERIFY(!harness.playerController->currentChannelValue());
 }
 
 #include "vod/vodcatalogtests.inc"

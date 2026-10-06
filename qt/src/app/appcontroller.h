@@ -9,6 +9,7 @@
 #include "../core/settingsmanager.h"
 
 #include "playercontroller.h"
+#include "epgsearchcontroller.h"
 #include <QPointer>
 #include <QObject>
 #include <QElapsedTimer>
@@ -71,6 +72,11 @@ public:
         Core::EpgService *epgService,
         QObject *parent = nullptr);
 
+    EpgSearchController::Context epgSearchContext() const;
+    QVariantMap epgSearchActionState(const QVariantMap &channel, const QVariantMap &program) const;
+    bool activateEpgSearchResult(const QVariantMap &channel, const QVariantMap &program, bool fromBeginning);
+    bool toggleEpgSearchRecording(const QVariantMap &channel, const QVariantMap &program);
+
     CatchupDownloadController *downloadController() const { return m_downloadController; }
     QStringList groupAutoEnableNoticeProfileIds() const;
     Q_INVOKABLE void dismissGroupAutoEnableNotice(const QString &profileId);
@@ -105,6 +111,8 @@ public slots:
     Q_INVOKABLE QString debugSummary() const;
 
 signals:
+    void epgSearchContextChanged();
+    void epgSearchActionsChanged();
     void sourceRefreshRequested(const QString &profileId);
     void groupAutoEnableNoticesChanged();
     void timeshiftProgramChanged();
@@ -121,6 +129,8 @@ private:
     void resolveEpgDetails(const QVariantMap &channel, const QVariantMap &program,
         const std::function<void(QVariantMap, QString)> &completed);
     quint64 m_epgDetailsRequest = 0;
+    quint64 m_searchChannelRevision = 0;
+    quint64 m_searchEpgGeneration = 0;
     QString buildDebugSummary() const;
     void refreshTimeshiftProgram();
     void setTimeshiftProgram(const QVariantMap &program);
@@ -150,8 +160,8 @@ private:
     bool restoreStartupCatchup(const Core::Channel &channel);
     std::optional<Core::EpgEntry> catchupProgramAt(const Core::Channel &channel, const QDateTime &time,
         const std::optional<Core::EpgEntry> &validatedProgram = std::nullopt) const;
-    void playCatchupAtOffsetInternal(const QVariantMap &channel, const QVariantMap &program,
-        double targetSeconds);
+    bool playCatchupAtOffsetInternal(const QVariantMap &channel, const QVariantMap &program,
+        double targetSeconds, const std::function<bool()> &stillCurrent = {});
     void connectPlaybackSession(PlayerController *controller);
     void recordCatchupProgress(const CatchupProgressSample &sample, PlayerController *source = nullptr);
     void flushCatchupProgress();

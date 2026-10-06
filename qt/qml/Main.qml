@@ -58,7 +58,7 @@ ApplicationWindow {
             ? (window.vod.activeSeries ? "series" : "movies") : "live"
     readonly property bool vodPalette: window.vodMounted || window.selectedMediaMode !== "live"
     property bool pendingLiveNavigation: false
-    readonly property bool modeNavigationEnabled: window.shell.activeOverlay !== "settings"
+    readonly property bool modeNavigationEnabled: !window.epgSearchExclusive && window.shell.activeOverlay !== "settings"
         && !window.vodTransitioning && !livePage.chromeAnimationsRunning
         && !window.pendingLiveNavigation && !(window.vod && window.vod.liveTransition)
         && !window.subtitleDialogActive && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible
@@ -80,8 +80,19 @@ ApplicationWindow {
     readonly property var downloads: catchupDownloadController
     readonly property var updates: updateCheckController
     readonly property var multiView: multiViewController
+    readonly property var epgSearch: epgSearchController
     readonly property var vod: typeof vodRuntime !== "undefined" ? vodRuntime : null
     // qmllint enable unqualified
+    property var epgSearchDownloadTarget: null
+    readonly property bool epgSearchActive: window.shell.activeOverlay === "epg-search"
+    readonly property bool epgSearchExclusive: window.epgSearchActive || epgSearchOverlay.visible
+    readonly property bool protectedInteraction: window.subtitleDialogActive || downloadUi.interactionActive
+        || dvrExitDialog.visible || updateDialog.visible || window.multiView.degradePromptVisible
+        || window.downloads.shuttingDown || window.pendingCloseSource.length > 0
+    readonly property bool epgSearchCanOpen: !window.protectedInteraction && !window.vodMounted
+        && !(window.vod && (window.vod.active || window.vod.episodeTransition || window.vod.liveTransition))
+        && !window.pendingLiveNavigation && !livePage.guideOverlayMounted && !livePage.leftPickerOpen
+        && window.shell.activeOverlay === "none"
     readonly property bool vodOpen: window.shell.activeOverlay === "vod"
     property string vodLibraryKind: "movies"
     readonly property var vodPage: vodLibraryKind === "series" ? seriesPage : moviesPage
@@ -92,7 +103,7 @@ ApplicationWindow {
         && (vodClosing || vodSlideProgress < 1 || vodSlideAnimation.running)
     readonly property bool textEditorFocused: activeFocusItem instanceof TextInput || activeFocusItem instanceof TextEdit
     readonly property bool subtitleDialogActive: window.vod !== null && Boolean(window.vod.subtitleDialogOpen)
-    readonly property bool overlayShortcutsEnabled: window.shell.activeOverlay !== "settings" && !window.vodOpen && !window.subtitleDialogActive && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
+    readonly property bool overlayShortcutsEnabled: !window.epgSearchExclusive && window.shell.activeOverlay !== "settings" && !window.vodOpen && !window.subtitleDialogActive && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
     readonly property bool liveShortcutsEnabled: window.overlayShortcutsEnabled && !livePage.searchFieldActive
     readonly property var forwardedShortcuts: {
         const shortcuts = [
@@ -106,7 +117,7 @@ ApplicationWindow {
             { sequence: ".", key: Qt.Key_Period, scope: "live" },
             { sequence: "Ctrl+G", key: Qt.Key_G, modifiers: Qt.ControlModifier, scope: "overlay" },
             { sequence: "Ctrl+S", key: Qt.Key_S, modifiers: Qt.ControlModifier, scope: "overlay" },
-            { sequence: "Ctrl+F", key: Qt.Key_F, modifiers: Qt.ControlModifier, scope: "nonGuideOverlay" },
+            { sequence: "Ctrl+F", key: Qt.Key_F, modifiers: Qt.ControlModifier, scope: "epgSearch" },
             { sequence: "Ctrl+O", key: Qt.Key_O, modifiers: Qt.ControlModifier, scope: "live" },
             { sequence: "Ctrl+P", key: Qt.Key_P, modifiers: Qt.ControlModifier, scope: "live" },
             { sequence: "Ctrl+Shift+P", key: Qt.Key_P, modifiers: Qt.ControlModifier | Qt.ShiftModifier, scope: "live" },
@@ -184,8 +195,8 @@ ApplicationWindow {
         window.beginExit()
     }
 
-    function requestCatchupDownload(channel, program) {
-        downloadUi.requestDownload(channel, program)
+    function requestCatchupDownload(channel, program, completionValidator = null) {
+        downloadUi.requestDownload(channel, program, completionValidator)
     }
 
     function beginExit() {
@@ -230,7 +241,28 @@ ApplicationWindow {
         window.requestAppClose("window")
     }
 
+    function openEpgSearch() {
+        if (window.epgSearchExclusive) {
+            if (!window.protectedInteraction) epgSearchOverlay.focusQuery()
+            return true
+        }
+        if (!window.epgSearchCanOpen) return false
+        livePage.prepareForEpgSearch()
+        window.shell.openOverlay("epg-search")
+        window.epgSearch.openSession()
+        epgSearchOverlay.open()
+        return true
+    }
+    function closeEpgSearch() {
+        if (!window.epgSearchExclusive) return
+        window.epgSearchDownloadTarget = null
+        window.epgSearch.closeSession()
+        epgSearchOverlay.close()
+        if (window.epgSearchActive) window.shell.clearOverlay()
+        livePage.finishEpgSearch()
+    }
     function toggleVod(kind = "movies") {
+        if (window.epgSearchExclusive) return false
         if (window.vodTransitioning) return true
         if (window.textEditorFocused || window.shell.activeOverlay === "settings"
             || window.subtitleDialogActive || downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
@@ -311,6 +343,7 @@ ApplicationWindow {
         if (window.subtitleDialogActive) return true
         if (downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
             return false
+        if (window.epgSearchExclusive) return true
         if (window.vodOpen) {
             if (window.vodTransitioning) return key === Qt.Key_Escape
             return key === Qt.Key_Escape ? vodPage.handleEscape() : false
@@ -323,6 +356,9 @@ ApplicationWindow {
     }
 
     function shortcutEnabled(scope) {
+        if (window.epgSearchExclusive) return false
+        if (scope === "epgSearch") return window.epgSearchCanOpen
+            || (window.overlayShortcutsEnabled && livePage.vodActive && window.shell.activeOverlay === "none")
         if (window.modeNavigationFocused && scope !== "always") return false
         if (livePage.vodSeasonFocused && (scope === "live" || scope === "overlay")) return false
         if (window.subtitleDialogActive || downloadUi.interactionActive || dvrExitDialog.visible || updateDialog.visible || window.downloads.shuttingDown)
@@ -362,7 +398,8 @@ ApplicationWindow {
             required property var modelData
 
             sequence: modelData.sequence
-            autoRepeat: modelData.sequence !== "Ctrl+O"
+            autoRepeat: modelData.sequence !== "Ctrl+F" && modelData.sequence !== "Ctrl+R" && modelData.sequence !== "Ctrl+D"
+                && modelData.sequence !== "Ctrl+O"
                 && modelData.sequence !== "Backspace"
                 && modelData.sequence !== "Ctrl+Return" && modelData.sequence !== "Ctrl+Enter"
             enabled: window.shortcutEnabled(modelData.scope)
@@ -376,7 +413,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "V"
         autoRepeat: false
-        enabled: !window.subtitleDialogActive && !window.textEditorFocused && window.shell.activeOverlay !== "settings"
+        enabled: !window.epgSearchExclusive && !window.subtitleDialogActive && !window.textEditorFocused && window.shell.activeOverlay !== "settings"
             && !window.pendingLiveNavigation && !(window.vod && window.vod.liveTransition)
             && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
         onActivated: window.toggleVod()
@@ -384,7 +421,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "B"
         autoRepeat: false
-        enabled: !window.subtitleDialogActive && !window.textEditorFocused && window.shell.activeOverlay !== "settings"
+        enabled: !window.epgSearchExclusive && !window.subtitleDialogActive && !window.textEditorFocused && window.shell.activeOverlay !== "settings"
             && !window.pendingLiveNavigation && !(window.vod && window.vod.liveTransition)
             && !downloadUi.interactionActive && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
         onActivated: window.toggleVod("series")
@@ -399,7 +436,7 @@ ApplicationWindow {
 
     Shortcut {
         sequence: "Escape"
-        enabled: !window.subtitleDialogActive && !downloadUi.choosingFile && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
+        enabled: !window.epgSearchExclusive && !window.subtitleDialogActive && !downloadUi.choosingFile && !dvrExitDialog.visible && !updateDialog.visible && !window.downloads.shuttingDown
         onActivated: {
             if (downloadUi.handleEscape())
                 return
@@ -428,6 +465,41 @@ ApplicationWindow {
             || windowResizeHandles.interactionActive || window.subtitleDialogActive || downloadUi.interactionActive
         onTopBarExternalHideLockChanged: {
             if (topBarExternalHideLock) livePage.revealUi("pointer")
+        }
+    }
+
+    EpgSearchOverlay {
+        id: epgSearchOverlay
+        controller: window.epgSearch
+        uiTransparency: window.settings.uiTransparency
+        inputBlocked: window.protectedInteraction
+        onCloseRequested: window.closeEpgSearch()
+    }
+    Connections {
+        target: window.epgSearch
+        function onCloseRequested() { window.closeEpgSearch() }
+        function onDownloadRequested(channel, program) {
+            window.epgSearchDownloadTarget = {
+                key: window.epgSearch.selectedKey, query: window.epgSearch.query,
+                token: window.epgSearch.downloadActionToken(), channelId: String(channel.id), start: new Date(program.start).getTime(),
+                stop: new Date(program.stop).getTime()
+            }
+            const target = window.epgSearchDownloadTarget
+            window.requestCatchupDownload(channel, program, function() {
+                return window.epgSearchActive && window.epgSearchDownloadTarget === target
+                    && window.epgSearch.validateDownloadTarget(target.token, target.key)
+            })
+        }
+    }
+    Connections {
+        target: downloadUi
+        function onRequestFailed(channel, program, reason) {
+            const target = window.epgSearchDownloadTarget
+            if (window.epgSearchExclusive && target && target.query === window.epgSearch.query
+                && target.token === window.epgSearch.downloadActionToken()
+                && target.channelId === String(channel.id) && target.start === new Date(program.start).getTime()
+                && target.stop === new Date(program.stop).getTime())
+                window.epgSearch.reportActionError(reason, target.key)
         }
     }
 
@@ -530,7 +602,8 @@ ApplicationWindow {
         transportBar: livePage.downloadTransportBar
         controller: window.downloads
         app: window.app
-        shellChromeVisible: window.shell.overlaysVisible || window.shell.activeOverlay !== "none"
+        shellChromeVisible: !window.epgSearchExclusive && (window.shell.overlaysVisible || window.shell.activeOverlay !== "none")
+        visible: !window.epgSearchExclusive
         mainWindow: window
         topInset: window.topBarReservedHeight
         uiTransparency: window.settings.uiTransparency
@@ -540,10 +613,20 @@ ApplicationWindow {
     Connections {
         target: window.downloads
         function onShutdownFinished() { Qt.callLater(function() { window.finishExit() }) }
+        function clearSearchDownloadTarget() {
+            const target = window.epgSearchDownloadTarget
+            Qt.callLater(function() {
+                if (window.epgSearchDownloadTarget === target) window.epgSearchDownloadTarget = null
+            })
+        }
+        function onDestinationChosen(destination) { clearSearchDownloadTarget() }
+        function onDestinationCancelled() { clearSearchDownloadTarget() }
     }
 
     WindowResizeHandles {
         id: windowResizeHandles
+        visible: !window.epgSearchExclusive
+        enabled: !window.epgSearchExclusive
         anchors.fill: parent
         window: window
         livePage: livePage
@@ -553,6 +636,8 @@ ApplicationWindow {
 
     WindowChromeBar {
         id: windowChromeBar
+        visible: !window.epgSearchExclusive && allowedInWindow && (targetVisible || opacity > 0.01)
+        enabled: !window.epgSearchExclusive && allowedInWindow && targetVisible && opacity > 0.01 && !animating
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
@@ -566,14 +651,17 @@ ApplicationWindow {
 
     MediaModeChrome {
         id: mediaModeChrome
+        visible: !window.epgSearchExclusive && (targetVisible || opacity > 0.01)
+        enabled: !window.epgSearchExclusive && targetVisible && opacity > 0.01 && !animating
         parent: window.contentItem
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.topMargin: window.topBarReservedHeight
         // Navigation stays fixed above the library and through the Live reveal.
-        targetVisible: livePage.showHoverUi || window.vodMounted || window.pendingLiveNavigation
-            || (window.vod && window.vod.liveTransition) || livePage.chromeAnimationsRunning
+        targetVisible: !window.epgSearchExclusive && window.shell.activeOverlay !== "settings"
+            && (livePage.showHoverUi || window.vodMounted || window.pendingLiveNavigation
+                || (window.vod && window.vod.liveTransition) || livePage.chromeAnimationsRunning)
         selectedMode: window.selectedMediaMode
         vodPalette: window.vodPalette
         navigationEnabled: window.modeNavigationEnabled
@@ -600,7 +688,7 @@ ApplicationWindow {
         anchors.margins: Theme.spacingM
         anchors.topMargin: Theme.spacingM + window.topBarReservedHeight
         running: window.app.isBusy || Boolean(window.vod && window.vod.sourceSyncInProgress)
-        visible: running
+        visible: running && !window.epgSearchExclusive
         z: 31
     }
 
@@ -614,7 +702,7 @@ ApplicationWindow {
         anchors.topMargin: window.topBarReservedHeight + Theme.spacingL
         width: Math.min(520, parent.width - 32)
         height: vodNoticeText.implicitHeight + 24
-        visible: message.length > 0
+        visible: message.length > 0 && !window.epgSearchExclusive
         color: Theme.surface
         radius: Theme.radiusM
         z: 100
@@ -645,7 +733,7 @@ ApplicationWindow {
         id: updateDialog
         controller: window.updates
         uiTransparency: window.settings.uiTransparency
-        allowedToOpen: window.visible && window.visibility !== Window.Minimized
+        allowedToOpen: !window.epgSearchExclusive && window.visible && window.visibility !== Window.Minimized
             && !window.subtitleDialogActive && !downloadUi.interactionActive && !dvrExitDialog.visible
             && window.pendingCloseSource === "" && !window.downloads.shuttingDown
             && window.shell.activeOverlay !== "settings" && !window.multiView.degradePromptVisible

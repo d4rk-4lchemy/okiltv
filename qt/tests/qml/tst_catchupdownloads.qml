@@ -104,6 +104,20 @@ TestCase {
         app.requests = 0
         app.enqueueError = ""
     }
+    function test_native_completion_rechecks_request_context() {
+        let current = true
+        ui.requestDownload({id: 1, name: "Fixture"}, {title: "Past programme", start: "2026-10-05T10:00:00Z", stop: "2026-10-05T11:00:00Z"}, function() { return current })
+        verify(ui.choosingFile)
+        current = false
+        downloads.destinationChosen("file:///tmp/stale-result.mkv")
+        compare(app.requests, 0)
+        verify(ui.notice.indexOf("no longer current") >= 0)
+        compare(ui.pendingValidator, null)
+        ui.requestDownload({id: 1, name: "Fixture"}, {title: "Past programme", start: "2026-10-05T10:00:00Z", stop: "2026-10-05T11:00:00Z"}, function() { return true })
+        downloads.destinationChosen("file:///tmp/current-result.mkv")
+        compare(app.requests, 1)
+        compare(ui.pendingValidator, null)
+    }
     function test_pause_button_toggles_and_survives_panel_close() {
         downloads.hasPending = true
         const indicator = findChild(ui, "ui.downloads.indicator")

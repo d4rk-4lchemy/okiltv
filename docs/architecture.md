@@ -31,6 +31,7 @@ signals, slots and invokable methods; controllers do not manipulate QML objects.
 |---|---|
 | `AppController` | Active source loading, channel/EPG orchestration, catch-up validation, startup restoration and watch tracking |
 | `ShellController` | Exclusive overlays, shell visibility, layout and interaction state |
+| `EpgSearchController` / `EpgSearchModel` | Local EPG query sessions, debounce, bounded background search, result selection and validated programme actions |
 | `PlayerController` | A player's backend objects, observed playback state and execution of playback policy decisions |
 | `MultiViewController` | PiP/grid slots, promotion, retained streams and backend ownership transitions |
 | `SettingsController` | Editable drafts, validation, Save/reload and presentation settings |
@@ -46,7 +47,7 @@ instances: `nowNextModel` follows browse selection, while
 `playbackNowNextModel` follows the playing channel. Never merge them.
 
 The QML player context property is `appPlayerController`, not `playerController`.
-Other important names include `appController`, `shellController`, `vodRuntime`,
+Other important names include `appController`, `shellController`, `epgSearchController`, `vodRuntime`,
 `vodCatalog`, `vodSeriesCatalog`, `vodPlaybackCatalog`, `movieSourceGroupsModel`, `seriesSourceGroupsModel`, `settingsController`, `dateTimeFormatter`, `dvrController` and
 `multiViewController`. Verify the full list in `main.cpp` before adding bindings.
 `MpvVideoItem` is registered in the `OKILTV 1.0` QML module.

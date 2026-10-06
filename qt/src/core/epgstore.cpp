@@ -1,4 +1,5 @@
 #include "epgstore.h"
+#include "epgsearch_p.h"
 #include <QFile>
 #include <QElapsedTimer>
 #include <QSqlDatabase>
@@ -6,6 +7,7 @@
 #include <QSqlError>
 #include <QTimeZone>
 #include <QVariant>
+#include <QCoreApplication>
 #include <algorithm>
 #include <stdexcept>
 
@@ -97,10 +99,23 @@ std::shared_ptr<EpgStore> EpgStore::create(const QString &path, Metadata metadat
         QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
         QSqlQuery q(c.db);
         check(q.exec(QStringLiteral("CREATE TABLE programmes(id INTEGER PRIMARY KEY, key TEXT NOT NULL, channel TEXT, title TEXT, subtitle TEXT, description TEXT, episode TEXT, start INTEGER, stop INTEGER)")), q);
+        // Keep ordinary EPG available even when a packaging error omits FTS5.
+        result->m_searchReady = q.exec(QStringLiteral("CREATE VIRTUAL TABLE programme_search USING fts5(title,subtitle, tokenize='unicode61 remove_diacritics 0', prefix='2 3')"));
+        if (!result->m_searchReady && !q.lastError().text().contains(QStringLiteral("no such module"), Qt::CaseInsensitive))
+            check(false, q);
+        if (result->m_searchReady) {
+            check(q.exec(QStringLiteral("CREATE TABLE search_documents(programme INTEGER PRIMARY KEY, identity TEXT NOT NULL UNIQUE, title TEXT NOT NULL, subtitle TEXT NOT NULL)")), q);
+        }
+        check(q.exec(QStringLiteral("CREATE TABLE search_metadata(schema_version INTEGER, normalization_version INTEGER, available INTEGER, maximum_duration INTEGER)")), q);
+        check(q.exec(QStringLiteral("INSERT INTO search_metadata VALUES(2,1,%1,0)").arg(result->m_searchReady ? 1 : 0)), q);
         if (deduplicate) check(q.exec(QStringLiteral("CREATE UNIQUE INDEX identity ON programmes(key,start)")), q);
         check(q.exec(QStringLiteral("BEGIN")), q);
         QSqlQuery insert(c.db);
         check(insert.prepare(QStringLiteral("INSERT OR IGNORE INTO programmes(key,channel,title,subtitle,description,episode,start,stop) VALUES(?,?,?,?,?,?,?,?)")), insert);
+        QSqlQuery document(c.db);
+        if (result->m_searchReady) {
+            check(document.prepare(QStringLiteral("INSERT OR IGNORE INTO search_documents VALUES(?,?,?,?)")), document);
+        }
         int batchCount = 0;
         qint64 batchBytes = 0;
         produce([&](const EpgEntry &e) {
@@ -111,6 +126,16 @@ std::shared_ptr<EpgStore> EpgStore::create(const QString &path, Metadata metadat
             insert.bindValue(6, e.start.toMSecsSinceEpoch()); insert.bindValue(7, e.stop.toMSecsSinceEpoch());
             check(insert.exec(), insert);
             result->m_metadata.entries += insert.numRowsAffected();
+            if (result->m_searchReady && insert.numRowsAffected() > 0
+                && e.start.isValid() && e.stop.isValid() && e.stop > e.start) {
+                const auto id = insert.lastInsertId();
+                const auto title = normalizeEpgSearchText(e.title);
+                const auto subtitle = normalizeEpgSearchText(e.subTitle);
+                document.bindValue(0, id); document.bindValue(1, EpgSearchDetail::identity(e));
+                document.bindValue(2, title); document.bindValue(3, subtitle);
+                check(document.exec(), document);
+                result->m_maximumSearchDuration = std::max(result->m_maximumSearchDuration, e.start.msecsTo(e.stop));
+            }
             batchBytes += cost(e);
             if (++batchCount >= 1000 || batchBytes >= 1024LL * 1024) {
                 check(q.exec(QStringLiteral("COMMIT")), q);
@@ -120,6 +145,42 @@ std::shared_ptr<EpgStore> EpgStore::create(const QString &path, Metadata metadat
         });
         checkCancelled(cancelled);
         check(q.exec(QStringLiteral("COMMIT")), q);
+        if (result->m_searchReady) {
+            // Chronological document rowids let FTS read directly in the UI's
+            // time order, with bounded pages and no full-result SQL sort.
+            check(q.exec(QStringLiteral("CREATE TABLE search_order(id INTEGER PRIMARY KEY, programme INTEGER NOT NULL UNIQUE, start INTEGER NOT NULL, stop INTEGER NOT NULL)")), q);
+            check(q.exec(QStringLiteral("INSERT INTO search_order(programme,start,stop) SELECT d.programme,p.start,p.stop FROM search_documents d JOIN programmes p ON p.id=d.programme ORDER BY p.start,p.stop,d.identity")), q);
+            checkCancelled(cancelled);
+            check(q.exec(QStringLiteral("CREATE INDEX search_order_time ON search_order(start,id)")), q);
+            check(q.exec(QStringLiteral("CREATE INDEX search_exact_title ON search_documents(title,programme)")), q);
+            QSqlQuery ordered(c.db), searchInsert(c.db);
+            ordered.setForwardOnly(true);
+            check(ordered.exec(QStringLiteral("SELECT o.id,d.title,d.subtitle FROM search_order o JOIN search_documents d ON d.programme=o.programme ORDER BY o.id")), ordered);
+            check(searchInsert.prepare(QStringLiteral("INSERT INTO programme_search(rowid,title,subtitle) VALUES(?,?,?)")), searchInsert);
+            check(q.exec(QStringLiteral("BEGIN")), q);
+            int searchBatch = 0;
+            while (ordered.next()) {
+                checkCancelled(cancelled);
+                searchInsert.bindValue(0, ordered.value(0));
+                searchInsert.bindValue(1, ordered.value(1));
+                searchInsert.bindValue(2, ordered.value(2));
+                check(searchInsert.exec(), searchInsert);
+                if (++searchBatch == 1000) {
+                    check(q.exec(QStringLiteral("COMMIT")), q);
+                    checkCancelled(cancelled);
+                    check(q.exec(QStringLiteral("BEGIN")), q);
+                    searchBatch = 0;
+                }
+            }
+            if (ordered.lastError().isValid()) check(false, ordered);
+            ordered.finish();
+            check(q.exec(QStringLiteral("COMMIT")), q);
+            checkCancelled(cancelled);
+            check(q.exec(QStringLiteral("INSERT INTO programme_search(programme_search) VALUES('optimize')")), q);
+            checkCancelled(cancelled);
+            check(q.exec(QStringLiteral("INSERT INTO programme_search(programme_search) VALUES('integrity-check')")), q);
+            check(q.exec(QStringLiteral("UPDATE search_metadata SET maximum_duration=%1").arg(result->m_maximumSearchDuration)), q);
+        }
         check(q.exec(QStringLiteral("CREATE INDEX by_start ON programmes(key,start,id,stop)")), q);
         check(q.exec(QStringLiteral("CREATE INDEX by_stop ON programmes(key,stop)")), q);
         check(q.exec(QStringLiteral("CREATE TABLE metadata(version INTEGER, profile TEXT, fingerprint TEXT, fetched INTEGER, entries INTEGER)")), q);
@@ -154,6 +215,10 @@ std::shared_ptr<EpgStore> EpgStore::open(const QString &path)
         QDateTime::fromMSecsSinceEpoch(q.value(3).toLongLong(), QTimeZone::UTC), q.value(4).toLongLong() };
     if (m.profileId.isNull() || m.entries < 0 || !m.fetchedAt.isValid()) throw std::runtime_error("Invalid EPG database identity.");
     auto result = std::shared_ptr<EpgStore>(new EpgStore(path, m, false));
+    if (q.exec(QStringLiteral("SELECT schema_version,normalization_version,available,maximum_duration FROM search_metadata")) && q.next()) {
+        result->m_searchReady = q.value(0).toInt() == 2 && q.value(1).toInt() == 1 && q.value(2).toInt() == 1 && supportsFts5();
+        result->m_maximumSearchDuration = q.value(3).toLongLong();
+    }
     for (auto it = registry.begin(); it != registry.end();) {
         if (it.value().expired()) it = registry.erase(it); else ++it;
     }
@@ -223,4 +288,166 @@ QString EpgStore::diagnostics() const
         .arg(m_metadata.entries).arg(m_cache.totalCost()).arg(m_cacheHits).arg(m_queryCount).arg(m_queryMilliseconds);
 }
 int EpgStore::cachedBytes() const { QMutexLocker lock(&m_mutex); return static_cast<int>(m_cache.totalCost()); }
+
+bool EpgStore::supportsFts5()
+{
+    try {
+        Connection c(QStringLiteral(":memory:"), true);
+        QSqlQuery q(c.db);
+        return q.exec(QStringLiteral("CREATE VIRTUAL TABLE capability_test USING fts5(title)"));
+    } catch (const std::exception &) { return false; }
+}
+
+bool EpgStore::searchReady() const
+{
+    QMutexLocker lock(&m_mutex);
+    return m_searchReady || (m_searchReplacement && m_searchReplacement->searchReady());
+}
+
+void EpgStore::useSearchIndex(const std::shared_ptr<EpgStore> &replacement)
+{
+    if (!replacement || replacement.get() == this || !replacement->searchReady()
+        || replacement->metadata().profileId != m_metadata.profileId
+        || replacement->metadata().fingerprint != m_metadata.fingerprint
+        || replacement->metadata().fetchedAt != m_metadata.fetchedAt
+        || replacement->metadata().entries != m_metadata.entries)
+        throw std::runtime_error("Invalid replacement EPG search generation.");
+    QMutexLocker lock(&m_mutex);
+    m_searchReplacement = replacement;
+    m_searchPreparationError.clear();
+}
+
+void EpgStore::setSearchPreparationError(const QString &code)
+{
+    QMutexLocker lock(&m_mutex);
+    m_searchPreparationError = code;
+}
+
+std::shared_ptr<EpgStore> EpgStore::withSearchIndex(const QString &path, const Cancelled &cancelled) const
+{
+    auto metadata = m_metadata;
+    metadata.entries = 0;
+    return create(path, metadata, [&](const Sink &sink) {
+        Connection c(m_path);
+        QSqlQuery q(c.db); q.setForwardOnly(true);
+        check(q.exec(QStringLiteral("SELECT %1 FROM programmes ORDER BY id").arg(QString::fromLatin1(columns))), q);
+        while (q.next()) { checkCancelled(cancelled); sink(readEntry(q)); }
+        if (q.lastError().isValid()) check(false, q);
+    }, false, cancelled);
+}
+
+EpgSearchResult EpgStore::search(const EpgSearchRequest &request, const Cancelled &cancelled) const
+{
+    EpgSearchResult result;
+    result.request = request;
+    try {
+        if (cancelled && cancelled()) { result.status = EpgSearchStatus::Cancelled; return result; }
+        std::shared_ptr<EpgStore> replacement;
+        QString preparationError;
+        { QMutexLocker lock(&m_mutex); replacement = m_searchReplacement; preparationError = m_searchPreparationError; }
+        if (replacement) return replacement->search(request, cancelled);
+        if (QUuid(request.profileId) != m_metadata.profileId) {
+            result.status = EpgSearchStatus::Error; result.errorCode = QStringLiteral("profile-mismatch");
+            result.errorText = QCoreApplication::translate("EpgSearch", "The active source changed. Search again."); return result;
+        }
+        if (!m_metadata.entries) { result.status = EpgSearchStatus::NoEpg; return result; }
+        if (!m_searchReady) {
+            if (!preparationError.isEmpty()) {
+                result.status = EpgSearchStatus::Error; result.errorCode = preparationError;
+                result.errorText = QCoreApplication::translate("EpgSearch", "Could not prepare the local EPG search index. Retry to prepare it again.");
+                return result;
+            }
+            result.status = supportsFts5() ? EpgSearchStatus::Preparing : EpgSearchStatus::Unsupported;
+            if (result.status == EpgSearchStatus::Unsupported) {
+                result.errorCode = QStringLiteral("fts5-unavailable");
+                result.errorText = QCoreApplication::translate("EpgSearch", "The SQLite plugin does not support EPG search (FTS5).");
+            }
+            return result;
+        }
+        const auto error = epgSearchQueryError(request.query);
+        if (!error.isEmpty()) {
+            if (error != QStringLiteral("query-too-short")) {
+                result.status = EpgSearchStatus::Error; result.errorCode = error;
+                result.errorText = EpgSearchDetail::queryErrorText(error);
+            }
+            return result;
+        }
+        if (!request.nowUtc.isValid()) {
+            result.status = EpgSearchStatus::Error; result.errorCode = QStringLiteral("invalid-clock");
+            result.errorText = QCoreApplication::translate("EpgSearch", "The search reference time is invalid. Search again."); return result;
+        }
+        const auto channels = EpgSearchDetail::channels(request);
+        if (channels.isEmpty()) return result;
+        QHash<QString, QList<int>> map;
+        for (int i = 0; i < channels.size(); ++i) map[channels[i].tvgId.trimmed().toLower()].append(i);
+        QStringList terms;
+        for (const auto &token : epgSearchTokens(request.query)) {
+            const auto quoted = u'"' + token + u'"';
+            // Query validation still requires one >=2-character token, but
+            // fragments after punctuation (Spider-M) must also match prefixes.
+            terms += quoted + u'*';
+        }
+        const auto expression = terms.join(QStringLiteral(" AND "));
+        EpgSearchDetail::Page page(request);
+        Connection c(m_path);
+        QSqlQuery boundary(c.db);
+        const auto lastAtOrBefore = [&](qint64 time) {
+            check(boundary.prepare(QStringLiteral("SELECT id FROM search_order WHERE start<=? ORDER BY start DESC,id DESC LIMIT 1")), boundary);
+            boundary.addBindValue(time); check(boundary.exec(), boundary);
+            return boundary.next() ? boundary.value(0).toLongLong() : qint64(0);
+        };
+        const auto nowMs = request.nowUtc.toMSecsSinceEpoch();
+        const auto lastStarted = lastAtOrBefore(nowMs);
+        const auto earliestCurrent = request.nowUtc.addMSecs(-m_maximumSearchDuration);
+        const auto beforeCurrent = earliestCurrent.isValid() ? lastAtOrBefore(earliestCurrent.toMSecsSinceEpoch()) : 0;
+        check(boundary.exec(QStringLiteral("SELECT COALESCE(MAX(id),0) FROM search_order")), boundary);
+        check(boundary.next(), boundary);
+        const auto lastDocument = boundary.value(0).toLongLong();
+        for (int group = 0; group < 3; ++group) {
+            if (!EpgSearchDetail::accepts(group, request.timeFilter)) continue;
+            const qint64 lower = group == 0 ? beforeCurrent : group == 1 ? lastStarted : 0;
+            const qint64 upper = group == 1 ? lastDocument : lastStarted;
+            if (lower >= upper) continue;
+            if (cancelled && cancelled()) { result.status = EpgSearchStatus::Cancelled; return result; }
+            QSqlQuery q(c.db); q.setForwardOnly(true);
+            // Read all title/subtitle matches in chronological rowid order.
+            // Match quality only breaks timestamp ties; rank buckets would let
+            // a later exact title displace an earlier prefix/subtitle match.
+            check(q.prepare(QStringLiteral("SELECT p.channel,p.title,p.subtitle,'',p.episode,p.start,p.stop,d.title,d.identity "
+                "FROM programme_search JOIN search_order o ON o.id=programme_search.rowid "
+                "JOIN programmes p ON p.id=o.programme JOIN search_documents d ON d.programme=p.id "
+                "WHERE programme_search MATCH ? AND programme_search.rowid>? AND programme_search.rowid<=? "
+                "ORDER BY programme_search.rowid %1").arg(group == 2 ? QStringLiteral("DESC") : QStringLiteral("ASC"))), q);
+            q.addBindValue(expression);
+            q.addBindValue(lower); q.addBindValue(upper); check(q.exec(), q);
+            while (q.next()) {
+                if (cancelled && cancelled()) { result.status = EpgSearchStatus::Cancelled; return result; }
+                const auto mapped = map.constFind(q.value(0).toString().trimmed().toLower());
+                if (mapped == map.cend()) continue;
+                const auto entry = readEntry(q);
+                if (EpgSearchDetail::section(entry, request.nowUtc) != group) continue;
+                const auto sortTime = group == 2 ? -entry.start.toMSecsSinceEpoch() : entry.start.toMSecsSinceEpoch();
+                // Read every candidate at the boundary timestamp before cutting
+                // a page, including all mapped channels and match-quality ties.
+                if (page.full() && sortTime > page.worstTime()) return page.result();
+                for (const auto index : *mapped)
+                    page.append(entry, channels[index], index, q.value(8).toString(), q.value(7).toString());
+            }
+            if (q.lastError().isValid()) check(false, q);
+            if (page.full()) return page.result();
+        }
+        if (cancelled && cancelled()) { result.status = EpgSearchStatus::Cancelled; return result; }
+        return page.result();
+    } catch (const std::exception &) {
+        result.status = cancelled && cancelled() ? EpgSearchStatus::Cancelled : EpgSearchStatus::Error;
+        result.errorCode = QStringLiteral("search-read-failed");
+        result.errorText = QCoreApplication::translate("EpgSearch", "Could not read the local EPG search index.");
+        if (result.status != EpgSearchStatus::Cancelled && !supportsFts5()) {
+            result.status = EpgSearchStatus::Unsupported;
+            result.errorCode = QStringLiteral("fts5-unavailable");
+            result.errorText = QCoreApplication::translate("EpgSearch", "The SQLite plugin does not support EPG search (FTS5).");
+        }
+        return result;
+    }
+}
 } // namespace OKILTV::Core
