@@ -355,6 +355,42 @@ AppController::AppController(
     , m_epgService(epgService)
     , m_iconCacheService(*database, m_network)
 {
+    connect(m_profilesModel, &ProfilesModel::profileEpgConfigurationChanged, this, [this](const QString &id) {
+        if (activeProfileId() != id) return;
+        if (const auto profile = m_settings->profileById(parseGuid(id))) {
+            ++m_epgLoadGeneration;
+            clearEpg(profile->id);
+            loadEpgAsync(*profile, true);
+        }
+    });
+    connect(m_profilesModel, &ProfilesModel::profileRemoved, this, [this](const QString &id) {
+        const auto removed = parseGuid(id);
+        if (m_loadingProfileId == removed) { ++m_profileLoadGeneration; setBusy(false); }
+        const auto loaded = m_channelListModel->activeProfileId() == id || m_epgLoadedProfileId == removed;
+        if (!loaded) return;
+        m_pendingWatchSeconds.remove(removed);
+        if (m_watchTrackingProfileId == removed) {
+            m_watchTrackingActive = false;
+            m_watchTrackingProfileId = QUuid{};
+            m_watchTrackingChannelId = -1;
+            m_watchStatsFlushTimer.stop();
+        }
+        if (m_lastPrimaryChannel && m_lastPrimaryChannel->first == removed) m_lastPrimaryChannel.reset();
+        ++m_programInfoGeneration;
+        ++m_catchupPlayGeneration;
+        EpgCacheService::cancel(m_epgImportCancellation);
+        ++m_epgLoadGeneration;
+        m_loadedChannels.clear();
+        m_watchSecondsByChannelId.clear();
+        m_channelListModel->setActiveProfileId({});
+        m_channelListModel->setChannels({}, {});
+        m_channelListModel->setWatchSeconds({});
+        m_guideStateModel->setChannels({});
+        m_nowNextModel->clear();
+        m_playbackNowNextModel->clear();
+        clearEpg({});
+        emit activeProfileIdChanged();
+    });
     m_downloadController = new CatchupDownloadController(settings, this);
     const auto searchScopeChanged = [this] {
         ++m_searchChannelRevision;
@@ -779,6 +815,8 @@ void AppController::loadProfile(const QString &profileId)
     emit sourceRefreshRequested(guidToString(profile->id));
     const auto settingsSnapshot = m_settings->current();
     const auto generation = ++m_profileLoadGeneration;
+    m_loadingProfileId = profile->id;
+    const auto playbackGeneration = m_playerController->playbackGeneration();
     const auto importToken = DatabaseService::beginChannelImport(profile->id);
 
     setBusy(true);
@@ -787,7 +825,7 @@ void AppController::loadProfile(const QString &profileId)
         QStringLiteral("profile"),
         QStringLiteral("Loading profile %1 (%2).").arg(profile->name, guidToString(profile->id)));
 
-    m_backgroundTasks.addFuture(QtConcurrent::run([this, generation, importToken, profile = profile.value(), settingsSnapshot]() {
+    m_backgroundTasks.addFuture(QtConcurrent::run([this, generation, playbackGeneration, importToken, profile = profile.value(), settingsSnapshot]() {
         LoadProfileResult result;
         result.profile = profile;
 
@@ -871,7 +909,7 @@ void AppController::loadProfile(const QString &profileId)
 
         QMetaObject::invokeMethod(
             this,
-            [this, generation, importToken, result]() {
+            [this, generation, playbackGeneration, importToken, result]() {
                 if (generation != m_profileLoadGeneration) return;
                 if (!DatabaseService::channelImportCurrent(result.profile.id, importToken)) {
                     setBusy(false);
@@ -935,6 +973,8 @@ void AppController::loadProfile(const QString &profileId)
                 const auto loadedProfileId = guidToString(result.profile.id);
                 const auto loadedProfileIsActive = activeProfileAfterSave == loadedProfileId;
                 if (loadedProfileIsActive) {
+                    const auto selectionBeforeRefresh = m_channelListModel->selectedChannelId();
+                    const bool playbackUnchanged = playbackGeneration == m_playerController->playbackGeneration();
                     m_loadedChannels = result.channels;
                     m_watchSecondsByChannelId = result.watchSecondsByChannelId;
                     m_channelListModel->setActiveProfileId(loadedProfileId);
@@ -947,7 +987,9 @@ void AppController::loadProfile(const QString &profileId)
                     m_guideStateModel->setSelectedGroupId(m_channelListModel->selectedCategoryId());
 
                     auto shouldResumePlayback = false;
-                    if (result.lastWatchedChannelId.has_value()) {
+                    if (!playbackUnchanged) {
+                        m_channelListModel->selectById(selectionBeforeRefresh);
+                    } else if (result.lastWatchedChannelId.has_value()) {
                         shouldResumePlayback = m_channelListModel->selectById(result.lastWatchedChannelId.value());
                         const auto currentChannel = m_playerController->currentChannelValue();
                         if (currentChannel.has_value()
@@ -1098,7 +1140,9 @@ QString AppController::buildDebugSummary() const
                           : redactSensitiveText(settings.playerUserAgent.trimmed()));
     lines << QStringLiteral("mpv option count: %1").arg(settings.mpvOptions.size());
     for (auto it = settings.mpvOptions.cbegin(); it != settings.mpvOptions.cend(); ++it) {
-        lines << QStringLiteral("  mpv.%1=%2").arg(it.key(), redactSensitiveText(it.value()));
+        lines << QStringLiteral("  mpv.%1=%2").arg(it.key(),
+            it.key().compare(QStringLiteral("http-header-fields"), Qt::CaseInsensitive) == 0
+                ? QStringLiteral("***") : redactSensitiveText(it.value()));
     }
     lines << QStringLiteral("Auto refresh EPG: %1").arg(settings.autoRefreshEpg ? QStringLiteral("true") : QStringLiteral("false"));
     lines << QStringLiteral("Refresh interval minutes: %1").arg(settings.refreshIntervalMinutes);
@@ -1470,7 +1514,7 @@ bool AppController::syncProfileGroupIds(const QUuid &profileId, QStringList disc
 void AppController::beginWatchTrackingForCurrentChannel()
 {
     const auto currentChannel = m_playerController->currentChannelValue();
-    if (!currentChannel.has_value()) {
+    if (!currentChannel.has_value() || !m_settings->profileById(currentChannel->profileId)) {
         m_watchTrackingProfileId = QUuid {};
         m_watchTrackingChannelId = -1;
         m_watchTrackingActive = false;
@@ -2253,7 +2297,7 @@ bool AppController::playCatchupAtOffsetInternal(
 void AppController::activateChannel(const int channelId)
 {
     const auto channel = m_channelListModel->channelById(channelId);
-    if (!channel.has_value()) {
+    if (!channel.has_value() || !m_settings->profileById(channel->profileId)) {
         return;
     }
 
@@ -2274,6 +2318,7 @@ void AppController::activateChannel(const int channelId)
 
 void AppController::activatePrimaryChannel(const Channel &channel)
 {
+    if (!m_settings->profileById(channel.profileId)) return;
     ++m_catchupPlayGeneration;
 
     const auto currentChannel = m_playerController->currentChannelValue();

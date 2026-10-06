@@ -4,6 +4,9 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QStandardPaths>
+#include <QProcess>
+#include <QRegularExpression>
+#include <cmath>
 
 #if defined(Q_OS_WIN)
 #include <QProcess>
@@ -49,6 +52,97 @@ bool ffmpegToolsAvailable()
 {
     return processBinaryAvailable(QStringLiteral("ffmpeg"))
         && processBinaryAvailable(QStringLiteral("ffprobe"));
+}
+
+std::optional<double> probeMediaDurationSeconds(const QString &path, QString *errorText)
+{
+    const auto normalizedPath = path.trimmed();
+    if (normalizedPath.isEmpty()) {
+        if (errorText != nullptr) {
+            *errorText = QStringLiteral("empty-path");
+        }
+        return std::nullopt;
+    }
+
+    if (!QFileInfo::exists(normalizedPath)) {
+        if (errorText != nullptr) {
+            *errorText = QStringLiteral("missing-file");
+        }
+        return std::nullopt;
+    }
+
+    const auto ffprobe = resolveProcessBinary(QStringLiteral("ffprobe"));
+    QProcess probe;
+    probe.setProcessChannelMode(QProcess::MergedChannels);
+    const QStringList args {
+        QStringLiteral("-v"), QStringLiteral("error"),
+        QStringLiteral("-show_entries"), QStringLiteral("format=duration"),
+        QStringLiteral("-of"), QStringLiteral("default=noprint_wrappers=1:nokey=1"),
+        normalizedPath
+    };
+
+    probe.start(ffprobe, args);
+    if (!probe.waitForStarted(3000)) {
+        if (errorText != nullptr) {
+            *errorText = QStringLiteral("failed-to-start");
+        }
+        return std::nullopt;
+    }
+
+    if (!probe.waitForFinished(10000)) {
+        probe.kill();
+        probe.waitForFinished(1200);
+        if (errorText != nullptr) {
+            *errorText = QStringLiteral("timeout");
+        }
+        return std::nullopt;
+    }
+
+    if (probe.exitStatus() != QProcess::NormalExit || probe.exitCode() != 0) {
+        if (errorText) *errorText = QStringLiteral("probe-failed");
+        return std::nullopt;
+    }
+    auto payload = QString::fromLocal8Bit(probe.readAll()).trimmed();
+    if (payload.isEmpty()) {
+        if (errorText != nullptr) {
+            *errorText = QStringLiteral("empty-output");
+        }
+        return std::nullopt;
+    }
+
+    const auto lines = payload.split(QRegularExpression(QStringLiteral("[\\r\\n]+")), Qt::SkipEmptyParts);
+    for (const auto &line : lines) {
+        bool ok = false;
+        const auto duration = line.trimmed().toDouble(&ok);
+        if (ok && std::isfinite(duration) && duration >= 0.0) {
+            return duration;
+        }
+    }
+
+    bool ok = false;
+    const auto duration = payload.toDouble(&ok);
+    if (ok && std::isfinite(duration) && duration >= 0.0) {
+        return duration;
+    }
+
+    if (errorText != nullptr) {
+        auto compact = payload;
+        compact.replace(u'\r', u' ');
+        compact.replace(u'\n', QStringLiteral(" | "));
+        if (compact.size() > 160) {
+            compact = compact.left(160) + QStringLiteral("...");
+        }
+        *errorText = QStringLiteral("invalid-output=%1").arg(compact);
+    }
+    return std::nullopt;
+}
+bool recordingRemuxValid(const QString &sourcePath, const QString &outputPath)
+{
+    if (QFileInfo(outputPath).size() <= 0) return false;
+    const auto sourceDuration = probeMediaDurationSeconds(sourcePath);
+    const auto outputDuration = probeMediaDurationSeconds(outputPath);
+    return sourceDuration && outputDuration && *sourceDuration > 0 && *outputDuration > 0
+        && std::abs(*sourceDuration - *outputDuration) <= 1.0;
 }
 
 #if defined(Q_OS_WIN)

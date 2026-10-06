@@ -125,7 +125,7 @@ QString redactSensitiveText(const QString &text)
                 "(?i)\\b(username|password|user|pass|token|access_token|refresh_token|auth|authorization|bearer|api_key|apikey|signature|sig)=([^&\\s]+)")),
         QStringLiteral("\\1=***"));
     redacted.replace(
-        QRegularExpression(QStringLiteral("(?i)\\b(authorization)\\s*[:=]\\s*([^\\r\\n]+)")),
+        QRegularExpression(QStringLiteral("(?i)\\b(authorization|cookie|set-cookie)\\s*[:=]\\s*([^\\r\\n]+)")),
         QStringLiteral("\\1=***"));
     redacted.replace(
         QRegularExpression(QStringLiteral("(?i)\\b(bearer)\\s+([A-Za-z0-9._~+/=-]+)")),
@@ -133,6 +133,11 @@ QString redactSensitiveText(const QString &text)
     redacted.replace(
         QRegularExpression(QStringLiteral("/(live|movie|series|timeshift)/[^/\\s]+/[^/\\s]+/")),
         QStringLiteral("/\\1/***/***/"));
+
+    // Relative catch-up templates can carry arbitrary provider query secrets.
+    redacted.replace(
+        QRegularExpression(QStringLiteral(R"re(([?&][^&=\s"']+=)[^&\s"']*)re")),
+        QStringLiteral("\\1***"));
 
     const QRegularExpression urlPattern(QStringLiteral(R"(([A-Za-z][A-Za-z0-9+.-]*://[^\s"']+))"));
     auto match = urlPattern.match(redacted);

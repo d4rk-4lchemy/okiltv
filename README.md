@@ -6,7 +6,7 @@
 
 <p align="center">
   A desktop <strong>IPTV player</strong> built with Qt and libmpv.<br/>
-  Current version: <strong>0.6.0</strong>
+  Current version: <strong>0.6.1</strong>
 </p>
 
 

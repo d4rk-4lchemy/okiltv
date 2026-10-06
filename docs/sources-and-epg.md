@@ -45,8 +45,15 @@ each receive their own limit, so a complete source refresh can take longer.
   segments or variants are not separate channels.
 - Explicit XMLTV configuration overrides discovered `url-tvg`/`x-tvg-url` hints.
   Discovery is persisted in protected profile details and survives failed refresh.
+  Saving only the explicit XMLTV URL through Sources clears stale active EPG and
+  starts a forced EPG refresh independently of channel import and auto-refresh.
 - Refresh replacement is transactional and prunes removed channels. Preserve
   retained channel identities, favourites, watch history and startup restoration.
+  Automatic restoration is fenced by the player's playback generation: a later
+  tune or Stop during refresh wins. Removing the loaded source clears Live,
+  Guide and both Now/Next contexts and rejects activation of its stale channels.
+  An already open Live transport may continue until explicitly stopped; it does
+  not keep the deleted source available for channel-list activation or watch writes.
 - Use existing category normalization helpers. Group visibility/order and manual
   favourite exclusions are per source.
 - Automatic favourites become eligible at 360 full watched minutes. Explicit
@@ -91,6 +98,12 @@ XMLTV network/local input
 [epgcache_service.cpp](../qt/src/core/epgcache_service.cpp) own this pipeline.
 Production snapshots pin disk generations; they do not materialize every
 programme in memory. Fixture helpers may still use small in-memory snapshots.
+
+XMLTV compact timestamps are parsed as separate date/time fields and constructed
+in their declared offset (UTC when absent), never through the machine's local
+zone. DST gaps in the local zone cannot alter provider timestamps. Xtream API/XMLTV
+credentials are percent-encoded once; M3U append templates preserve existing
+encoded query bytes and append without decoding or reserializing signed queries.
 
 The importer retains all accepted provider channels/dates, independently of the
 playlist and visible Guide range. Malformed/truncated XML fails the import;

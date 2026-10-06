@@ -273,7 +273,7 @@ if (NOT CMAKE_CROSSCOMPILING)
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
         add_test(NAME OKILTVQtChannelNumberTests
             COMMAND "${OKILTV_QMLTESTRUNNER}" -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_channelnumber.qml")
-        set_tests_properties(OKILTVQtChannelNumberTests PROPERTIES
+        set_tests_properties(OKILTVQtChannelNumberTests PROPERTIES LABELS qml TIMEOUT 60
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
         add_test(NAME OKILTVQtUiTransparencyTests
             COMMAND "${OKILTV_QMLTESTRUNNER}" -input "${CMAKE_CURRENT_SOURCE_DIR}/qml/tst_uitransparency.qml")
@@ -424,7 +424,7 @@ add_test(NAME OKILTVQtVodContractTests COMMAND OKILTVQtVodContractTests)
 set_tests_properties(OKILTVQtVodContractTests PROPERTIES LABELS "app;vod" TIMEOUT 60)
 
 qt_add_executable(OKILTVQtVodProviderTests vod/tst_vod_provider.cpp)
-target_link_libraries(OKILTVQtVodProviderTests PRIVATE OKILTVVodInfrastructure Qt6::Network Qt6::Test)
+target_link_libraries(OKILTVQtVodProviderTests PRIVATE OKILTVVodInfrastructure Qt6::Network Qt6::Test ${OKILTV_ZLIB_LINK_LIB})
 add_test(NAME OKILTVQtVodProviderTests COMMAND OKILTVQtVodProviderTests)
 set_tests_properties(OKILTVQtVodProviderTests PROPERTIES LABELS "core;vod" TIMEOUT 60)
 
@@ -517,3 +517,12 @@ foreach(target OKILTVQtEpgSearchStoreTests OKILTVQtEpgSearchModelTests)
 endforeach()
 set_property(TEST OKILTVQtEpgSearchStoreTests APPEND PROPERTY LABELS core)
 set_property(TEST OKILTVQtEpgSearchModelTests APPEND PROPERTY LABELS app)
+
+# Every registered test must be reachable by a PR matrix label filter.
+get_property(OKILTV_REGISTERED_TESTS DIRECTORY PROPERTY TESTS)
+foreach(test IN LISTS OKILTV_REGISTERED_TESTS)
+    get_property(labels TEST "${test}" PROPERTY LABELS)
+    if (NOT "${labels}" MATCHES "(^|;)(core|app|playback|qml|ui|windows)(;|$)")
+        message(FATAL_ERROR "CTest ${test} has no PR matrix group label")
+    endif ()
+endforeach()

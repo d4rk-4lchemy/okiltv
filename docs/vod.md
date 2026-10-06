@@ -462,6 +462,14 @@ session override. Unknown duration does not auto-complete.
 ## Progress and transport
 
 Progress writes use a serial lane, a session UUID and increasing sequence numbers.
+Observed session identity is separate from successful storage initialization on
+that lane. Failed initialization/checkpoints retain the latest snapshot; subsequent
+flushes retry `beginSession` before checkpointing until ownership is confirmed.
+Successful initialization is not repeated for every checkpoint. Ordinary Play
+always requests normal progress resolution, even before the detail progress read
+finishes; only Play from beginning explicitly overrides a saved resume point.
+Provider deflate decoding waits for another HTTP fragment on input-exhausted
+`Z_BUF_ERROR`, while still requiring `Z_STREAM_END` at HTTP completion.
 A newer backward seek wins over an older larger position. Store confirmed backend
 state, not requested seeks or unconfirmed track choices.
 

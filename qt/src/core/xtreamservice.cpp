@@ -222,8 +222,8 @@ QUrl XtreamService::xmltvUrl() const
 
     QUrl url(QStringLiteral("%1/xmltv.php").arg(trimmedBaseUrl(profile.xtreamBaseUrl)));
     QUrlQuery query;
-    query.addQueryItem(QStringLiteral("username"), profile.xtreamUsername);
-    query.addQueryItem(QStringLiteral("password"), profile.xtreamPassword);
+    query.addQueryItem(QStringLiteral("username"), QString::fromUtf8(QUrl::toPercentEncoding(profile.xtreamUsername)));
+    query.addQueryItem(QStringLiteral("password"), QString::fromUtf8(QUrl::toPercentEncoding(profile.xtreamPassword)));
     url.setQuery(query);
     return url;
 }
@@ -244,8 +244,8 @@ QUrl XtreamService::apiUrl(const std::optional<QString> &action) const
     const auto &profile = this->profile();
     QUrl url(QStringLiteral("%1/player_api.php").arg(trimmedBaseUrl(profile.xtreamBaseUrl)));
     QUrlQuery query;
-    query.addQueryItem(QStringLiteral("username"), profile.xtreamUsername);
-    query.addQueryItem(QStringLiteral("password"), profile.xtreamPassword);
+    query.addQueryItem(QStringLiteral("username"), QString::fromUtf8(QUrl::toPercentEncoding(profile.xtreamUsername)));
+    query.addQueryItem(QStringLiteral("password"), QString::fromUtf8(QUrl::toPercentEncoding(profile.xtreamPassword)));
     if (action.has_value()) {
         query.addQueryItem(QStringLiteral("action"), action.value());
     }

@@ -117,11 +117,18 @@ void SettingsManager::load()
         m_sourceSummaries = m_sourceStore.loadSummaries();
     }
 
+    finishPendingProfileRemovals();
+
     // Protect orphan files too, but never overwrite already protected sources
     // when their original account/keyring is unavailable.
     m_sourceStore.migrateLegacyDetails();
     for (const auto &summary : m_sourceSummaries) {
         if (!m_sourceStore.detailIsProtected(summary.id)) {
+            if (migratedFlag && !QFileInfo::exists(QFileInfo(m_settingsFilePath).dir().filePath(
+                QStringLiteral("sources/%1.json").arg(guidToString(summary.id))))) {
+                m_lastLoadError = QStringLiteral("A saved source detail file is missing. Re-enter or remove the source in Settings > Sources.");
+                continue;
+            }
             throw std::runtime_error("A saved source is missing; migration stopped without removing legacy settings.");
         }
     }
@@ -487,41 +494,62 @@ bool SettingsManager::removeProfile(const QUuid &id)
         if (prepareProfileMutation && profileMutationFinished) profileMutationFinished(id, succeeded);
     });
     if (prepareProfileMutation && !prepareProfileMutation(id, nullptr, &m_lastSaveError)) return false;
+    // Removing the summary and recording cleanup intent is one atomic commit.
+    // Until it succeeds, neither the protected detail nor cached data is deleted.
+    auto remaining = m_sourceSummaries;
+    remaining.removeAt(index);
+    QList<QUuid> pending;
+    try { pending = m_sourceStore.pendingRemovals(); }
+    catch (const std::exception &error) { m_lastSaveError = QString::fromUtf8(error.what()); return false; }
+    if (!pending.contains(id)) pending.append(id);
+    if (!m_sourceStore.saveSummaries(remaining, &m_lastSaveError, pending)) return false;
+    m_sourceSummaries = remaining;
+    succeeded = true;
     DatabaseService::beginChannelImport(id);
-    const auto databasePath = QFileInfo(m_settingsFilePath).dir().filePath(QStringLiteral("iptv.db"));
-    try {
-        if (QFileInfo::exists(databasePath)) DatabaseService(databasePath).removeProfileData(id);
-    } catch (const std::exception &error) {
-        m_lastSaveError = QString::fromUtf8(error.what());
-        return false;
-    }
-    EpgCacheService().remove(id);
-    m_sourceSummaries.removeAt(index);
-    m_current.dvrSchedules.removeIf([&id](const DvrScheduleEntry &entry) { return entry.profileId == guidToString(id); });
-    m_current.channelTrackPreferences.remove(guidToString(id));
-    for (const auto &type : {QStringLiteral("|movies"), QStringLiteral("|series")}) {
-        const auto key = guidToString(id) + type;
-        m_current.hiddenGroupsByProfile.remove(key);
-        m_current.groupOrderByProfile.remove(key);
-        m_current.hideUncheckedGroupsByProfile.remove(key);
-    }
-    clearProfileDetailCache(id);
-    if (!m_sourceStore.removeDetail(id, &m_lastSaveError)) {
-        return false;
-    }
-
-    if (m_current.activeProfileId.has_value() && m_current.activeProfileId.value() == id) {
-        m_current.activeProfileId = std::nullopt;
-    }
-
+    finishPendingProfileRemovals();
     syncProfileActivityFlagsAndMirror();
-    if (!saveSourceSummaries()) {
-        return false;
-    }
-
     save();
-    succeeded = m_lastSaveError.isEmpty();
-    return succeeded;
+    // Cleanup/settings failures cannot undo the durable source-list commit.
+    // The tombstone remains available for idempotent startup recovery.
+    return true;
+}
+
+void SettingsManager::finishPendingProfileRemovals()
+{
+    auto pending = m_sourceStore.pendingRemovals();
+    for (const auto &id : QList<QUuid>(pending)) {
+        const auto key = guidToString(id);
+        m_current.dvrSchedules.removeIf([&key](const DvrScheduleEntry &entry) { return entry.profileId == key; });
+        m_current.channelTrackPreferences.remove(key);
+        m_current.lastWatchedChannelId.remove(key);
+        for (const auto &suffix : {QString{}, QStringLiteral("|movies"), QStringLiteral("|series")}) {
+            m_current.hiddenGroupsByProfile.remove(key + suffix);
+            m_current.groupOrderByProfile.remove(key + suffix);
+            m_current.hideUncheckedGroupsByProfile.remove(key + suffix);
+        }
+        if (m_current.activeProfileId == id) m_current.activeProfileId.reset();
+        clearProfileDetailCache(id);
+        syncProfileActivityFlagsAndMirror();
+        save();
+        if (!m_lastSaveError.isEmpty()) { m_lastLoadError = m_lastSaveError; continue; }
+        try {
+            DatabaseService::beginChannelImport(id);
+            const auto path = QFileInfo(m_settingsFilePath).dir().filePath(QStringLiteral("iptv.db"));
+            if (QFileInfo::exists(path)) DatabaseService(path).removeProfileData(id);
+            EpgCacheService().remove(id);
+            QString error;
+            if (!m_sourceStore.removeDetail(id, &error)) { m_lastLoadError = error; continue; }
+            auto completed = pending;
+            completed.removeAll(id);
+            if (!m_sourceStore.saveSummaries(m_sourceSummaries, &error, completed)) {
+                m_lastLoadError = error;
+                continue;
+            }
+            pending = completed;
+        } catch (const std::exception &error) {
+            m_lastLoadError = QString::fromUtf8(error.what());
+        }
+    }
 }
 
 bool SettingsManager::setProfileLastRefreshed(const QUuid &id, const QDateTime &lastRefreshed)

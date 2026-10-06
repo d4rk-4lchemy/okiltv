@@ -878,6 +878,30 @@ private slots:
         const auto saved = std::get<std::optional<VodProgress>>(fixture.store->read(snapshot.ref, requestFor(fixture.source)));
         QVERIFY(saved); QCOMPARE(saved->positionMs, 10000); QCOMPARE(saved->sequence, quint64(2));
     }
+    void progressInitializationRetriesBeforeCheckpoint()
+    {
+        Fixture fixture;
+        fixture.store->beginFailures = 2;
+        VodProgressService progress(fixture.dependencies());
+        int failures = 0;
+        progress.failed = [&](const Error &) { ++failures; };
+        SessionSnapshot snapshot;
+        snapshot.ref = refFor(fixture.source); snapshot.sessionToken = QUuid::createUuid();
+        snapshot.positionValid = true; snapshot.state = SessionState::Playing; snapshot.positionMs = 80000;
+        progress.observe(snapshot, true);
+        QTRY_COMPARE(failures, 2);
+        QCOMPARE(fixture.store->checkpoints.load(), 0);
+        snapshot.positionMs = 90000;
+        progress.observe(snapshot, true);
+        QTRY_COMPARE(fixture.store->checkpoints.load(), 1);
+        QCOMPARE(fixture.store->beginAttempts.load(), 3);
+        const auto saved = std::get<std::optional<VodProgress>>(fixture.store->read(snapshot.ref, requestFor(fixture.source)));
+        QVERIFY(saved); QCOMPARE(saved->positionMs, 90000);
+        snapshot.positionMs = 100000;
+        progress.observe(snapshot, true);
+        QTRY_COMPARE(fixture.store->checkpoints.load(), 2);
+        QCOMPARE(fixture.store->beginAttempts.load(), 3); // ownership is not reset on every checkpoint
+    }
     void runnerBoundsGlobalAndPerSourceConcurrency()
     {
         VodJobRunner runner;

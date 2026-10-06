@@ -231,10 +231,13 @@ bool ProfilesModel::replaceProfile(const QString &profileId, const QVariantMap &
         }
     }
 
+    const auto previous = m_settings->profileById(summary.id);
     if (!m_settings->replaceProfile(summary.id, profile)) {
         emit profileMutationFailed(m_settings->lastSaveError());
         return false;
     }
+    if (previous && previous->xmltvUrl != profile.xmltvUrl)
+        emit profileEpgConfigurationChanged(guidToString(summary.id));
     emit dataChanged(index(row, 0), index(row, 0));
     return true;
 }

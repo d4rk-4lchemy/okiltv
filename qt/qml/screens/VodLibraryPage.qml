@@ -1168,7 +1168,7 @@ FocusScope {
                                             }
                                             enabled: Boolean(root.playbackChoice.available) && !root.catalog.busy && !(root.episodes && root.episodes.busy) && !root.catalog.probePlayBlocked && !Boolean(root.catalog.movie.subtitleBusy)
                                             retainEnabledAppearance: Boolean(root.playbackChoice.available) && Boolean(root.catalog.movie.progressLoaded) && !root.catalog.startingPlayback && !(root.episodes && root.episodes.busy) && !root.catalog.probePlayBlocked && !Boolean(root.catalog.movie.subtitleBusy)
-                                            onClicked: root.catalog.play(root.playbackChoice.resumeSeconds < 60)
+                                            onClicked: root.catalog.play(false)
                                         }
                                         VodMovieListButton {
                                             objectName: "ui.vod.detailsToWatch"

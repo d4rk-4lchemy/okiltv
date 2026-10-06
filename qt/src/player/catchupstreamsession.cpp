@@ -2,12 +2,12 @@
 
 #include "../core/debuglogger.h"
 #include "../core/models.h"
+#include "../core/mediarequest.h"
 #include "../core/redaction.h"
 #include "../core/catchupurlresolver.h"
 
 #include <QMetaObject>
 #include <QNetworkRequest>
-#include <QRegularExpression>
 #include <QThread>
 
 #include <algorithm>
@@ -87,48 +87,7 @@ CatchupStreamSession::HeaderList CatchupStreamSession::requestHeadersFromOptions
     const QString &playerUserAgent,
     const QMap<QString, QString> &mpvOptions)
 {
-    HeaderList headers;
-    auto appendHeader = [&headers](QByteArray name, QByteArray value) {
-        name = name.trimmed();
-        value = value.trimmed();
-        if (name.isEmpty() || value.isEmpty()) {
-            return;
-        }
-        for (auto &header : headers) {
-            if (header.first.compare(name, Qt::CaseInsensitive) == 0) {
-                header.second = value;
-                return;
-            }
-        }
-        headers.append(qMakePair(std::move(name), std::move(value)));
-    };
-
-    const auto trimmedUserAgent = playerUserAgent.trimmed();
-    appendHeader(QByteArrayLiteral("User-Agent"),
-                 (trimmedUserAgent.isEmpty() ? Core::defaultPlayerUserAgent() : trimmedUserAgent).toUtf8());
-
-    const auto rawHeaderFields = mpvOptions.value(QStringLiteral("http-header-fields")).trimmed();
-    if (!rawHeaderFields.isEmpty()) {
-        const QRegularExpression splitPattern(
-            QStringLiteral(",(?=\\s*[!#$%&'*+.^_`|~0-9A-Za-z-]+\\s*:)"));
-        const auto headerEntries = rawHeaderFields.split(splitPattern, Qt::SkipEmptyParts);
-        for (const auto &entry : headerEntries) {
-            const auto separatorIndex = entry.indexOf(u':');
-            if (separatorIndex <= 0) {
-                continue;
-            }
-            appendHeader(
-                entry.left(separatorIndex).trimmed().toUtf8(),
-                entry.mid(separatorIndex + 1).trimmed().toUtf8());
-        }
-    }
-
-    const auto referrer = mpvOptions.value(QStringLiteral("referrer")).trimmed();
-    if (!referrer.isEmpty()) {
-        appendHeader(QByteArrayLiteral("Referer"), referrer.toUtf8());
-    }
-
-    return headers;
+    return Core::mediaRequestHeaders(playerUserAgent, mpvOptions);
 }
 
 CatchupStreamSession::~CatchupStreamSession()

@@ -161,6 +161,14 @@ The VOD Mpv/Runtime tests validate shared backend load/seek telemetry. Windows
 visual acceptance still needs hardware testing after the cross-build.
 
 Test definitions and labels live in [qt/tests/CMakeLists.txt](../qt/tests/CMakeLists.txt).
+Every registered test must carry at least one PR matrix label; CMake rejects
+unreachable tests at configuration, including QML channel-number coverage. EPG
+store fixtures set Portable mode and assert their actual AppDataPaths root equals
+the temporary directory before writes on every platform. Regression cases cover
+failed remux retention, atomic removal recovery/failed commits, XMLTV DST,
+encoded provider queries, late playback decisions, XMLTV-only edits, retained
+HLS failures, native mpv HLS playback through redirects and relative resources,
+fragmented deflate and VOD progress initialization retry.
 Inspect registered tests rather than relying on a fixed suite count:
 
 ```bash

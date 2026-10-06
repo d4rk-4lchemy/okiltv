@@ -61,6 +61,7 @@ public:
 signals:
     void profileMutationFailed(const QString &message);
     void profileRemoved(const QString &profileId);
+    void profileEpgConfigurationChanged(const QString &profileId);
     void activeProfileIdChanged();
     void profileSelectionRequested(const QString &profileId);
 

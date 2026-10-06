@@ -645,13 +645,23 @@ TestCase {
         const beginning = findChild(page, "ui.vod.playFromBeginning")
         compare(beginning.caption, "Play from beginning")
         verify(beginning.iconSource.toString().endsWith("start-from-beginning.svg"))
-        for (const entry of [[59, "Play", true], [60, "Resume · 00:01", false], [1440, "Resume · 00:24", false], [5040, "Resume · 01:24", false]]) {
+        for (const entry of [[59, "Play", false], [60, "Resume · 00:01", false], [1440, "Resume · 00:24", false], [5040, "Resume · 01:24", false]]) {
             backend.movie = Object.assign({}, backend.movie, {resumeSeconds: entry[0]})
             compare(play.text, entry[1])
             compare(beginning.visible, entry[0] >= 60)
             mouseClick(play)
             compare(backend.playedFromBeginning, entry[2])
         }
+    }
+    function test_playBeforeProgressLoadsUsesResume() {
+        backend.selectMovie(0)
+        backend.movie = Object.assign({}, backend.movie, {resumeSeconds: 0, progressLoaded: false})
+        const play = findChild(page, "ui.vod.play")
+        verify(play.enabled)
+        const before = backend.playCount
+        mouseClick(play)
+        compare(backend.playCount, before + 1)
+        compare(backend.playedFromBeginning, false)
     }
     function shelfMovies(count) {
         const rows = []

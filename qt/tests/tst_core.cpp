@@ -9,6 +9,7 @@
 #include "../src/core/m3uservice.h"
 #include "../src/core/portablebootstrap.h"
 #include "../src/core/redaction.h"
+#include "../src/core/mediarequest.h"
 #include "../src/core/settingsmanager.h"
 #include "../src/core/trackpreferences.h"
 #include "../src/core/xtreamservice.h"
@@ -171,6 +172,12 @@ private slots:
     void lockedSettingsPreserveRecoveryData();
     void lockedSourceRequiresExplicitReplacement();
     void sourceRemovalCleansProtectedCopies();
+    void sourceRemovalRecoversAfterCommit_data();
+    void sourceRemovalRecoversAfterCommit();
+    void sourceRemovalFailedCommitPreservesDetail();
+    void xmltvOffsetDoesNotDependOnLocalDst();
+    void mediaRequestInputOptionsPreserveHeaders();
+    void providerQueriesPreserveEncodedCredentials();
     void databaseCredentialMigrationRollsBackOnFailure();
     void redactionMasksStructuredSecrets();
     void redactionMasksXtreamSecrets();
@@ -888,7 +895,9 @@ void CoreTests::debugLoggerOnlyWritesFilesForExplicitDump()
     const QDir dumpDir(AppDataPaths::debugDumpDirectory());
     QCOMPARE(dumpDir.entryList(QDir::Files | QDir::NoDotAndDotDot).size(), 0);
 
-    const auto dumpPath = logger.writeDump(QStringLiteral("Diagnostics summary"));
+    const auto dumpPath = logger.writeDump(QStringLiteral(
+        "Diagnostics summary\nmpv.http-header-fields=Cookie: session=synthetic-export-cookie\n"
+        "Set-Cookie: session=synthetic-export-setcookie\nappend=?auth_token=synthetic-export-relative"));
     QVERIFY(!dumpPath.isEmpty());
     QVERIFY(QFile::exists(dumpPath));
 
@@ -900,6 +909,9 @@ void CoreTests::debugLoggerOnlyWritesFilesForExplicitDump()
     QVERIFY(dumpContents.contains(QStringLiteral("Diagnostics summary")));
     QVERIFY(dumpContents.contains(QStringLiteral("Manual dump should keep this entry.")));
     QVERIFY(dumpContents.contains(QStringLiteral("Session Log: <disabled>")));
+    QVERIFY(!dumpContents.contains(QStringLiteral("synthetic-export-cookie")));
+    QVERIFY(!dumpContents.contains(QStringLiteral("synthetic-export-setcookie")));
+    QVERIFY(!dumpContents.contains(QStringLiteral("synthetic-export-relative")));
     QVERIFY(!dumpContents.contains(QStringLiteral("test_token_20260519")));
     QVERIFY(!dumpContents.contains(QStringLiteral("alice")));
     QVERIFY(!dumpContents.contains(QStringLiteral("secret")));
@@ -1249,6 +1261,12 @@ void CoreTests::redactionMasksStructuredSecrets()
             { QStringLiteral("xtreamPassword"), QStringLiteral("nested-secret") },
             { QStringLiteral("title"), QStringLiteral("Programme") } } } }
     };
+    const auto headers = redactSensitiveText(QStringLiteral(
+        "mpv.http-header-fields=Cookie: session=synthetic-cookie-value\n"
+        "Set-Cookie: provider=synthetic-set-cookie\n"
+        "catchup-source=?auth_token=synthetic-relative-secret&unusual_key=synthetic-custom-secret"));
+    for (const auto &secret : {"synthetic-cookie-value", "synthetic-set-cookie", "synthetic-relative-secret", "synthetic-custom-secret"})
+        QVERIFY(!headers.contains(QString::fromLatin1(secret)));
     const auto sanitized = redactSensitiveJson(object).toObject();
     QCOMPARE(sanitized.value(QStringLiteral("password")).toString(), QStringLiteral("***"));
     const auto nested = sanitized.value(QStringLiteral("nested")).toArray().first().toObject();
@@ -2819,6 +2837,94 @@ void CoreTests::sourceEditInvalidatesChannelImport()
     QVERIFY(settings.removeProfile(profile.id));
     QVERIFY(!db.publishChannels(profile.id, removalToken, channels, true));
     QVERIFY(db.loadChannels(profile.id).isEmpty());
+}
+
+void CoreTests::sourceRemovalRecoversAfterCommit_data()
+{
+    QTest::addColumn<bool>("detailAlreadyRemoved");
+    QTest::newRow("before-detail-cleanup") << false;
+    QTest::newRow("after-detail-cleanup") << true;
+}
+void CoreTests::sourceRemovalRecoversAfterCommit()
+{
+    QFETCH(bool, detailAlreadyRemoved);
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json"))); settings.load();
+    ServerProfile profile; QVERIFY(settings.addProfile(profile)); settings.setActiveProfileId(profile.id);
+    SourceStore store(dir.filePath(QStringLiteral("source-summaries.json")), dir.filePath(QStringLiteral("sources")));
+    // Simulate a crash at the durable commit, before settings/cache/detail cleanup.
+    QVERIFY(store.saveSummaries({}, nullptr, QList<QUuid>{profile.id}));
+    QVERIFY(store.loadDetail(profile.id));
+    if (detailAlreadyRemoved) QVERIFY(store.removeDetail(profile.id));
+    SettingsManager restarted(settings.settingsFilePath()); restarted.load();
+    QVERIFY(restarted.sourceSummaries().isEmpty()); QVERIFY(!restarted.activeProfile());
+    QVERIFY(!store.loadDetail(profile.id)); QVERIFY(store.pendingRemovals().isEmpty());
+    restarted.load(); QVERIFY(restarted.sourceSummaries().isEmpty());
+}
+void CoreTests::sourceRemovalFailedCommitPreservesDetail()
+{
+    QTemporaryDir dir;
+    SettingsManager settings(dir.filePath(QStringLiteral("settings.json"))); settings.load();
+    ServerProfile profile; QVERIFY(settings.addProfile(profile));
+    const auto summaries = dir.filePath(QStringLiteral("source-summaries.json"));
+    QVERIFY(QFile::rename(summaries, summaries + QStringLiteral(".saved")));
+    QVERIFY(QDir().mkdir(summaries));
+    QVERIFY(!settings.removeProfile(profile.id));
+    QVERIFY(settings.profileById(profile.id));
+    QVERIFY(QDir().rmdir(summaries)); QVERIFY(QFile::rename(summaries + QStringLiteral(".saved"), summaries));
+    SettingsManager restarted(settings.settingsFilePath()); restarted.load();
+    QVERIFY(restarted.profileById(profile.id));
+}
+void CoreTests::xmltvOffsetDoesNotDependOnLocalDst()
+{
+    const auto previous = qgetenv("TZ");
+    const auto restore = qScopeGuard([&] { if (previous.isEmpty()) qunsetenv("TZ"); else qputenv("TZ", previous);
+#if !defined(Q_OS_WIN)
+        tzset();
+#endif
+    });
+    for (const auto &zone : {"Europe/Warsaw", "America/New_York", "UTC"}) {
+        qputenv("TZ", zone);
+#if !defined(Q_OS_WIN)
+        tzset();
+#endif
+        const auto entries = EpgService::parseEntries(QByteArray(
+            "<tv><programme channel=\"one\" start=\"20260329021500 +0000\" stop=\"20260329031500 +0000\"><title>Spring</title></programme>"
+            "<programme channel=\"one\" start=\"20261025021500 +0200\" stop=\"20261025031500 +0100\"><title>Autumn</title></programme></tv>"));
+        QCOMPARE(entries.size(), 2);
+        QCOMPARE(entries[0].start, QDateTime(QDate(2026,3,29), QTime(2,15), QTimeZone::UTC));
+        QCOMPARE(entries[0].start.secsTo(entries[0].stop), qint64(3600));
+        QCOMPARE(entries[1].start, QDateTime(QDate(2026,10,25), QTime(0,15), QTimeZone::UTC));
+        QCOMPARE(entries[1].start.secsTo(entries[1].stop), qint64(7200));
+    }
+}
+void CoreTests::mediaRequestInputOptionsPreserveHeaders()
+{
+    const auto args = mediaInputOptions(QStringLiteral("https://fixture.invalid/live"),
+        {{QStringLiteral("http-header-fields"), QStringLiteral("Cookie: session=synthetic, X-Provider: custom")},
+         {QStringLiteral("referrer"), QStringLiteral("https://fixture.invalid/")}}, QStringLiteral("Required-UA"));
+    QCOMPARE(args.value(args.indexOf(QStringLiteral("-user_agent")) + 1), QStringLiteral("Required-UA"));
+    const auto headers = args.value(args.indexOf(QStringLiteral("-headers")) + 1);
+    QVERIFY(headers.contains(QStringLiteral("Cookie: session=synthetic\r\n")));
+    QVERIFY(headers.contains(QStringLiteral("X-Provider: custom\r\n")));
+    QVERIFY(headers.contains(QStringLiteral("Referer: https://fixture.invalid/\r\n")));
+    QVERIFY(mediaInputOptions(QStringLiteral("udp://127.0.0.1:1234"), {}, QStringLiteral("Required-UA")).isEmpty());
+}
+void CoreTests::providerQueriesPreserveEncodedCredentials()
+{
+    ServerProfile profile; profile.xtreamBaseUrl = QStringLiteral("https://fixture.invalid");
+    profile.xtreamUsername = QString::fromUtf8("user+%41&ż"); profile.xtreamPassword = QStringLiteral("pass%41+");
+    XtreamService service; service.setProfile(profile);
+    const auto query = service.xmltvUrl().query(QUrl::FullyEncoded);
+    QVERIFY(query.contains(QStringLiteral("username=user%2B%2541%26%C5%BC")));
+    QVERIFY(query.contains(QStringLiteral("password=pass%2541%2B")));
+    Channel channel; channel.source = ChannelSource::M3U; channel.catchupSupported = true;
+    channel.catchupMode = QStringLiteral("append"); channel.catchupWindowHours = 24;
+    channel.streamUrl = QStringLiteral("http://fixture.invalid/live.ts?token=a%2Bb&literal=%2541");
+    channel.catchupSourceTemplate = QStringLiteral("?auth_token=c%2Bd&utc={utc}");
+    EpgEntry program; program.start = QDateTime::currentDateTimeUtc().addSecs(-3600); program.stop = program.start.addSecs(600);
+    const auto resolved = CatchupUrlResolver(profile).resolve(channel, program);
+    QVERIFY(resolved); QVERIFY(resolved->url.contains(QStringLiteral("?token=a%2Bb&literal=%2541&auth_token=c%2Bd&utc=")));
 }
 
 QTEST_MAIN(CoreTests)

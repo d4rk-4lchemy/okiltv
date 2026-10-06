@@ -500,6 +500,7 @@ private slots:
     void playerControllerCatchupRollbackGuardDeferredCorrectionExpiresOnInitialLoad();
     void catchupOwnedStreamSessionClosesProviderWhileBufferedBytesRemainReadable();
     void catchupOwnedStreamSessionPreservesConfiguredRequestHeaders();
+    void catchupHlsRetainsNativeRelativeResourcePlayback();
     void catchupOwnedStreamSessionCloseWithBackpressure_data();
     void catchupOwnedStreamSessionCloseWithBackpressure();
     void playerControllerCatchupDebugSnapshotUsesEffectiveBufferMetric();
@@ -678,8 +679,16 @@ private slots:
     void dvrControllerRestartStateMaintainedAndClearedByWindowState();
     void dvrControllerWindowsStoppedJobWithoutFinishedFinalizes();
     void dvrControllerWindowsWaitsForDescendants();
-    void dvrControllerRemuxDeletesTempWhenDurationMatchesRegardlessOfExitCode();
+    void dvrControllerRemuxRequiresSuccessfulExit_data();
+    void dvrControllerRemuxRequiresSuccessfulExit();
     void dvrControllerRemuxKeepsTempWhenDurationMismatched();
+    void manualRemuxPreservesSourceOnFailure();
+    void dvrAndTimeshiftForwardConfiguredInputHeaders();
+    void profileRefreshPreservesLaterPlaybackDecision_data();
+    void profileRefreshPreservesLaterPlaybackDecision();
+    void profileRemovalClearsLiveState();
+    void xmltvOnlyEditRefreshesIdleEpg();
+    void timeshiftContinuationNeverReturnsToOlderGeneration();
     void portableRuntimeControllerTracksPortableOverrideWithoutDirtyingSettings();
     void channelListModelRestoresSavedGroup();
     void channelListModelSupportsAutoFavouritesAndGroupPrefs();
@@ -3987,6 +3996,81 @@ void AppModelTests::catchupOwnedStreamSessionClosesProviderWhileBufferedBytesRem
     QVERIFY(closeLogs.constLast().contains(QStringLiteral("appReason=test-close-provider")));
     QVERIFY(closeLogs.constLast().contains(QStringLiteral("abortExpected=yes")));
     DebugLogger::instance().unsubscribe(subscriptionId);
+}
+
+void AppModelTests::catchupHlsRetainsNativeRelativeResourcePlayback()
+{
+    const auto ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    if (ffmpeg.isEmpty()) QSKIP("ffmpeg required for the local HLS fixture.");
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QVERIFY(QDir(dir.path()).mkpath(QStringLiteral("archive/video")));
+    const auto playlist = dir.filePath(QStringLiteral("archive/video/index.m3u8"));
+    QProcess generator;
+    generator.start(ffmpeg, {QStringLiteral("-v"), QStringLiteral("error"),
+        QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"),
+        QStringLiteral("color=c=red:s=160x120:r=10:d=8"), QStringLiteral("-c:v"), QStringLiteral("mpeg2video"),
+        QStringLiteral("-g"), QStringLiteral("10"), QStringLiteral("-f"), QStringLiteral("hls"),
+        QStringLiteral("-hls_time"), QStringLiteral("2"), QStringLiteral("-hls_list_size"), QStringLiteral("0"), playlist});
+    QVERIFY(generator.waitForFinished(30000));
+    QCOMPARE(generator.exitCode(), 0);
+    QFile master(dir.filePath(QStringLiteral("archive/master.m3u8")));
+    QVERIFY(master.open(QIODevice::WriteOnly));
+    master.write("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100000,RESOLUTION=160x120\nvideo/index.m3u8\n");
+    master.close();
+    QTcpServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost));
+    QStringList requests;
+    connect(&server, &QTcpServer::newConnection, &server, [&] {
+        while (server.hasPendingConnections()) {
+            auto *socket = server.nextPendingConnection();
+            auto request = std::make_shared<QByteArray>();
+            connect(socket, &QTcpSocket::readyRead, socket, [&, socket, request] {
+                request->append(socket->readAll());
+                if (!request->contains("\r\n\r\n")) return;
+                const auto path = QUrl::fromEncoded(request->split(' ').value(1)).path();
+                requests.append(path);
+                if (path == QStringLiteral("/redirect.m3u8")) {
+                    socket->write("HTTP/1.1 302 Found\r\nLocation: /archive/master.m3u8\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                } else {
+                    QFile file(dir.filePath(path.mid(1)));
+                    const auto exists = file.open(QIODevice::ReadOnly);
+                    const auto bytes = exists ? file.readAll() : QByteArray{};
+                    socket->write(QByteArray(exists ? "HTTP/1.1 200 OK\r\n" : "HTTP/1.1 404 Not Found\r\n")
+                        + "Content-Length: " + QByteArray::number(bytes.size())
+                        + "\r\nConnection: close\r\n\r\n" + bytes);
+                }
+                socket->disconnectFromHost();
+            });
+            connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+        }
+    });
+    const auto headless = qgetenv("OKILTV_HEADLESS_TEST");
+    const auto disabled = qgetenv("OKILTV_DISABLE_CATCHUP_OWNED_STREAM");
+    const auto restore = qScopeGuard([&] {
+        qputenv("OKILTV_HEADLESS_TEST", headless);
+        qputenv("OKILTV_DISABLE_CATCHUP_OWNED_STREAM", disabled);
+    });
+    qputenv("OKILTV_HEADLESS_TEST", "0");
+    qputenv("OKILTV_DISABLE_CATCHUP_OWNED_STREAM", "0");
+    PlayerController controller;
+    auto *backend = controller.player();
+    backend->configureOptions({{QStringLiteral("vo"), QStringLiteral("null")},
+        {QStringLiteral("ao"), QStringLiteral("null")}, {QStringLiteral("hwdec"), QStringLiteral("no")}});
+    const auto url = QStringLiteral("http://127.0.0.1:%1/redirect.m3u8").arg(server.serverPort());
+    const auto playbackUrl = controller.prepareCatchupStreamPlaybackUrl(backend, url, false);
+    QCOMPARE(playbackUrl, url);
+    QVERIFY(!controller.m_catchupActiveStreamSession);
+    QSignalSpy loaded(backend, &OKILTV::Player::MpvPlayer::fileLoaded);
+    QSignalSpy errors(backend, &OKILTV::Player::MpvPlayer::errorOccurred);
+    backend->play(playbackUrl);
+    QTRY_VERIFY_WITH_TIMEOUT(!loaded.isEmpty() || !errors.isEmpty(), 10000);
+    QVERIFY2(errors.isEmpty(), qPrintable(backend->diagnostics()));
+    QVERIFY(!loaded.isEmpty());
+    QTRY_VERIFY_WITH_TIMEOUT(backend->position() > 0.1, 5000);
+    QVERIFY(requests.contains(QStringLiteral("/archive/video/index.m3u8")));
+    QVERIFY(requests.contains(QStringLiteral("/archive/video/index0.ts")));
+    backend->stop();
 }
 
 void AppModelTests::catchupOwnedStreamSessionPreservesConfiguredRequestHeaders()
@@ -11865,11 +11949,19 @@ void AppModelTests::dvrControllerWindowsWaitsForDescendants()
 #endif
 }
 
-void AppModelTests::dvrControllerRemuxDeletesTempWhenDurationMatchesRegardlessOfExitCode()
+void AppModelTests::dvrControllerRemuxRequiresSuccessfulExit_data()
+{
+    QTest::addColumn<int>("exitCode");
+    QTest::newRow("success") << 0;
+    QTest::newRow("partial-output-error") << 23;
+}
+
+void AppModelTests::dvrControllerRemuxRequiresSuccessfulExit()
 {
 #if defined(Q_OS_WIN)
     QSKIP("POSIX shell-based fake ffmpeg/ffprobe wrappers are used by this test.");
 #else
+    QFETCH(int, exitCode);
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
 
@@ -11891,7 +11983,7 @@ void AppModelTests::dvrControllerRemuxDeletesTempWhenDurationMatchesRegardlessOf
         "done\n"
         "output=\"${@: -1}\"\n"
         "cp \"$input\" \"$output\"\n"
-        "exit 23\n");
+        "exit %1\n").arg(exitCode);
     const QString ffprobeScript = QStringLiteral(
         "#!/usr/bin/env bash\n"
         "sleep 0.2\n"
@@ -11932,7 +12024,9 @@ void AppModelTests::dvrControllerRemuxDeletesTempWhenDurationMatchesRegardlessOf
 
     QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(finalPath), 5000);
     QVERIFY(QFileInfo(finalPath).size() > 0);
-    QTRY_VERIFY_WITH_TIMEOUT(!QFileInfo::exists(tempPath), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(dvrController.findChildren<QProcess *>().isEmpty(), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(dvrController.findChildren<QFutureWatcherBase *>().isEmpty(), 5000);
+    QCOMPARE(QFileInfo::exists(tempPath), exitCode != 0);
     QVERIFY2(uiTicks >= 10, "DVR duration verification blocked the UI event loop");
 #endif
 }
@@ -12001,6 +12095,144 @@ void AppModelTests::dvrControllerRemuxKeepsTempWhenDurationMismatched()
     QVERIFY(!QFileInfo::exists(finalPath));
     QVERIFY(QFileInfo::exists(tempPath));
 #endif
+}
+
+void AppModelTests::manualRemuxPreservesSourceOnFailure()
+{
+#if defined(Q_OS_WIN)
+    QSKIP("POSIX fake process fixture");
+#else
+    QTemporaryDir dir;
+    QVERIFY(writeExecutableTextFile(dir.filePath(QStringLiteral("ffmpeg")),
+        QStringLiteral("#!/bin/sh\nfor output do :; done\nprintf partial > \"$output\"\nexit 23\n")));
+    ScopedPathOverride path(dir.path());
+    const auto source = dir.filePath(QStringLiteral("complete.ts"));
+    QFile file(source); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("complete recording"); file.close();
+    PlayerController player;
+    player.startRemux(source, dir.filePath(QStringLiteral("partial.mkv")));
+    QTRY_VERIFY_WITH_TIMEOUT(!player.isRemuxing(), 4000);
+    QVERIFY(QFileInfo::exists(source)); QVERIFY(file.open(QIODevice::ReadOnly));
+    QCOMPARE(file.readAll(), QByteArray("complete recording"));
+    QVERIFY(QFileInfo(dir.filePath(QStringLiteral("partial.mkv"))).size() > 0);
+#endif
+}
+
+void AppModelTests::dvrAndTimeshiftForwardConfiguredInputHeaders()
+{
+#if defined(Q_OS_WIN)
+    QSKIP("POSIX fake process fixture");
+#else
+    StartupHarness harness; QVERIFY(harness.initialize(std::nullopt));
+    const auto tools = harness.tempDir.filePath(QStringLiteral("tools")); QVERIFY(QDir().mkpath(tools));
+    QVERIFY(writeExecutableTextFile(QDir(tools).filePath(QStringLiteral("ffmpeg")), QStringLiteral("#!/bin/sh\nexec sleep 30\n")));
+    QVERIFY(writeExecutableTextFile(QDir(tools).filePath(QStringLiteral("ffprobe")), QStringLiteral("#!/bin/sh\nprintf '{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"h264\"}]}'\n")));
+    ScopedPathOverride path(tools);
+    auto &settings = harness.settings->current(); settings.playerUserAgent = QStringLiteral("Required-UA");
+    settings.mpvOptions = {{QStringLiteral("http-header-fields"), QStringLiteral("Cookie: session=synthetic")}};
+    settings.timeshiftEnabled = true; settings.dvrRemuxToMkv = false;
+    auto check = [&](const QStringList &args) {
+        const auto agent = args.indexOf(QStringLiteral("-user_agent"));
+        const auto input = args.indexOf(QStringLiteral("-i"));
+        QVERIFY(agent >= 0); QCOMPARE(args.value(agent + 1), QStringLiteral("Required-UA"));
+        QVERIFY(input < 0 || agent < input);
+        QVERIFY(args.value(args.indexOf(QStringLiteral("-headers")) + 1).contains(QStringLiteral("Cookie: session=synthetic\r\n")));
+    };
+    DvrController::MergedWindow window; window.id = QStringLiteral("test"); window.profileId = guidToString(harness.activeProfileId());
+    window.channelId = 55; window.streamUrl = QStringLiteral("http://fixture.invalid/dvr.ts");
+    QVERIFY(harness.dvrController->startPreparedSession(window));
+    check(harness.dvrController->m_sessions.at(window.id)->ingestProcess->arguments());
+    Channel channel; channel.id = 1; channel.profileId = harness.activeProfileId();
+    channel.streamUrl = QStringLiteral("http://fixture.invalid/timeshift.ts");
+    harness.playerController->m_currentChannel = channel;
+    QVERIFY(harness.timeshiftController->startSessionForCurrentChannel(false, QStringLiteral("test")));
+    check(harness.timeshiftController->m_session->probeProcess->arguments());
+    QTRY_VERIFY(harness.timeshiftController->m_session->ingestProcess != nullptr);
+    check(harness.timeshiftController->m_session->ingestProcess->arguments());
+    QVERIFY(harness.timeshiftController->startDetachedGeneration(QStringLiteral("test-reconnect")));
+    check(harness.timeshiftController->m_retainedSessions.back().ingestProcess->arguments());
+#endif
+}
+
+void AppModelTests::profileRefreshPreservesLaterPlaybackDecision_data()
+{
+    QTest::addColumn<bool>("stop");
+    QTest::newRow("switch-to-B") << false;
+    QTest::newRow("stop") << true;
+}
+void AppModelTests::profileRefreshPreservesLaterPlaybackDecision()
+{
+    QFETCH(bool, stop);
+    class DelayedNetwork final : public NetworkAccess {
+    public:
+        mutable std::atomic_bool entered{false}, release{false};
+        QByteArray get(const QUrl &) const override {
+            entered = true; while (!release) QThread::msleep(1);
+            return QByteArray("#EXTM3U\n#EXTINF:-1 tvg-id=\"channel.one\",Channel One\nhttp://127.0.0.1/channel-one\n"
+                              "#EXTINF:-1 tvg-id=\"channel.two\",Channel Two\nhttp://127.0.0.1/channel-two\n");
+        }
+    };
+    auto network = std::make_shared<DelayedNetwork>();
+    StartupHarness harness; QVERIFY(harness.initialize(0, network));
+    const auto unblock = qScopeGuard([&] { network->release = true; });
+    harness.appController->initialize(); QTRY_VERIFY(!harness.appController->isBusy());
+    auto profile = *harness.settings->activeProfile(); profile.type = ProfileType::M3UUrl;
+    profile.m3uUrl = QStringLiteral("http://fixture.invalid/list.m3u");
+    QVERIFY(harness.settings->replaceProfile(profile.id, profile));
+    harness.appController->loadProfile(guidToString(profile.id)); QTRY_VERIFY(network->entered.load());
+    if (stop) harness.playerController->stop();
+    else harness.channelListModel->activateById(1);
+    QSignalSpy activated(harness.playerController.get(), &PlayerController::playbackChannelActivated);
+    network->release = true;
+    QTRY_VERIFY(!harness.appController->isBusy());
+    QCOMPARE(activated.count(), 0);
+    if (!stop) QCOMPARE(harness.playerController->currentChannelValue()->id, 1);
+}
+void AppModelTests::profileRemovalClearsLiveState()
+{
+    StartupHarness harness; QVERIFY(harness.initialize(0)); harness.appController->initialize();
+    QTRY_VERIFY(!harness.appController->isBusy()); QVERIFY(!harness.channelListModel->allChannels().isEmpty());
+    const auto id = guidToString(harness.activeProfileId());
+    QSignalSpy activated(harness.playerController.get(), &PlayerController::playbackChannelActivated);
+    QVERIFY(harness.profilesModel->removeProfile(id));
+    QVERIFY(harness.channelListModel->allChannels().isEmpty()); QVERIFY(harness.appController->activeProfileId().isEmpty());
+    QVERIFY(harness.epgService->snapshot()->totalEntries == 0);
+    QVERIFY(harness.appController->m_loadedChannels.isEmpty());
+    harness.channelListModel->activateById(0); QCOMPARE(activated.count(), 0);
+}
+void AppModelTests::xmltvOnlyEditRefreshesIdleEpg()
+{
+    auto network = std::make_shared<MockNetworkAccess>();
+    const QUrl oldUrl(QStringLiteral("http://fixture.invalid/old.xml")), newUrl(QStringLiteral("http://fixture.invalid/new.xml"));
+    network->setResponse(oldUrl, {xmltvPayload(QStringLiteral("Old")), {}, 0});
+    network->setResponse(newUrl, {xmltvPayload(QStringLiteral("New")), {}, 0});
+    StartupHarness harness; QVERIFY(harness.initialize(std::nullopt, network, oldUrl.toString()));
+    harness.settings->current().autoRefreshEpg = false;
+    harness.appController->initialize(); QTRY_VERIFY(!harness.appController->isBusy());
+    QTRY_VERIFY(!harness.appController->epgRefreshInProgress());
+    QCOMPARE(harness.epgService->programsInRange(QStringLiteral("channel.one"), QDateTime::fromString(QStringLiteral("2026-03-17T00:00:00Z"), Qt::ISODate),
+        QDateTime::fromString(QStringLiteral("2026-03-18T00:00:00Z"), Qt::ISODate)).first().title, QStringLiteral("Old"));
+    QVERIFY(harness.profilesModel->replaceProfile(guidToString(harness.activeProfileId()), {{QStringLiteral("xmltvUrl"), newUrl.toString()}}));
+    QTRY_VERIFY(!harness.appController->epgRefreshInProgress());
+    QCOMPARE(harness.epgService->programsInRange(QStringLiteral("channel.one"), QDateTime::fromString(QStringLiteral("2026-03-17T00:00:00Z"), Qt::ISODate),
+        QDateTime::fromString(QStringLiteral("2026-03-18T00:00:00Z"), Qt::ISODate)).first().title, QStringLiteral("New"));
+}
+void AppModelTests::timeshiftContinuationNeverReturnsToOlderGeneration()
+{
+    StartupHarness harness; QVERIFY(harness.initialize(std::nullopt));
+    auto &timeshift = *harness.timeshiftController;
+    const auto start = QDateTime::currentDateTimeUtc().addSecs(-600);
+    auto make = [&](const QString &id, int offset) {
+        TimeshiftController::Session session; session.id = id; session.state = TimeshiftController::SessionState::Failed;
+        session.playlistInfo.windowStartUtc = start.addSecs(offset); session.playlistInfo.liveEdgeUtc = start.addSecs(offset + 300);
+        return session;
+    };
+    timeshift.m_session = make(QStringLiteral("B"), 300);
+    timeshift.m_retainedSessions.push_back(make(QStringLiteral("A"), 0));
+    QVERIFY(!timeshift.switchToNextGenerationPlayback(QStringLiteral("failed-generation-deplete"), false));
+    QCOMPARE(timeshift.m_session->id, QStringLiteral("B"));
+    timeshift.m_retainedSessions.push_back(make(QStringLiteral("C"), 600));
+    QVERIFY(timeshift.switchToNextGenerationPlayback(QStringLiteral("failed-generation-deplete"), false));
+    QCOMPARE(timeshift.m_session->id, QStringLiteral("C"));
 }
 
 void AppModelTests::portableRuntimeControllerTracksPortableOverrideWithoutDirtyingSettings()

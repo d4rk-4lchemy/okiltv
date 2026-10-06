@@ -196,6 +196,7 @@ private:
     Core::EpgCacheService m_epgCacheService;
     Core::IconCacheService m_iconCacheService;
     QList<Core::Channel> m_loadedChannels;
+    QUuid m_loadingProfileId;
     std::optional<std::pair<QUuid, int>> m_lastPrimaryChannel;
     QStringList m_groupAutoEnableNoticeProfileIds;
     QString m_statusText { QStringLiteral("Ready") };

@@ -476,8 +476,10 @@ class EpgSearchStoreTests : public QObject
     {
         QTemporaryDir dir;
         RuntimeContext runtime;
+        runtime.launchMode = LaunchMode::Portable;
         runtime.dataRootOverride = dir.path();
         AppDataPaths::initializeRuntime(runtime);
+        QCOMPARE(QDir(AppDataPaths::dataDirectory()).absolutePath(), QDir(dir.path()).absolutePath());
         const auto cleanup = qScopeGuard(
             []
             {
@@ -670,8 +672,10 @@ class EpgSearchStoreTests : public QObject
     {
         QTemporaryDir dir;
         RuntimeContext runtime;
+        runtime.launchMode = LaunchMode::Portable;
         runtime.dataRootOverride = dir.path();
         AppDataPaths::initializeRuntime(runtime);
+        QCOMPARE(QDir(AppDataPaths::dataDirectory()).absolutePath(), QDir(dir.path()).absolutePath());
         const auto cleanup = qScopeGuard(
             []
             {

@@ -121,6 +121,7 @@ Result<HttpResponse> QtHttpTransport::get(const HttpRequest &input, const Reques
                         const auto status = inflate(&inflater.stream, Z_NO_FLUSH);
                         append(output.data(), static_cast<qint64>(output.size() - inflater.stream.avail_out));
                         if (status == Z_STREAM_END) inflater.ended = true;
+                        else if (status == Z_BUF_ERROR && inflater.stream.avail_in == 0) break;
                         else if (status != Z_OK) failure = Error{ErrorCode::InvalidResponse, context.operationId};
                         if (const auto error = context.interruption()) failure = error;
                     }

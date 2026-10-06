@@ -23,14 +23,21 @@ void VodProgressService::observe(const SessionSnapshot &snapshot, bool checkpoin
         m_completionQueued = false;
         RequestContext request;
         const auto deps = m_deps;
-        m_jobs.submit(snapshot.ref.profileId, request, [deps, snapshot](RequestContext context) -> Result<JobReply> {
+        m_jobs.submit(snapshot.ref.profileId, request, [deps, snapshot, initialized = m_initializedSession](RequestContext context) -> Result<JobReply> {
             auto source = deps.sources->snapshot(snapshot.ref.profileId);
             if (const auto *error = std::get_if<Error>(&source)) return *error;
             context.source = std::get<SourceContext>(source).revision;
             auto result = deps.progress->beginSession(snapshot.ref, snapshot.sessionToken, context);
             if (const auto *error = std::get_if<Error>(&result)) return *error;
+            *initialized = snapshot.sessionToken;
             return JobReply{context.source, Success{}, {}};
-        }, [this](Result<JobReply> result) { if (const auto *error = std::get_if<Error>(&result); error && failed) failed(*error); });
+        }, [this, session = snapshot.sessionToken, profile = snapshot.ref.profileId](Result<JobReply> result) {
+            if (const auto *error = std::get_if<Error>(&result)) {
+                m_writeErrors.insert(profile, *error);
+                if (session == m_session) m_dirty = true;
+                if (failed) failed(*error);
+            }
+        });
     }
     if (!snapshot.positionValid) return;
     m_dirty = m_dirty || !m_snapshot || m_snapshot->positionMs != snapshot.positionMs
@@ -50,17 +57,22 @@ void VodProgressService::flush()
     if (completed) m_completionQueued = true;
     RequestContext request;
     const auto deps = m_deps;
-    m_jobs.submit(snapshot.ref.profileId, request, [deps, snapshot, progress, completed](RequestContext context) -> Result<JobReply> {
+    m_jobs.submit(snapshot.ref.profileId, request, [deps, snapshot, progress, completed, initialized = m_initializedSession](RequestContext context) -> Result<JobReply> {
         auto source = deps.sources->snapshot(snapshot.ref.profileId);
         if (const auto *error = std::get_if<Error>(&source)) return *error;
         context.source = std::get<SourceContext>(source).revision;
+        if (*initialized != snapshot.sessionToken) {
+            const auto begun = deps.progress->beginSession(snapshot.ref, snapshot.sessionToken, context);
+            if (const auto *error = std::get_if<Error>(&begun)) return *error;
+            *initialized = snapshot.sessionToken;
+        }
         auto result = deps.progress->checkpoint(snapshot.ref, progress, context, completed);
         if (const auto *error = std::get_if<Error>(&result)) return *error;
         return JobReply{context.source, Success{}, {}};
     }, [this, ref = snapshot.ref, profile = snapshot.ref.profileId, session = snapshot.sessionToken, completed](Result<JobReply> result) {
         if (const auto *error = std::get_if<Error>(&result)) {
             m_writeErrors.insert(profile, *error);
-            if (completed && session == m_session) { m_completionQueued = false; m_dirty = true; }
+            if (session == m_session) { if (completed) m_completionQueued = false; m_dirty = true; }
             if (failed) failed(*error);
         } else {
             m_writeErrors.remove(profile); emit persisted(ref);
@@ -100,17 +112,18 @@ void VodProgressService::setWatched(const ContentRef &ref, bool watched, std::fu
     const auto observed = current && m_snapshot ? std::optional<VodProgress>(observedProgress(*m_snapshot)) : std::nullopt;
     const auto sequence = current ? ++m_sequence : 1;
     const auto deps = m_deps;
-    m_jobs.submit(ref.profileId, {}, [deps, ref, watched, observed, sequence, current, session](RequestContext context) -> Result<JobReply> {
+    m_jobs.submit(ref.profileId, {}, [deps, ref, watched, observed, sequence, current, session, initialized = m_initializedSession](RequestContext context) -> Result<JobReply> {
         auto source = deps.sources->snapshot(ref.profileId);
         if (const auto *error = std::get_if<Error>(&source)) return *error;
         context.source = std::get<SourceContext>(source).revision;
         auto saved = deps.progress->read(ref, context);
         if (const auto *error = std::get_if<Error>(&saved)) return *error;
         auto progress = observed.value_or(std::get<std::optional<VodProgress>>(saved).value_or(VodProgress{}));
-        if (!current) {
-            progress.sessionToken = QUuid::createUuid();
+        if (!current || *initialized != session) {
+            progress.sessionToken = current ? session : QUuid::createUuid();
             auto begun = deps.progress->beginSession(ref, progress.sessionToken, context);
             if (const auto *error = std::get_if<Error>(&begun)) return *error;
+            if (current) *initialized = session;
         }
         if (current) progress.sessionToken = session;
         progress.sequence = sequence;

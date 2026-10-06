@@ -123,6 +123,10 @@ sessions, including ended programmes. Media time selects the displayed programme
 Crossing an EPG boundary updates metadata/timeline without reconnecting or stopping.
 Missing EPG uses a generic catch-up timeline and does not interrupt delivery.
 
+Only HTTP MPEG-TS paths use the owned catch-up stream protocol. HLS and other
+media retain native HTTP URLs, allowing mpv to resolve relative playlist/segment
+URIs against the provider response and redirects.
+
 Catch-up is independent of local timeshift. Do not attach `TimeshiftController`,
 create local HLS or apply ordinary Live startup/refill policy to it. Preserve manual
 pause ownership through automatic refill and recovery.
@@ -145,7 +149,12 @@ stop-first.
 buffer, helper processes, timeline and disk quota. It is disabled by default and
 requires ffmpeg/ffprobe. Enable/disable applies to current single Live playback;
 storage/window/quota changes apply on the next stream. Local starvation gets a
-chance to recover before generic player reconnect.
+chance to recover before generic player reconnect. Automatic generation
+continuation requires a later live edge and clamps its target to at least the
+current edge; exhausted failed generations cannot return to retained older data.
+DVR ingest, timeshift preflight/ingest and reconnect use `Core::mediaInputOptions`
+from the shared media request headers (User-Agent, custom headers and referrer).
+These HTTP-only input options precede the input and are omitted for local/UDP media.
 
 [MultiViewController](../qt/src/app/multiviewcontroller.h) owns PiP/grid transitions.
 Closing PiP preserves the visible primary stream without reload; swapping PiP
@@ -168,7 +177,10 @@ benefit is not an established explanation of decoder/render teardown.
 | Scheduled DVR | [DvrController](../qt/src/app/dvrcontroller.h); persisted schedules, offsets, ingest and optional remux |
 | Archive download | [CatchupDownloadController](../qt/src/app/catchupdownloadcontroller.h); independent session-only FIFO queue |
 
-DVR and manual recording have separate output/remux settings. Never implicitly
+DVR and manual recording have separate output/remux settings. Both retain the
+source TS unless FFmpeg exits normally with code zero and worker-side ffprobe
+verification confirms a nonempty output whose duration matches the source within
+one second. Failed probes or partial output never authorize source deletion. Never implicitly
 stop recordings to start VOD. Scheduled DVR defaults to checkpointing/stopping VOD
 with a notification; `dvrStopVodBeforeRecording=false` permits independent DVR/VOD
 and prevents automatic DVR tap handoff from replacing VOD.
@@ -179,7 +191,10 @@ playback-session state. One Qt Network worker transfers at a time; queue-wide pa
 retains source bytes. ffmpeg remuxes complete local input to a verified MKV without
 transcoding. Finite HLS support and resume validation are detailed in
 [source-feature-parity.md](../.project/source-feature-parity.md). Preserve usable
-partial output and collision-safe filenames through error paths.
+partial output and collision-safe filenames through error paths. HLS failures
+retain the root manifest and its complete downloaded resource graph at their
+original paths (including local remux/validation failure), and report that location.
+Success and explicit cancellation remove the graph after workers stop.
 
 Use [playback tests](../qt/tests/tst_playback_components.cpp) for deterministic
 policy decisions, Catchup/App suites for transport and real backend integration,

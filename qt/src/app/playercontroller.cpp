@@ -15,6 +15,8 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFutureWatcher>
+#include <QtConcurrentRun>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QTimeZone>
@@ -2616,6 +2618,7 @@ QString PlayerController::prepareCatchupStreamPlaybackUrl(
     auto trimmedSource = sourceUrl.trimmed();
     if (trimmedSource.isEmpty()
         || targetPlayer == nullptr
+        || !QUrl(trimmedSource).path().endsWith(QStringLiteral(".ts"), Qt::CaseInsensitive)
         || envFlagEnabled("OKILTV_HEADLESS_TEST")
         || envFlagEnabled("OKILTV_DISABLE_CATCHUP_OWNED_STREAM")) {
         return trimmedSource;
@@ -4048,22 +4051,24 @@ void PlayerController::startRemux(const QString &tempPath, const QString &finalP
             QStringLiteral("player"),
             QStringLiteral("Remuxing %1 → %2").arg(tempPath, finalPath));
 
-        connect(process, &QProcess::finished, this, [this, process, tempPath, finalPath](int exitCode, QProcess::ExitStatus) {
-            const bool outputProduced = QFileInfo(finalPath).size() > 0;
-            if (outputProduced) {
-                Core::DebugLogger::instance().log(
-                    QStringLiteral("player"),
-                    QStringLiteral("Remux complete (exit %1): %2").arg(exitCode).arg(finalPath));
-                // Keep spinner visible during deletion retries
-                deleteTempRecording(tempPath, 5);
-            } else {
-                Core::DebugLogger::instance().log(
-                    QStringLiteral("player"),
-                    QStringLiteral("Remux failed (exit %1): keeping %2").arg(exitCode).arg(tempPath));
-                m_isRemuxing = false;
-                emit isRemuxingChanged();
-            }
+        connect(process, &QProcess::finished, this, [this, process, tempPath, finalPath](int exitCode, QProcess::ExitStatus exitStatus) {
             process->deleteLater();
+            auto *watcher = new QFutureWatcher<bool>(this);
+            connect(watcher, &QFutureWatcher<bool>::finished, this, [this, watcher, tempPath, finalPath] {
+                const auto valid = watcher->result();
+                watcher->deleteLater();
+                Core::DebugLogger::instance().log(QStringLiteral("player"), valid
+                    ? QStringLiteral("Remux validated: %1").arg(finalPath)
+                    : QStringLiteral("Remux failed validation: keeping %1").arg(tempPath));
+                if (valid) deleteTempRecording(tempPath, 5);
+                else { m_isRemuxing = false; emit isRemuxingChanged(); }
+            });
+            const auto validation = QtConcurrent::run([tempPath, finalPath, exitCode, exitStatus] {
+                return exitStatus == QProcess::NormalExit && exitCode == 0
+                    && Core::recordingRemuxValid(tempPath, finalPath);
+            });
+            m_remuxValidationTasks.addFuture(validation);
+            watcher->setFuture(validation);
         });
 
         connect(process, &QProcess::errorOccurred, this, [this, process, tempPath](QProcess::ProcessError error) {

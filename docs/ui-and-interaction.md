@@ -460,6 +460,10 @@ attached geometry and anchors.
 
 ## Settings and formatting
 
+Ordinary VOD Play/Resume delegates resume selection to the backend, including
+while progress is loading. Its caption never turns an unknown zero into an
+explicit restart; Play from beginning is the separate restart action.
+
 Settings edits are drafts. Async source work preserves unsaved drafts. Save applies
 changes; discard/reload restores persisted state. UI transparency previews live,
 while draft date/time choices affect only their preview until Save.

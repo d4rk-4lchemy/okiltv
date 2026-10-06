@@ -337,7 +337,7 @@ QUuid VodController::play(const ContentRef &ref, const PlaybackPreferences &pref
             // A target's own saved state is supplied by its descriptor; never inherit a file from another episode.
             saved->trackPreferences.remove(QStringLiteral("sub"));
         }
-        if (saved && saved->status == WatchStatus::Watched) saved->positionMs=0;
+        if (saved && (saved->status == WatchStatus::Watched || saved->positionMs < 60000)) saved->positionMs=0;
         if (preferences.trackPreferences) {
             if (!saved) saved = VodProgress{};
             saved->trackPreferences = *preferences.trackPreferences;

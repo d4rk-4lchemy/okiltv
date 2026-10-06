@@ -48,6 +48,8 @@ public:
     std::atomic_int migrations{0};
     std::atomic_int publications{0};
     std::atomic_int checkpoints{0};
+    std::atomic_int beginFailures{0};
+    std::atomic_int beginAttempts{0};
     void editCredentials()
     {
         QMutexLocker lock(&m_mutex);
@@ -229,6 +231,8 @@ public:
     {
         QMutexLocker lock(&m_mutex);
         if (const auto error = check(context)) return *error;
+        ++beginAttempts;
+        if (beginFailures > 0) { --beginFailures; return Error{ErrorCode::StorageUnavailable, context.operationId, true}; }
         m_sessions[ref.key()] = session;
         m_sequences[ref.key()] = 0;
         return Success{};

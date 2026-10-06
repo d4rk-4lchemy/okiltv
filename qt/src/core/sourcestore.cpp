@@ -86,7 +86,25 @@ QList<SourceSummary> SourceStore::loadSummaries() const
     return summariesFromJson(root.value(QStringLiteral("summaries")).toArray());
 }
 
-bool SourceStore::saveSummaries(const QList<SourceSummary> &summaries, QString *errorText) const
+QList<QUuid> SourceStore::pendingRemovals() const
+{
+    QFile file(m_summariesFilePath);
+    if (!file.exists()) return {};
+    if (!file.open(QIODevice::ReadOnly)) throw std::runtime_error("Cannot read pending source removals.");
+    QJsonParseError error;
+    const auto document = QJsonDocument::fromJson(file.readAll(), &error);
+    if (error.error != QJsonParseError::NoError || !document.isObject())
+        throw std::runtime_error("Invalid saved source summaries.");
+    QList<QUuid> ids;
+    for (const auto &value : document.object().value(QStringLiteral("pendingRemovals")).toArray()) {
+        const auto id = QUuid(value.toString());
+        if (!id.isNull() && !ids.contains(id)) ids.append(id);
+    }
+    return ids;
+}
+
+bool SourceStore::saveSummaries(const QList<SourceSummary> &summaries, QString *errorText,
+                                const std::optional<QList<QUuid>> &removals) const
 {
     if (errorText != nullptr) {
         errorText->clear();
@@ -115,6 +133,15 @@ bool SourceStore::saveSummaries(const QList<SourceSummary> &summaries, QString *
     }
     QJsonObject root;
     root.insert(QStringLiteral("summaries"), summariesToJson(summaries));
+    QJsonArray pending;
+    try {
+        for (const auto &id : (removals ? *removals : pendingRemovals())) pending.append(guidToString(id));
+    } catch (const std::exception &error) {
+        if (errorText) *errorText = QString::fromUtf8(error.what());
+        file.cancelWriting();
+        return false;
+    }
+    root.insert(QStringLiteral("pendingRemovals"), pending);
     const auto payload = serializedJson(root);
     if (file.write(payload) != payload.size()) {
         if (errorText != nullptr) {

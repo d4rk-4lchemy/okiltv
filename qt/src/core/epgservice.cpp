@@ -494,7 +494,9 @@ bool EpgService::tryParseDate(const QString &value, QDateTime *result)
 
     const auto parts = trimmed.split(u' ', Qt::SkipEmptyParts);
     const auto basePart = parts.isEmpty() ? trimmed.left(14) : parts.front();
-    auto dateTime = QDateTime::fromString(basePart, QStringLiteral("yyyyMMddHHmmss"));
+    const auto date = QDate::fromString(basePart.left(8), QStringLiteral("yyyyMMdd"));
+    const auto time = QTime::fromString(basePart.mid(8), QStringLiteral("HHmmss"));
+    auto dateTime = QDateTime(date, time, QTimeZone::UTC);
     if (!dateTime.isValid()) {
         return false;
     }

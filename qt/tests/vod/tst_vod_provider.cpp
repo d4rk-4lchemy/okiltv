@@ -4,6 +4,11 @@
 #include <QTimer>
 #include <QUrlQuery>
 #include <QtTest>
+#if defined(OKILTV_USE_QT_ZLIB)
+#include <QtZlib/zlib.h>
+#else
+#include <zlib.h>
+#endif
 
 using namespace OKILTV::Vod;
 namespace {
@@ -12,6 +17,8 @@ public:
     QByteArray response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]";
     int requests = 0;
     bool stall = false;
+    qsizetype splitAt = 0;
+    bool tailSent = false;
     Server()
     {
         connect(this, &QTcpServer::newConnection, this, [this]() {
@@ -23,8 +30,13 @@ public:
                     if (!request->contains("\r\n\r\n")) return;
                     ++requests;
                     if (stall) return;
-                    socket->write(response);
-                    socket->disconnectFromHost();
+                    if (splitAt > 0) {
+                        socket->write(response.first(splitAt)); socket->flush();
+                        QTimer::singleShot(50, socket, [this, socket] {
+                            tailSent = true;
+                            socket->write(response.mid(splitAt)); socket->disconnectFromHost();
+                        });
+                    } else { socket->write(response); socket->disconnectFromHost(); }
                 });
                 connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
             }
@@ -197,6 +209,37 @@ private slots:
         QVERIFY(std::holds_alternative<HttpResponse>(transport.get({server.url()}, context)));
         context.responseByteLimit = 1;
         QCOMPARE(std::get<Error>(transport.get({server.url()}, context)).code, ErrorCode::ResponseTooLarge);
+    }
+    void fragmentedDeflateWaitsAtOutputBufferBoundary()
+    {
+        const QByteArray body = QByteArray(65536, 'x') + QByteArray(65536, 'y');
+        const auto compressed = qCompress(body).mid(4);
+        auto decodedPrefixSize = [&](qsizetype prefix) {
+            z_stream stream{}; inflateInit(&stream);
+            QByteArray output(body.size() + 1, '\0');
+            stream.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(compressed.constData()));
+            stream.avail_in = static_cast<uInt>(prefix);
+            stream.next_out = reinterpret_cast<Bytef *>(output.data());
+            stream.avail_out = static_cast<uInt>(output.size());
+            inflate(&stream, Z_NO_FLUSH);
+            const auto size = static_cast<qsizetype>(stream.total_out); inflateEnd(&stream); return size;
+        };
+        qsizetype low = 1, high = compressed.size();
+        while (low < high) {
+            const auto middle = low + (high - low) / 2;
+            if (decodedPrefixSize(middle) < 65536) low = middle + 1; else high = middle;
+        }
+        QCOMPARE(decodedPrefixSize(low), qsizetype(65536));
+        Server server;
+        const QByteArray headers = "HTTP/1.1 200 OK\r\nContent-Encoding: deflate\r\nContent-Length: "
+            + QByteArray::number(compressed.size()) + "\r\nConnection: close\r\n\r\n";
+        server.response = headers + compressed; server.splitAt = headers.size() + low;
+        const auto result = QtHttpTransport{}.get({server.url()}, {});
+        QVERIFY(server.tailSent); QVERIFY(std::holds_alternative<HttpResponse>(result));
+        QCOMPARE(std::get<HttpResponse>(result).body, body);
+        // A truncated compressed response still fails without Z_STREAM_END.
+        server.splitAt = 0; server.response = headers + compressed.first(low);
+        QVERIFY(std::holds_alternative<Error>(QtHttpTransport{}.get({server.url()}, {})));
     }
     void limitsDecompressedBytes()
     {

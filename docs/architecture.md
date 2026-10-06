@@ -106,6 +106,10 @@ late callbacks and writes into destroyed services.
 - VOD library models wait for runtime storage readiness for up to 15 seconds,
   retrying initialization asynchronously during that window. Closing/source changes
   cancel the wait; successful reconciliation resumes catalogue requests.
+- Source removal commits its summary/tombstone atomically before cleanup; startup
+  resumes pending cleanup before validating details. Removing the loaded source
+  clears Live/EPG contexts. A profile refresh may restore playback only if the
+  player's generation has not changed during the request.
 - `AppController` generation counters reject obsolete profile, EPG and programme
   detail results. Check identity/generation again when publishing a result.
 - Cancellation alone is insufficient: already completed callbacks may still be
