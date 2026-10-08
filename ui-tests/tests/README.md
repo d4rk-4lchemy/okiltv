@@ -33,7 +33,7 @@ Single scenario, with an isolated D-Bus session and disposable unlocked keyring:
 bash scripts/ci/run_ui_test.sh ui-tests/tests/05-channel-selection.py   qt/out/build/qt-linux-debug/app/OKILTV /tmp/okiltv-channel-selection
 ```
 
-Dependencies: Python 3, ffmpeg, libmpv2, libsecret-1-0, gnome-keyring,
+Dependencies: Python 3, ffmpeg, ImageMagick (`convert`), libmpv2, libsecret-1-0, gnome-keyring,
 dbus-run-session, Xvfb, Openbox, xdotool, x11-utils and Mesa software OpenGL.
 The helper does not use the user's keyring or change the application security
 backend. Run scenarios sequentially; CTest enforces a shared UI resource lock.

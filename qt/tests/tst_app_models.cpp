@@ -87,6 +87,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <memory>
 #include <limits>
@@ -958,13 +959,23 @@ void AppModelTests::vodRuntimeNativePlayback()
         QStringLiteral("-c:v"), QStringLiteral("mpeg2video"), mediaPath});
     QVERIFY(generator.waitForFinished(30000)); QCOMPARE(generator.exitCode(), 0);
     QFile media(mediaPath); QVERIFY(media.open(QIODevice::ReadOnly)); const auto bytes = media.readAll();
-    QTcpServer server;
-    QVERIFY(server.listen(QHostAddress::LocalHost));
-    int resolutions = 0;
+    std::atomic_int resolutions { 0 };
     QStringList mediaPaths;
-    connect(&server, &QTcpServer::newConnection, &server, [&]() {
-        while (server.hasPendingConnections()) {
-            auto *socket = server.nextPendingConnection();
+    QMutex mediaPathsMutex;
+    QThread fixtureThread;
+    auto *server = new QTcpServer;
+    server->moveToThread(&fixtureThread);
+    fixtureThread.start();
+    const auto stopFixture = qScopeGuard([&]() {
+        QMetaObject::invokeMethod(server, [server]() { delete server; }, Qt::BlockingQueuedConnection);
+        fixtureThread.quit();
+        fixtureThread.wait();
+    });
+    // libmpv may wait for HTTP while the GUI waits for rendering or telemetry.
+    // Serve provider/media requests independently of that GUI event loop.
+    connect(server, &QTcpServer::newConnection, server, [&]() {
+        while (server->hasPendingConnections()) {
+            auto *socket = server->nextPendingConnection();
             auto request = std::make_shared<QByteArray>();
             connect(socket, &QTcpSocket::readyRead, socket, [&, socket, request]() {
                 request->append(socket->readAll());
@@ -985,7 +996,10 @@ void AppModelTests::vodRuntimeNativePlayback()
                         body = R"([{"stream_id":"007","name":"Local movie","category_id":"local","container_extension":"mkv"}])";
                     headers += "Content-Type: application/json\r\n";
                 } else {
-                    mediaPaths.append(target.path());
+                    {
+                        QMutexLocker lock(&mediaPathsMutex);
+                        mediaPaths.append(target.path());
+                    }
                     const auto offset = request->toLower().indexOf("range: bytes=");
                     const auto start = offset < 0 ? 0 : request->mid(offset + 13).split('-').first().toLongLong();
                     if (start < 0 || start >= bytes.size()) { socket->disconnectFromHost(); return; }
@@ -1002,10 +1016,17 @@ void AppModelTests::vodRuntimeNativePlayback()
             connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
         }
     });
+    bool listening = false;
+    quint16 serverPort = 0;
+    QMetaObject::invokeMethod(server, [&]() {
+        listening = server->listen(QHostAddress::LocalHost);
+        serverPort = server->serverPort();
+    }, Qt::BlockingQueuedConnection);
+    QVERIFY(listening);
     SettingsManager settings(dir.filePath(QStringLiteral("settings.json")));
     settings.load(); settings.current().vodEnabled = true; settings.current().vodSeriesEnabled = true;
     ServerProfile profile; profile.vodEnabled = true;
-    profile.xtreamBaseUrl = QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort());
+    profile.xtreamBaseUrl = QStringLiteral("http://127.0.0.1:%1").arg(serverPort);
     profile.xtreamUsername = QStringLiteral("synthetic-user"); profile.xtreamPassword = QStringLiteral("synthetic-password");
     QVERIFY(settings.addProfile(profile));
     PlayerController player;
@@ -1021,6 +1042,7 @@ void AppModelTests::vodRuntimeNativePlayback()
     };
     settings.current().mpvOptions[QStringLiteral("ao")] = QStringLiteral("null");
     settings.current().mpvOptions[QStringLiteral("hwdec")] = QStringLiteral("no");
+    if (render) settings.current().mpvOptions[QStringLiteral("gpu-dumb-mode")] = QStringLiteral("yes");
     VodRuntime runtime(&settings, &multiview, &dvr, &timeshift, nullptr, std::move(factory));
     std::unique_ptr<QQuickWindow> window;
     if (render) {
@@ -1056,7 +1078,7 @@ void AppModelTests::vodRuntimeNativePlayback()
         QTRY_VERIFY(!runtime.subtitleBusy());
         QCOMPARE(catalog.movie().value(QStringLiteral("audioTrackIndex")).toInt(), 2);
         QCOMPARE(catalog.movie().value(QStringLiteral("subtitleTrackIndex")).toInt(), 2);
-        browseResolutions = resolutions;
+        browseResolutions = resolutions.load();
         events.clear();
         catalog.play(true);
     }
@@ -1156,11 +1178,16 @@ void AppModelTests::vodRuntimeNativePlayback()
     auto changed = profile; changed.xtreamPassword = QStringLiteral("synthetic-after");
     QVERIFY(settings.replaceProfile(profile.id, changed));
     QVERIFY(!runtime.active());
-    QCOMPARE(resolutions - browseResolutions, episode ? 3 : 2); // Two playback resolutions plus one lazy Series metadata load.
-    QVERIFY(!mediaPaths.isEmpty());
+    QCOMPARE(resolutions.load() - browseResolutions, episode ? 3 : 2); // Two playback resolutions plus one lazy Series metadata load.
+    QStringList observedMediaPaths;
+    {
+        QMutexLocker lock(&mediaPathsMutex);
+        observedMediaPaths = mediaPaths;
+    }
+    QVERIFY(!observedMediaPaths.isEmpty());
     const auto expected = episode ? QStringLiteral("/series/synthetic-user/synthetic-password/007.mkv")
                                   : QStringLiteral("/movie/synthetic-user/synthetic-password/007.mkv");
-    for (const auto &path : mediaPaths) QCOMPARE(path, expected);
+    for (const auto &path : observedMediaPaths) QCOMPARE(path, expected);
     QCOMPARE(events.size(), 2);
     for (const auto &event : events) QVERIFY(std::holds_alternative<PublicValue>(event.result));
     runtime.shutdown();

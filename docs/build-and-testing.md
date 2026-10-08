@@ -206,6 +206,18 @@ episode render cases. Its two-minute local fixture checkpoints beyond the
 60-second resume threshold and verifies the restored position, including the
 five-second rewind, within ten seconds. Ordinary playback from zero cannot
 satisfy the resume assertion; the test does not wait for media time to catch up.
+This software-rendered fixture uses Mesa softpipe with mpv's
+`gpu-dumb-mode=yes`, which keeps the OpenGL render API while disabling advanced
+GPU features unsuitable for the software driver. The unrestricted pipeline can
+spin inside Mesa drawing/swap, reproduced with Ubuntu 24.04's mpv 0.37.
+The production `MpvVideoItem` and red-frame assertion remain in use; hardware
+picture-shader quality requires separate platform acceptance.
+Its local provider/media HTTP fixture runs on a dedicated Qt thread, so requests
+continue while the GUI waits for a rendered frame or mpv telemetry during track
+changes/seeks. Counters/path observations are synchronized, and teardown destroys
+the server on its owning thread and joins it before fixture data disappears.
+The application and desktop UI scenarios keep their normal GPU settings. This CTest
+entry uses Qt Test `-v2` so timeout artifacts identify the last completed assertion.
 
 | Area | Main coverage |
 |---|---|
@@ -413,7 +425,8 @@ ctest --preset qt-linux-debug -L '^ui$' --output-on-failure
 
 [scripts/ci/run_ui_test.sh](../scripts/ci/run_ui_test.sh) supplies an isolated
 D-Bus session and disposable keyring. The harness uses Xvfb, Openbox, xdotool and
-generated local media; setup is documented in
+generated local media; ImageMagick's `convert` is required for UI-14's rendered
+station-logo pixel assertions. Setup is documented in
 [ui-tests/linux-ui-tests.md](../ui-tests/linux-ui-tests.md) and
 [scripts/ci/README.md](../scripts/ci/README.md). CTest serializes desktop scenarios.
 Each harness invocation keeps a unique appdata/artifact directory; do not reuse

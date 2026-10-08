@@ -452,7 +452,7 @@ set_tests_properties(OKILTVQtVodRangeTests PROPERTIES LABELS "playback;vod" TIME
 find_program(OKILTV_VOD_XVFB_RUN xvfb-run)
 if (OKILTV_VOD_XVFB_RUN AND NOT CMAKE_CROSSCOMPILING)
     add_test(NAME OKILTVQtVodMpvTests COMMAND ${OKILTV_VOD_XVFB_RUN} -a $<TARGET_FILE:OKILTVQtVodMpvTests>)
-    add_test(NAME OKILTVQtVodRuntimeTests COMMAND ${OKILTV_VOD_XVFB_RUN} -a $<TARGET_FILE:OKILTVQtAppTests> vodRuntimeNativePlayback)
+    add_test(NAME OKILTVQtVodRuntimeTests COMMAND ${OKILTV_VOD_XVFB_RUN} -a $<TARGET_FILE:OKILTVQtAppTests> vodRuntimeNativePlayback -v2)
     set_tests_properties(OKILTVQtVodRuntimeTests PROPERTIES LABELS "app;vod" TIMEOUT 90
         ENVIRONMENT "QT_QPA_PLATFORM=xcb;QSG_RHI_BACKEND=opengl;OKILTV_HEADLESS_TEST=0;OKILTV_VOD_RENDER_TEST=1;LIBGL_ALWAYS_SOFTWARE=1;GALLIUM_DRIVER=softpipe")
     # The container's llvmpipe intermittently renders black despite valid decoded
