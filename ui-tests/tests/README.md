@@ -120,7 +120,8 @@ with wrapping and preserved query/focus/playback, Shift+Tab control navigation,
 unbound Ctrl+Tab, isolated popup shortcut behavior, Unicode
 prefix matching, unavailable archives, hover/auto-hide isolation, explicit tune
 outside the rail filter, protected Guide and single-Escape fullscreen behavior.
-It also checks query-only opening, diagonal close-button geometry, fixed field
+It also checks query-only opening, a close button 12 px to the right with its top
+edge aligned to the query field, fixed field
 position, inline selected actions, collapsing on clear, closing with X and a
 real double click separated by 100 ms across an inline layout change. An
 unwatched archive has neither a duplicate Play from beginning control nor an

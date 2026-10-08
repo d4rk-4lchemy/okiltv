@@ -397,7 +397,7 @@ def main():
         assert control(initial, "ui.epgSearch.filter.all") is None
         assert control(initial, "ui.epgSearch.primary") is None
         assert abs(close_bounds["x"] - query_bounds["x"] - query_bounds["width"] - 12) <= 1
-        assert abs(close_bounds["y"] + close_bounds["height"] - query_bounds["y"] + 12) <= 1
+        assert abs(close_bounds["y"] - query_bounds["y"]) <= 1, (close_bounds, query_bounds)
         runner.request_capture_wait("01-empty")
         state = query("planet ziem")
         assert control(state, "ui.epgSearch.query")["bounds"] == query_bounds

@@ -49,8 +49,13 @@ unscheduled-past DVR and Ctrl+Enter/Return restart/default routing from editors/
 escaped provider text, overflowing title marquee, text-field clipping/scrollbar
 reservation, automatic scrolling of the initial selection with the pointer outside
 results, and reset when input is blocked. Focused AppController tests cover unstarted, resumable,
-completed and sub-minute archive progress plus current-airing restart. `UI-14-epg-search` exercises the real Main/Live routing with isolated local
-fixtures with station logos; screenshot pixel assertions verify that two different
+completed and sub-minute archive progress plus current-airing restart. The initial
+EPG preparation case waits for the harness's startup EPG refresh to finish before
+simulating an empty active refresh, retaining the assertions for preparation,
+published results, cached browsing during refresh and a completed empty generation.
+`UI-14-epg-search` exercises the real Main/Live routing with isolated local
+fixtures with station logos and verifies the close button's 12 px horizontal gap
+and top alignment with the query field; screenshot pixel assertions verify that two different
 channel logos actually render beside the result text. Existing channel/grid search
 scenarios use Tab. Run these with
 `ctest --preset qt-linux-debug -L epg-search --output-on-failure`, then the UI
@@ -448,6 +453,9 @@ DPAPI, native-dialog and installer checks.
 ## CI and releases
 
 [pr-tests.yml](../.github/workflows/pr-tests.yml) owns grouped test execution.
+The QML group builds `OKILTVQtEpgSearchQmlTests` before running its label; this
+runner embeds the EPG action icons, while other QML suites use the SDK's
+`qmltestrunner` directly.
 The playback group builds `OKILTVQtVodRangeTests` as well as the policy, catch-up
 and native mpv targets. MinGW compiles `tst_app_models.cpp` with `-Wa,-mbig-obj`
 to accommodate the Debug object's section count without removing debug symbols.

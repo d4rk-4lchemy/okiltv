@@ -28,7 +28,7 @@ jobs:
           - group: playback
             targets: OKILTVQtPlaybackTests OKILTVQtCatchupTests OKILTVQtVodMpvTests OKILTVQtVodRangeTests
           - group: qml
-            targets: ''
+            targets: OKILTVQtEpgSearchQmlTests
           - group: ui
             targets: OKILTVQt
     defaults:

@@ -15303,6 +15303,8 @@ void AppModelTests::epgSearchPreparingTracksEmptyActiveRefresh()
     QVERIFY(harness.initialize(std::nullopt));
     harness.appController->initialize();
     QTRY_VERIFY_WITH_TIMEOUT(!harness.appController->isBusy(), 5000);
+    // The startup EPG completion must not clear the simulated refresh below.
+    QTRY_VERIFY_WITH_TIMEOUT(!harness.appController->epgRefreshInProgress(), 5000);
     const auto channels = harness.channelListModel->allChannels();
     QVERIFY(!channels.isEmpty());
     harness.epgService->clear();
