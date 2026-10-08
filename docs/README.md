@@ -10,7 +10,7 @@ its boundaries and where to make changes; they are not a release history.
 | Task | Read |
 |---|---|
 | Understand startup, ownership or dependencies | [Architecture](architecture.md) |
-| Change source import, channels, groups or programme data | [Sources and EPG](sources-and-epg.md) |
+| Change source import, channels, groups, programme data or local EPG search | [Sources and EPG](sources-and-epg.md) |
 | Change Live, catch-up, timeshift, recording or multiview | [Playback](playback.md) |
 | Change movie/series libraries, episodes, VOD sessions, progress or uploaded subtitles | [VOD](vod.md), [uploaded subtitles](vod.md#uploaded-subtitles) |
 | Change QML, focus, shortcuts, overlays or appearance | [UI and interaction](ui-and-interaction.md) |
@@ -59,3 +59,6 @@ Relevant supporting references include the [source feature contracts](../.projec
 
 Existing images in [screenshots](screenshots) are visual references, not an
 authoritative description of current behavior.
+
+The [EPG search validation record](epg-search-validation.md) records actual local
+checks and outstanding Windows/manual acceptance for the programme-search feature.

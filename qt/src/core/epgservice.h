@@ -42,6 +42,8 @@ public:
     QHash<QString, QList<EpgEntry>> programsForChannels(const QStringList &channels,
         const QDateTime &from, const QDateTime &to, int limit = -1, bool summaries = false) const;
     static Snapshot buildSnapshot(const QList<EpgEntry> &entries);
+    static EpgSearchResult search(std::shared_ptr<const Snapshot> snapshot,
+        const EpgSearchRequest &request, const EpgStore::Cancelled &cancelled = {});
 
     void loadFromBytes(const QByteArray &payload);
     void loadFromEntries(const QList<EpgEntry> &entries);

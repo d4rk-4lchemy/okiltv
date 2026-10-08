@@ -43,6 +43,7 @@ private:
         QTcpServer server;
         QByteArray payload;
         QHash<QByteArray, QByteArray> resources;
+        QSet<QByteArray> deniedPaths;
         QByteArray receivedHeaders;
         int requests { 0 };
         bool stall { false };
@@ -99,6 +100,10 @@ private:
                         if (stall)
                             return;
                         const auto requestPath = request.split(' ').value(1).split('?').first();
+                        if (deniedPaths.contains(requestPath)) {
+                            socket->write("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                            socket->disconnectFromHost(); return;
+                        }
                         auto responsePayload = resources.value(requestPath, payload);
                         if (!timeOffsets.isEmpty()) {
                             const QUrlQuery query(QUrl::fromEncoded(request.split(' ').value(1)));
@@ -860,7 +865,7 @@ private slots:
     void finiteHlsArchive_data()
     {
         QTest::addColumn<QString>("mode");
-        for (const auto &mode : {"ts", "fmp4", "byterange", "aes", "master-audio", "pause", "cancel-restart"})
+        for (const auto &mode : {"ts", "fmp4", "byterange", "aes", "master-audio", "pause", "cancel-restart", "late-error", "remux-failure"})
             QTest::newRow(mode) << QString::fromLatin1(mode);
     }
 
@@ -918,6 +923,12 @@ private slots:
                 "#EXT-X-STREAM-INF:BANDWIDTH=1000\nunused.m3u8\n"
                 "#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=\"audio\"\nindex.m3u8\n"));
         }
+        if (mode == QStringLiteral("late-error")) {
+            const auto segments = QDir(directory).entryList({QStringLiteral("*.ts")}, QDir::Files, QDir::Name);
+            QVERIFY(segments.size() > 1);
+            fixture.deniedPaths.insert('/' + segments.last().toUtf8());
+        }
+        if (mode == QStringLiteral("remux-failure")) fixture.program.stop = fixture.program.start.addSecs(40);
         fixture.channel.catchupSourceTemplate = QStringLiteral("http://127.0.0.1:%1/%2").arg(fixture.server.serverPort())
             .arg(mode == QStringLiteral("master-audio") ? QStringLiteral("master.m3u8") : QStringLiteral("index.m3u8"));
         fixture.slow = mode == QStringLiteral("pause") || mode == QStringLiteral("cancel-restart");
@@ -947,6 +958,20 @@ private slots:
             }
         }
         QTRY_VERIFY_WITH_TIMEOUT(!controller.hasPending(), 15000);
+        if (mode == QStringLiteral("late-error") || mode == QStringLiteral("remux-failure")) {
+            QCOMPARE(state(controller), QStringLiteral("failed"));
+            const auto graphs = QDir(fixture.directory.path()).entryList({QStringLiteral("*.hls")}, QDir::Dirs | QDir::Hidden);
+            QCOMPARE(graphs.size(), 1);
+            const auto graph = fixture.directory.filePath(graphs.first());
+            QVERIFY(!QDir(graph).entryList(QDir::Files).isEmpty());
+            const auto manifest = graph.chopped(4);
+            QVERIFY(QFileInfo(manifest).size() > 0);
+            const auto error = controller.data(controller.index(0), CatchupDownloadController::ErrorRole).toString();
+            QVERIFY(error.contains(manifest));
+            controller.shutdown();
+            QVERIFY(QFileInfo::exists(manifest)); QVERIFY(QDir(graph).exists());
+            return;
+        }
         QVERIFY2(state(controller) == QStringLiteral("completed"),
             qPrintable(controller.data(controller.index(0), CatchupDownloadController::ErrorRole).toString()));
         QVERIFY(QFileInfo(fixture.output().toLocalFile()).size() > 0);

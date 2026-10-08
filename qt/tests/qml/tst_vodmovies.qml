@@ -42,6 +42,7 @@ TestCase {
         property bool probePlayBlocked: false
         property bool hasMore: false
         property string errorText: ""
+        property bool catalogLoaded: true
         property var movie: ({})
         property int selectedIndex: -1
         property int playCount: 0
@@ -321,6 +322,16 @@ TestCase {
         backend.busy = false; backend.errorText = "VOD storage unavailable after 15 seconds. Try again."
         tryCompare(spinner, "visible", false); verify(!spinner.running)
     }
+    function test_emptyLibraryDistinguishesRefreshAndReadErrors() {
+        backend.clear(); backend.catalogLoaded = true
+        backend.errorText = "Movies refresh failed: Source unavailable."
+        const message = findChild(page, "ui.vod.emptyLibraryMessage")
+        tryCompare(message, "text", "No movies in this library.")
+        backend.catalogLoaded = false
+        tryCompare(message, "text", backend.errorText)
+        backend.errorText = "VOD database is busy. Try again."
+        tryCompare(message, "text", backend.errorText)
+    }
     function test_seriesDetailsBoundedAndStatusPreservesScroll() {
         backend.series = true
         for (let i = 0; i < 80; ++i) stableEpisodes.append({modelData: {
@@ -457,6 +468,7 @@ TestCase {
         backend.movie = ({}); backend.searchText = ""; backend.busy = false
         backend.probePlayBlocked = false; backend.startingPlayback = false
         backend.errorText = ""; backend.sourceId = "one"; backend.categoryId = ""; backend.selectedIndex = -1; backend.playCount = 0
+        backend.catalogLoaded = true
         page.initialSelectionDone = false; page.initialSelectionPending = false
         page.browseArea = "grid"; page.gridIndex = 0; page.shelfIndex = 0; page.shelfKey = ""; page.shelfOffset = 0
         closed.clear(); page.prepareForOpen(); wait(50)
@@ -645,13 +657,23 @@ TestCase {
         const beginning = findChild(page, "ui.vod.playFromBeginning")
         compare(beginning.caption, "Play from beginning")
         verify(beginning.iconSource.toString().endsWith("start-from-beginning.svg"))
-        for (const entry of [[59, "Play", true], [60, "Resume · 00:01", false], [1440, "Resume · 00:24", false], [5040, "Resume · 01:24", false]]) {
+        for (const entry of [[59, "Play", false], [60, "Resume · 00:01", false], [1440, "Resume · 00:24", false], [5040, "Resume · 01:24", false]]) {
             backend.movie = Object.assign({}, backend.movie, {resumeSeconds: entry[0]})
             compare(play.text, entry[1])
             compare(beginning.visible, entry[0] >= 60)
             mouseClick(play)
             compare(backend.playedFromBeginning, entry[2])
         }
+    }
+    function test_playBeforeProgressLoadsUsesResume() {
+        backend.selectMovie(0)
+        backend.movie = Object.assign({}, backend.movie, {resumeSeconds: 0, progressLoaded: false})
+        const play = findChild(page, "ui.vod.play")
+        verify(play.enabled)
+        const before = backend.playCount
+        mouseClick(play)
+        compare(backend.playCount, before + 1)
+        compare(backend.playedFromBeginning, false)
     }
     function shelfMovies(count) {
         const rows = []

@@ -1,4 +1,5 @@
 #include "epgservice.h"
+#include "epgsearch_p.h"
 
 #include <QBuffer>
 #include "debuglogger.h"
@@ -192,6 +193,50 @@ EpgService::Snapshot EpgService::buildSnapshot(const QList<EpgEntry> &entries)
     }
 
     return snapshot;
+}
+
+// Own the pinned immutable generation for the entire backend operation.
+// NOLINTNEXTLINE(performance-unnecessary-value-param)
+EpgSearchResult EpgService::search(std::shared_ptr<const Snapshot> snapshot,
+    const EpgSearchRequest &request, const EpgStore::Cancelled &cancelled)
+{
+    if (snapshot && snapshot->store) return snapshot->store->search(request, cancelled);
+    EpgSearchResult result;
+    result.request = request;
+    if (cancelled && cancelled()) { result.status = EpgSearchStatus::Cancelled; return result; }
+    if (!snapshot || snapshot->allEntries.isEmpty()) { result.status = EpgSearchStatus::NoEpg; return result; }
+    const auto queryError = epgSearchQueryError(request.query);
+    if (!queryError.isEmpty()) {
+        if (queryError != QStringLiteral("query-too-short")) {
+            result.status = EpgSearchStatus::Error;
+            result.errorCode = queryError;
+            result.errorText = EpgSearchDetail::queryErrorText(queryError);
+        }
+        return result;
+    }
+    if (!request.nowUtc.isValid()) {
+        result.status = EpgSearchStatus::Error; result.errorCode = QStringLiteral("invalid-clock");
+        result.errorText = QCoreApplication::translate("EpgSearch", "The search reference time is invalid. Search again."); return result;
+    }
+    const auto channels = EpgSearchDetail::channels(request);
+    QHash<QString, QList<int>> map;
+    for (int i = 0; i < channels.size(); ++i) map[normalizeKey(channels[i].tvgId)].append(i);
+    EpgSearchDetail::Page page(request);
+    const auto tokens = epgSearchTokens(request.query);
+    QSet<QString> seen;
+    for (const auto &entry : snapshot->allEntries) {
+        if (cancelled && cancelled()) { result.status = EpgSearchStatus::Cancelled; return result; }
+        const auto mapped = map.constFind(normalizeKey(entry.channelId));
+        if (mapped == map.cend() || !EpgSearchDetail::accepts(EpgSearchDetail::section(entry, request.nowUtc), request.timeFilter)) continue;
+        auto words = epgSearchTokens(entry.title);
+        words.append(epgSearchTokens(entry.subTitle));
+        if (!EpgSearchDetail::matches(words, tokens)) continue;
+        const auto key = EpgSearchDetail::identity(entry);
+        if (seen.contains(key)) continue;
+        seen.insert(key);
+        for (const auto index : *mapped) page.append(entry, channels[index], index, key);
+    }
+    return page.result();
 }
 
 void EpgService::loadFromBytes(const QByteArray &payload)
@@ -449,7 +494,9 @@ bool EpgService::tryParseDate(const QString &value, QDateTime *result)
 
     const auto parts = trimmed.split(u' ', Qt::SkipEmptyParts);
     const auto basePart = parts.isEmpty() ? trimmed.left(14) : parts.front();
-    auto dateTime = QDateTime::fromString(basePart, QStringLiteral("yyyyMMddHHmmss"));
+    const auto date = QDate::fromString(basePart.left(8), QStringLiteral("yyyyMMdd"));
+    const auto time = QTime::fromString(basePart.mid(8), QStringLiteral("HHmmss"));
+    auto dateTime = QDateTime(date, time, QTimeZone::UTC);
     if (!dateTime.isValid()) {
         return false;
     }

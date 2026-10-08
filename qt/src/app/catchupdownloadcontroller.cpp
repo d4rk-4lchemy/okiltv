@@ -656,12 +656,11 @@ bool CatchupDownloadController::preservePartial(Job &job)
     };
     job.hls |= !job.sourcePath.isEmpty() && QDir(job.sourcePath + QStringLiteral(".hls")).exists();
     if (job.hls && !job.sourcePath.isEmpty()) {
-        QDir graph(job.sourcePath + QStringLiteral(".hls"));
-        if (graph.exists() && !graph.removeRecursively())
-            return false;
-        if (QFileInfo::exists(job.sourcePath) && !QFile::remove(job.sourcePath))
-            return false;
-        job.sourcePath.clear();
+        // Generated manifests refer to the original graph paths. Keep the
+        // entire graph in place on failure so it remains usable for recovery.
+        job.path = job.sourcePath;
+        m_terminalReason += QStringLiteral(" HLS manifest and downloaded resources retained at: %1").arg(job.sourcePath);
+        job.sourcePath.clear(); // Transfer ownership to the retained files.
     }
     // Keep the MKV as the primary displayed path when both files exist.
     const bool sourcePreserved = preserve(job.sourcePath, QStringLiteral("download"));

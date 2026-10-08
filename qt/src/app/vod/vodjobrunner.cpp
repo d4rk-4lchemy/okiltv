@@ -57,6 +57,7 @@ void VodJobRunner::pump()
     // cannot follow QObject's child ownership across the asynchronous callback.
     while (!m_queue.empty() && m_active.size() < m_limit) { // NOLINT(clang-analyzer-cplusplus.NewDeleteLeaks)
         const auto next = std::find_if(m_queue.begin(), m_queue.end(), [this](const Job &candidate) {
+            if (!candidate.readyAt.hasExpired() && !candidate.request.interruption()) return false;
             int count = 0;
             for (const auto &job : m_active) if (job.profile == candidate.profile) ++count;
             return count < m_perSource;
@@ -73,7 +74,18 @@ void VodJobRunner::pump()
             watcher->deleteLater();
             if (!m_stopped) {
                 if (const auto interrupted = completed.request.interruption()) result = *interrupted;
-                completed.completion(std::move(result));
+                const auto *error = std::get_if<Error>(&result);
+                if (error && error->code == ErrorCode::StorageBusy) {
+                    if (!completed.busyDeadline) completed.busyDeadline = QDeadlineTimer(15000);
+                    if (!completed.busyDeadline->hasExpired()) {
+                        // Return the worker slot while SQLite is occupied. Keep
+                        // the operation identity, cancellation and original job
+                        // deadline; retries must not revive obsolete work.
+                        completed.readyAt = QDeadlineTimer(100);
+                        m_queue.push_back(std::move(completed));
+                        QTimer::singleShot(100, Qt::PreciseTimer, this, &VodJobRunner::pump);
+                    } else completed.completion(std::move(result));
+                } else completed.completion(std::move(result));
             }
             pump();
         });

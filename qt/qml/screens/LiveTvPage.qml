@@ -212,7 +212,8 @@ Item {
     property bool searchFieldActive: channelSearchHeader.field.activeFocus || vodListPanel.searchActive
         || groupSearchHeader.field.activeFocus
         || sourcePickerSearchField.activeFocus
-    property bool showHoverUi: root.shell.overlaysVisible || root.shell.activeOverlay !== "none" || root.leftPickerOpen
+    readonly property bool epgSearchExclusive: root.mainWindow && root.mainWindow.epgSearchExclusive
+    property bool showHoverUi: !root.epgSearchExclusive && (root.shell.overlaysVisible || root.shell.activeOverlay !== "none" || root.leftPickerOpen)
     readonly property bool topBarVisible: !root.shell.fullscreen && root.showHoverUi
     readonly property real topBarReservedHeight: root.mainWindow ? root.mainWindow.topBarReservedHeight : 0
     readonly property real topOverlayMargin: root.topBarReservedHeight + Theme.spacingL
@@ -229,7 +230,7 @@ Item {
     property bool topBarExternalHideLock: false
     onTopBarExternalHideLockChanged: updateAutoHide()
     onLeftPickerOpenChanged: clearLeftPaneHideIfSettled()
-    property bool showShellChrome: root.shell.overlaysVisible
+    property bool showShellChrome: !root.epgSearchExclusive && root.shell.overlaysVisible
         && root.shell.activeOverlay === "none"
         && !root.leftPickerOpen
         && !(root.mainWindow && (root.mainWindow.vodMounted || root.mainWindow.pendingLiveNavigation))
@@ -1373,6 +1374,7 @@ Item {
     }
 
     function revealUi(source) {
+        if (root.epgSearchExclusive) return
         if (root.pendingEmptyPipActive || root.multiviewSelectionMode) {
             return
         }
@@ -2617,6 +2619,30 @@ Item {
         }
     }
 
+    // Search owns input without changing the channel filter, group, playback,
+    // timeshift or multiview streams. Cancel candidates before moving focus.
+    function prepareForEpgSearch() {
+        root.cancelMultiviewSelection()
+        root.clearNumericEntry()
+        root.clearMouseSelectionPin()
+        root.exitKeyboardNavigation(true)
+        root.hideProgramHoverBubble()
+        root.hoverPreviewActive = false
+        root.previewPinned = false
+        root.keyboardVolumeHudVisible = false
+        root.channelChangeBubbleVisible = false
+        root.timeshiftTimelineHoverVisible = false
+        volumePopoverHideTimer.stop()
+        overlayTimer.stop()
+        overlayInactivityTimer.stop()
+        root.overlayInteractionSource = "none"
+    }
+    function finishEpgSearch() {
+        overlayTimer.stop()
+        root.shell.overlaysVisible = false
+        root.overlayInteractionSource = "none"
+        interactionFocusTarget.forceActiveFocus()
+    }
     function closeTransientPlayerChrome() {
         if (root.vodActive) {
             vodListPanel.focus = false
@@ -2952,9 +2978,9 @@ Item {
         }
 
         if (ctrlPressed) {
-            if (event.key === Qt.Key_F) {
-                focusSearchField()
-                return true
+            if (event.key === Qt.Key_F && event.modifiers === Qt.ControlModifier && root.mainWindow) {
+                if (root.vodActive) { root.focusSearchField(); return true }
+                return root.mainWindow.openEpgSearch()
             }
             if (event.key === Qt.Key_G) {
                 noteKeyboardNavigationKey()
@@ -3152,6 +3178,10 @@ Item {
     }
 
     function handleWindowKey(event) {
+        if (root.epgSearchExclusive) return true
+        if (event.key === Qt.Key_F && event.modifiers === Qt.ControlModifier
+            && root.mainWindow && !root.vodActive && root.shell.activeOverlay === "none")
+            return root.mainWindow.openEpgSearch()
         if (event.key === Qt.Key_V && event.modifiers === Qt.NoModifier && root.mainWindow)
             return root.mainWindow.toggleVod()
         if (root.shell.activeOverlay === "vod") return false
@@ -3816,7 +3846,7 @@ Item {
 
                 readonly property var tileRect: root.multiviewTileRect(index)
                 readonly property bool gridMode: root.multiviewGridActive
-                readonly property bool tileMetaVisible: root.multiviewActive
+                readonly property bool tileMetaVisible: !root.epgSearchExclusive && root.multiviewActive
                     && (root.shell.overlaysVisible || root.shell.activeOverlay !== "none")
                 readonly property bool tileSelectionCursorActive: root.multiviewSelectionMode
                 readonly property bool tileFocusedBorderVisible: gridMode
@@ -4039,7 +4069,7 @@ Item {
         width: Math.min(root.width - Theme.spacingL * 2, root.shell.layoutBand === "compact" ? 420 : 560)
         height: Math.ceil(debugBubbleGrid.implicitHeight + (debugBubble.contentVerticalMargin * 2))
         clip: true
-        visible: root.debugBubbleVisible
+        visible: !root.epgSearchExclusive && root.debugBubbleVisible
         opacity: visible ? 1 : 0
         z: 1
         property int rowCount: 31
@@ -4660,13 +4690,13 @@ Item {
         width: 54
         height: 54
         running: root.showPlaybackSpinner
-        visible: running
+        visible: running && !root.epgSearchExclusive
         z: 3
     }
 
     Item {
         anchors.centerIn: parent
-        visible: root.showChannelLoadError
+        visible: !root.epgSearchExclusive && root.showChannelLoadError
         z: 3
         width: root.shell.layoutBand === "compact" ? 200 : 260
         height: iconBlock.implicitHeight
@@ -4700,7 +4730,7 @@ Item {
 
     Item {
         anchors.centerIn: parent
-        visible: !root.vodActive && !root.hasPlaybackChannel
+        visible: !root.epgSearchExclusive && !root.vodActive && !root.hasPlaybackChannel
             && !root.multiviewActive
             && !root.multiviewRetainedSelectionVisible
         z: 3
@@ -4790,7 +4820,7 @@ Item {
         hoverEnabled: true
         acceptedButtons: Qt.AllButtons
         propagateComposedEvents: root.multiviewActive
-        cursorShape: (!root.showHoverUi && !root.pendingEmptyPipActive) ? Qt.BlankCursor : Qt.ArrowCursor
+        cursorShape: (!root.epgSearchExclusive && !root.showHoverUi && !root.pendingEmptyPipActive) ? Qt.BlankCursor : Qt.ArrowCursor
         onClicked: function(mouse) {
             // The wake-up surface sits above the tile MouseAreas.
             if (root.multiviewActive && mouse.button === Qt.LeftButton)
@@ -4802,8 +4832,8 @@ Item {
 
     Item {
         id: leftChrome
-        visible: !root.vodActive || root.groupPickerOpen || root.audioPickerOpen || root.subtitlePickerOpen
-            || (root.leftPaneClosingToHidden && root.leftPaneClosingMode === "group")
+        visible: !root.epgSearchExclusive && (!root.vodActive || root.groupPickerOpen || root.audioPickerOpen || root.subtitlePickerOpen
+            || (root.leftPaneClosingToHidden && root.leftPaneClosingMode === "group"))
         objectName: "ui.region.left_pane"
         readonly property bool leftPaneVisible: root.showShellChrome || root.leftPickerOpen || root.pendingEmptyPipActive
         width: root.leftPanelWidth
@@ -5937,7 +5967,7 @@ Item {
     IconActionButton {
         id: guideButtonChrome
         objectName: "ui.live.guideButton"
-        visible: !root.vodActive
+        visible: !root.epgSearchExclusive && !root.vodActive
         width: (root.shell.layoutBand === "compact" ? 52 : 56) * 4
         height: 48
         anchors.top: parent.top
@@ -5981,7 +6011,7 @@ Item {
 
     Item {
         id: rightChrome
-        visible: !root.vodActive
+        visible: !root.epgSearchExclusive && !root.vodActive
         objectName: "ui.region.right_pane"
         width: root.rightPanelWidth
         anchors.right: parent.right
@@ -6127,7 +6157,7 @@ Item {
     EpgHoverBubble {
         timePattern: root.dateTime.timePattern
         id: epgHoverBubble
-        visible: !root.vodActive && root.hoverBubbleVisible
+        visible: !root.epgSearchExclusive && !root.vodActive && root.hoverBubbleVisible
             && root.showShellChrome
             && root.shell.activeOverlay === "none"
             && root.hoverAnchorItem !== null
@@ -6180,7 +6210,7 @@ Item {
 
     Item {
         id: hoverBubbleBridge
-        visible: !root.vodActive && root.hoverBubbleVisible
+        visible: !root.epgSearchExclusive && !root.vodActive && root.hoverBubbleVisible
             && root.showShellChrome
             && root.shell.activeOverlay === "none"
             && root.hoverAnchorItem !== null
@@ -6207,6 +6237,7 @@ Item {
 
     Item {
         id: bottomChrome
+        visible: !root.epgSearchExclusive
         objectName: "ui.region.bottom_controls"
         property bool bottomChromeInputEnabled: root.showShellChrome && !root.chromeAnimationsRunning
         width: root.bottomPanelWidth
@@ -7115,7 +7146,7 @@ Item {
         anchors.bottomMargin: root.showShellChrome
             ? bottomChrome.height + Theme.spacingM + 12
             : Theme.spacingL
-        visible: !root.vodActive && root.channelChangeBubbleVisible && root.hasPlaybackChannel && !root.leftPickerOpen && !root.multiviewActive
+        visible: !root.epgSearchExclusive && !root.vodActive && root.channelChangeBubbleVisible && root.hasPlaybackChannel && !root.leftPickerOpen && !root.multiviewActive
         opacity: visible ? 1 : 0
         z: 7
 
@@ -7360,7 +7391,7 @@ Item {
         anchors.bottom: parent.bottom
         anchors.rightMargin: Theme.spacingS
         anchors.bottomMargin: Theme.spacingS
-        visible: root.multiviewRetainedSelectionVisible
+        visible: !root.epgSearchExclusive && root.multiviewRetainedSelectionVisible
         opacity: visible ? 1 : 0
         z: 0
         transformOrigin: Item.Center
@@ -7401,7 +7432,7 @@ Item {
         anchors.top: parent.top
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.topMargin: root.centerOverlayMargin
-        visible: root.multiviewSelectionMode
+        visible: !root.epgSearchExclusive && root.multiviewSelectionMode
         opacity: visible ? 1 : 0
         z: 9
 
@@ -7436,7 +7467,7 @@ Item {
         anchors.top: parent.top
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.topMargin: root.centerOverlayMargin
-        visible: root.numericHudVisible
+        visible: !root.epgSearchExclusive && root.numericHudVisible
         opacity: visible ? 1 : 0
         z: 9
 
@@ -7475,7 +7506,7 @@ Item {
         anchors.top: parent.top
         anchors.leftMargin: Theme.spacingS
         anchors.topMargin: Theme.spacingS
-        visible: root.mainWindow
+        visible: !root.epgSearchExclusive && root.mainWindow
             && root.mainWindow.alwaysOnTop
             && root.settings.showOnTopModeIndicator
         z: 0
@@ -7496,7 +7527,7 @@ Item {
         anchors.top: parent.top
         anchors.leftMargin: Theme.spacingL
         anchors.topMargin: root.topOverlayMargin
-        visible: root.keyboardVolumeHudVisible && !root.leftPickerOpen
+        visible: !root.epgSearchExclusive && root.keyboardVolumeHudVisible && !root.leftPickerOpen
         opacity: visible ? 1 : 0
         z: 8
 
@@ -7530,7 +7561,7 @@ Item {
         anchors.top: parent.top
         anchors.leftMargin: Theme.spacingL + 8
         anchors.topMargin: root.topOverlayMargin + 8
-        visible: root.player.isRecording && !root.leftPickerOpen
+        visible: !root.epgSearchExclusive && root.player.isRecording && !root.leftPickerOpen
         z: 9
 
         SequentialAnimation on opacity {
@@ -7549,7 +7580,9 @@ Item {
         anchors.leftMargin: Theme.spacingL + 1
         anchors.topMargin: root.topOverlayMargin + 1
         running: root.player.isRemuxing && !root.leftPickerOpen
-        visible: running
+        // Recording work continues; its indicator belongs to Live chrome.
+        enabled: !root.epgSearchExclusive
+        visible: running && !root.epgSearchExclusive
         z: 9
     }
 }

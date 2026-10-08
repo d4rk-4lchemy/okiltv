@@ -2,6 +2,7 @@
 
 #include <QString>
 #include <QStringView>
+#include <optional>
 
 #if defined(Q_OS_WIN)
 #include <memory>
@@ -13,6 +14,9 @@ namespace OKILTV::Core {
 QString resolveProcessBinary(QStringView baseName);
 bool processBinaryAvailable(QStringView baseName);
 bool ffmpegToolsAvailable();
+// Local media validation; execute on a worker, never on the GUI thread.
+std::optional<double> probeMediaDurationSeconds(const QString &path, QString *errorText = nullptr);
+bool recordingRemuxValid(const QString &sourcePath, const QString &outputPath);
 
 #if defined(Q_OS_WIN)
 // One job per recording. Configure before start(); never reuse it for another session.

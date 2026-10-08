@@ -15,7 +15,9 @@ public:
     explicit SourceStore(QString summariesFilePath = {}, const QString &sourceDetailsDirectory = {});
 
     QList<SourceSummary> loadSummaries() const;
-    bool saveSummaries(const QList<SourceSummary> &summaries, QString *errorText = nullptr) const;
+    bool saveSummaries(const QList<SourceSummary> &summaries, QString *errorText = nullptr,
+                       const std::optional<QList<QUuid>> &pendingRemovals = std::nullopt) const;
+    QList<QUuid> pendingRemovals() const;
 
     std::optional<ServerProfile> loadDetail(const QUuid &profileId) const;
     void migrateLegacyDetails() const;

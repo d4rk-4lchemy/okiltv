@@ -19,6 +19,7 @@ QString Error::message() const
     case ErrorCode::ResponseTooLarge: return QStringLiteral("Source response exceeds the limit.");
     case ErrorCode::ContentUnavailable: return QStringLiteral("Content unavailable.");
     case ErrorCode::StorageUnavailable: return QStringLiteral("VOD storage unavailable.");
+    case ErrorCode::StorageBusy: return QStringLiteral("VOD database is busy. Try again.");
     case ErrorCode::SecretUnavailable: return QStringLiteral("Source secrets unavailable.");
     case ErrorCode::PlaybackConflict: return QStringLiteral("Playback resources are in use.");
     case ErrorCode::PlaybackFailed: return QStringLiteral("VOD playback failed.");

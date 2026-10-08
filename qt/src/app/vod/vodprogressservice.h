@@ -32,6 +32,8 @@ private:
     QTimer m_timer;
     std::optional<SessionSnapshot> m_snapshot;
     QUuid m_session;
+    // Accessed only by jobs on the serial storage lane.
+    std::shared_ptr<QUuid> m_initializedSession = std::make_shared<QUuid>();
     quint64 m_sequence = 0;
     bool m_dirty = false;
     bool m_stopped = false;

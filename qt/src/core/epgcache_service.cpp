@@ -87,6 +87,9 @@ QString sourceDescriptor(const ServerProfile &profile)
 namespace {
 QMutex publicationMutex;
 QHash<QString, std::weak_ptr<std::atomic_bool>> importTokens;
+QHash<QString, std::shared_ptr<std::atomic_bool>> searchUpgradeTokens;
+QSet<QString> searchUpgradePaths;
+std::atomic_bool searchPreparationStopping {false};
 QString generationPath(const QUuid &id)
 {
     return QDir(AppDataPaths::epgCacheDirectory()).filePath(
@@ -103,6 +106,47 @@ QString publishedPath(const QUuid &id)
         || !name.endsWith(QStringLiteral(".sqlite")) || QFileInfo(name).fileName() != name) return {};
     return QDir(AppDataPaths::epgCacheDirectory()).filePath(name);
 }
+
+// Called with publicationMutex held. Guide keeps its pinned legacy store while
+// the serialized import pool builds an independent, fully indexed generation.
+void scheduleSearchUpgrade(const std::shared_ptr<EpgStore> &store, const EpgCacheService::Cancellation &importToken)
+{
+    if (searchPreparationStopping.load() || (importToken && importToken->load()) || store->searchReady() || !EpgStore::supportsFts5()) return;
+    const auto profileId = store->metadata().profileId;
+    const auto key = EpgCacheService::manifestFile(profileId);
+    if (searchUpgradeTokens.contains(key)) return;
+    const auto token = std::make_shared<std::atomic_bool>(false);
+    const auto nextPath = generationPath(profileId);
+    searchUpgradeTokens.insert(key, token);
+    searchUpgradePaths.insert(nextPath);
+    store->setSearchPreparationError({});
+    EpgService::importPool()->start([store, token, importToken, key, profileId, nextPath] {
+        try {
+            const auto cancelled = [token, importToken] { return token->load() || (importToken && importToken->load()); };
+            auto upgraded = store->withSearchIndex(nextPath, cancelled);
+            if (!upgraded->searchReady()) throw std::runtime_error("EPG search index unavailable.");
+            QMutexLocker lock(&publicationMutex);
+            if (cancelled() || publishedPath(profileId) != store->path()) throw std::runtime_error("EPG search upgrade replaced.");
+            QSaveFile manifest(EpgCacheService::manifestFile(profileId));
+            const auto json = QJsonDocument(QJsonObject {{QStringLiteral("file"), QFileInfo(upgraded->path()).fileName()}}).toJson(QJsonDocument::Compact);
+            if (!manifest.open(QIODevice::WriteOnly) || manifest.write(json) != json.size() || !manifest.commit())
+                throw std::runtime_error("Cannot publish EPG search upgrade.");
+            upgraded->keep();
+            // Pinned legacy snapshots now delegate search to identical data, so
+            // controllers waiting in Preparing need no mutation of their snapshot.
+            store->useSearchIndex(upgraded);
+            EpgStore::retireFile(store->path());
+        } catch (const std::exception &) {
+            // Ordinary Guide reads and the previous manifest stay available.
+            QMutexLocker lock(&publicationMutex);
+            if (searchUpgradeTokens.value(key) == token)
+                store->setSearchPreparationError(QStringLiteral("search-index-preparation-failed"));
+        }
+        QMutexLocker lock(&publicationMutex);
+        searchUpgradePaths.remove(nextPath);
+        if (searchUpgradeTokens.value(key) == token) searchUpgradeTokens.remove(key);
+    });
+}
 }
 
 QString EpgCacheService::manifestFile(const QUuid &profileId)
@@ -113,8 +157,9 @@ EpgCacheService::Cancellation EpgCacheService::beginImport(const QUuid &profileI
 {
     QMutexLocker lock(&publicationMutex);
     const auto key = manifestFile(profileId);
+    if (const auto upgrade = searchUpgradeTokens.take(key)) upgrade->store(true);
     if (const auto previous = importTokens.value(key).lock()) previous->store(true);
-    auto token = std::make_shared<std::atomic_bool>(false);
+    auto token = std::make_shared<std::atomic_bool>(searchPreparationStopping.load());
     importTokens.insert(key, token);
     return token;
 }
@@ -127,6 +172,26 @@ void EpgCacheService::invalidateSource(const QUuid &profileId)
 {
     QMutexLocker lock(&publicationMutex);
     if (const auto token = importTokens.take(manifestFile(profileId)).lock()) token->store(true);
+    if (const auto token = searchUpgradeTokens.take(manifestFile(profileId))) token->store(true);
+}
+void EpgCacheService::prepareSearch(const std::shared_ptr<EpgStore> &store)
+{
+    if (!store) return;
+    QMutexLocker lock(&publicationMutex);
+    if (publishedPath(store->metadata().profileId) == store->path()) scheduleSearchUpgrade(store, {});
+}
+void EpgCacheService::shutdownSearchPreparations()
+{
+    {
+        QMutexLocker lock(&publicationMutex);
+        searchPreparationStopping.store(true);
+        for (const auto &token : searchUpgradeTokens) token->store(true);
+        // Ordinary imports may occupy the serialized pool before an upgrade.
+        // Cancel them too, so joining cannot wait for a provider timeout.
+        for (const auto &weak : importTokens)
+            if (const auto token = weak.lock()) token->store(true);
+    }
+    EpgService::importPool()->waitForDone();
 }
 EpgCacheService::CacheData EpgCacheService::build(const QUuid &profileId, const QString &fingerprint,
     const EpgStore::Producer &producer, bool deduplicate, const Cancellation &token) const
@@ -136,7 +201,7 @@ EpgCacheService::CacheData EpgCacheService::build(const QUuid &profileId, const 
     data.fetchedAt = QDateTime::currentDateTimeUtc();
     data.snapshot.store = EpgStore::create(generationPath(profileId),
         {profileId, fingerprint, data.fetchedAt, 0}, producer, deduplicate,
-        [token] { return token && token->load(); });
+        [token] { return searchPreparationStopping.load() || (token && token->load()); });
     data.snapshot.totalEntries = static_cast<int>(data.snapshot.store->metadata().entries);
     return data;
 }
@@ -174,8 +239,9 @@ EpgCacheService::LoadResult EpgCacheService::load(const QUuid &profileId, const 
                 const auto pattern = profileId.toString(QUuid::WithoutBraces).toLower() + QStringLiteral("-*.sqlite");
                 for (const auto &name : directory.entryList({pattern}, QDir::Files)) {
                     const auto orphan = directory.filePath(name);
-                    if (orphan != path) EpgStore::retireFile(orphan);
+                    if (orphan != path && !searchUpgradePaths.contains(orphan)) EpgStore::retireFile(orphan);
                 }
+                scheduleSearchUpgrade(data.snapshot.store, token);
                 return {LoadStatus::Loaded, std::move(data)};
             }
         }
@@ -198,7 +264,7 @@ EpgCacheService::LoadResult EpgCacheService::load(const QUuid &profileId, const 
                     if (stream.status() != QDataStream::Ok) throw std::runtime_error("Invalid legacy EPG cache.");
                     sink(entry);
                 }
-            }, false, [token] { return token && token->load(); });
+            }, false, [token] { return searchPreparationStopping.load() || (token && token->load()); });
         data.snapshot.totalEntries = static_cast<int>(data.snapshot.store->metadata().entries);
         file.close();
         save(data, token);
@@ -215,10 +281,10 @@ void EpgCacheService::save(const CacheData &data, const Cancellation &token) con
         store = EpgStore::create(generationPath(data.profileId),
             {data.profileId, data.sourceFingerprint, data.fetchedAt, 0}, [&](const EpgStore::Sink &sink) {
                 for (const auto &entry : data.snapshot.allEntries) sink(entry);
-            }, false, [token] { return token && token->load(); });
+            }, false, [token] { return searchPreparationStopping.load() || (token && token->load()); });
     }
     QMutexLocker lock(&publicationMutex);
-    if (token && token->load()) throw std::runtime_error("EPG import cancelled.");
+    if (searchPreparationStopping.load() || (token && token->load())) throw std::runtime_error("EPG import cancelled.");
     const auto previous = publishedPath(data.profileId);
     QSaveFile manifest(manifestFile(data.profileId));
     const auto json = QJsonDocument(QJsonObject {{QStringLiteral("file"), QFileInfo(store->path()).fileName()}}).toJson(QJsonDocument::Compact);
@@ -233,6 +299,7 @@ void EpgCacheService::remove(const QUuid &profileId) const
 {
     QMutexLocker lock(&publicationMutex);
     if (const auto token = importTokens.take(manifestFile(profileId)).lock()) token->store(true);
+    if (const auto token = searchUpgradeTokens.take(manifestFile(profileId))) token->store(true);
     QFile::remove(manifestFile(profileId));
     QFile::remove(AppDataPaths::epgCacheFile(profileId));
     QDir directory(AppDataPaths::epgCacheDirectory());

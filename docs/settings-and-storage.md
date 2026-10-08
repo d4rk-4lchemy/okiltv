@@ -113,7 +113,9 @@ Protect full source profiles, sensitive DVR/player settings, channel `stream_url
 Source summaries expose list metadata without connection details. Model `toJson()`
 helpers serialize in-memory data; they do not establish a disk protection boundary.
 
-Use the existing redaction/logger facilities for diagnostics. Do not write resolved
+Use the existing redaction/logger facilities for diagnostics. Text redaction masks
+Cookie/Set-Cookie headers and arbitrary relative-template query values; diagnostic
+summaries mask the complete mpv `http-header-fields` value. Do not write resolved
 media URLs/headers or provider credentials into QML, logs, test reports or docs.
 This protection does not defend against the same logged-in user or erase external
 backups. ffmpeg/ffprobe command arguments and user-enabled raw mpv logging remain
@@ -139,6 +141,14 @@ known exposure limits, described in [security-storage.md](../.project/security-s
   needs the original account/store or explicit recreation.
 - Older applications cannot read the migrated protected format. Do not run them
   against a migrated data directory.
+
+Source removal atomically commits the reduced source list and UUID-only
+`pendingRemovals` in `source-summaries.json` before deleting any data. Failed
+commit preserves the summary, detail and caches. Settings cleanup precedes deletion;
+remaining markers are retried idempotently at startup before detail validation.
+Cleanup failure after commit retains the marker without resurrecting the source.
+An already migrated source with a missing detail file remains editable/removable
+in Sources and reports a load warning rather than preventing application startup.
 
 Source removal must invalidate pending jobs and clean related channels, EPG,
 history/bookmarks and scheduled DVR state through existing owners. VOD additionally

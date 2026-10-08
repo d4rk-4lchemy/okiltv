@@ -133,7 +133,7 @@ VodCatalogModel::VodCatalogModel(VodRuntime *runtime, Core::SettingsManager *set
         // Startup has its own retry window; a failed queued refresh must not
         // publish a transient storage error or start queries before readiness.
         if (id != m_profile || !m_open || !m_controller || !m_runtime->ready()) return;
-        m_error = m_runtime->syncError(id);
+        m_error.clear();
         const auto saved = m_settings->profileById(id);
         if (!saved || !saved->vodEnabled) { emit changed(); return; }
         if (!m_scope.catalogNamespace.isNull()) {
@@ -183,6 +183,11 @@ bool VodCatalogModel::pending(Operation kind) const
 bool VodCatalogModel::busy() const
 { return (m_open && m_runtime->syncing(m_profile)) || m_marking || m_storageWaitTimeout.isActive() || std::any_of(m_pending.cbegin(), m_pending.cend(), [](const Pending &p) { return p.kind != Operation::MovieLists && p.kind != Operation::Probe && p.kind != Operation::Artwork && p.kind != Operation::Progress && p.kind != Operation::CardProgress && p.kind != Operation::CardResolution && p.kind != Operation::ContinueQuery && p.kind != Operation::PlayingDetails && p.kind != Operation::PlayingArtwork && p.kind != Operation::EpisodeDetails && p.kind != Operation::SeasonMetadata; }); }
 bool VodCatalogModel::startingPlayback() const { return pending(Operation::Play); }
+QString VodCatalogModel::errorText() const
+{
+    if (!m_error.isEmpty() || m_storageWaitTimeout.isActive()) return m_error;
+    return m_runtime->syncError(m_profile, m_kind);
+}
 void VodCatalogModel::track(const QUuid &id, Operation kind, const ContentRef &ref, bool append)
 {
     m_pending.insert(id, {kind, m_queryGeneration, ref, append, m_listsRevision});
@@ -282,7 +287,7 @@ void VodCatalogModel::cancelKind(Operation kind)
     }
 }
 void VodCatalogModel::resetRows()
-{ beginResetModel(); m_rows.clear(); m_next.reset(); endResetModel(); }
+{ beginResetModel(); m_rows.clear(); m_next.reset(); m_catalogLoaded = false; endResetModel(); }
 void VodCatalogModel::selectSource(const QString &id)
 {
     const QUuid profile(id);
@@ -352,7 +357,6 @@ void VodCatalogModel::refresh()
 {
     if (!m_controller || !m_open || m_runtime->syncing(m_profile)) return;
     if (!m_runtime->ready()) { waitForStorage(); emit changed(); return; }
-    if (m_scope.catalogNamespace.isNull()) { loadScope(); return; }
     m_error.clear();
     if (series() && m_selected.valid()) {
         cancelKind(Operation::Details); cancelKind(Operation::EpisodeDetails);
@@ -818,7 +822,15 @@ void VodCatalogModel::receive(const VodEvent &event)
                     ? QStringLiteral("ffprobe is unavailable; track selection will be available after playback starts.")
                     : QStringLiteral("Track information could not be read; you can still play this %1.").arg(series() ? QStringLiteral("episode") : QStringLiteral("movie")));
         }
-        else if (request.kind != Operation::SeasonMetadata && request.kind != Operation::PlayingDetails && request.kind != Operation::PlayingArtwork && request.kind != Operation::Artwork && request.kind != Operation::CardProgress && request.kind != Operation::CardResolution && error->code != ErrorCode::Cancelled) m_error = error->message();
+        else if (request.kind != Operation::SeasonMetadata && request.kind != Operation::PlayingDetails && request.kind != Operation::PlayingArtwork && request.kind != Operation::Artwork && request.kind != Operation::CardProgress && request.kind != Operation::CardResolution && error->code != ErrorCode::Cancelled) {
+            QString context;
+            if (request.kind == Operation::Scope) context = QStringLiteral("VOD source could not be read: ");
+            else if (request.kind == Operation::Categories) context = series()
+                ? QStringLiteral("Series categories could not be loaded: ") : QStringLiteral("Movie categories could not be loaded: ");
+            else if (request.kind == Operation::Query || request.kind == Operation::ContinueQuery) context = series()
+                ? QStringLiteral("Series catalogue could not be read: ") : QStringLiteral("Movie catalogue could not be read: ");
+            m_error = context + error->message();
+        }
         emit changed(); return;
     }
     const auto &value = std::get<PublicValue>(event.result);
@@ -863,8 +875,9 @@ void VodCatalogModel::receive(const VodEvent &event)
         if (request.generation != m_queryGeneration) break;
         if (request.listsRevision != m_listsRevision) { query(); break; }
         const auto &page = std::get<CatalogPage>(value);
-        if (!page.refreshedAtUtc.isValid()) { if (!m_runtime->syncing(m_profile) && m_runtime->syncError(m_profile).isEmpty()) refresh(); break; }
+        if (!page.refreshedAtUtc.isValid()) { if (!m_runtime->syncing(m_profile) && m_runtime->syncError(m_profile, m_kind).isEmpty()) refresh(); break; }
         if (!request.append) resetRows();
+        m_catalogLoaded = true;
         if (!page.items.isEmpty()) {
             const int first = count(); beginInsertRows({}, first, first + static_cast<int>(page.items.size()) - 1);
             for (const auto &item : page.items) if (const auto movie = std::visit([](const auto &summary) { return std::optional<MovieSummary>{{summary.ref,summary.title,summary.year,summary.artwork,summary.categoryIds,summary.availability}}; }, item)) {

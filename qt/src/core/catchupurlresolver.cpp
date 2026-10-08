@@ -126,30 +126,9 @@ QString mergeAppendQueryTemplate(const QString &baseUrl, const QString &queryTem
         return baseUrl;
     }
 
-    QUrl parsedBase(baseUrl);
-    if (!parsedBase.isValid()) {
-        return appendQueryStringFallback(baseUrl, normalizedQuery);
-    }
-
-    QUrlQuery mergedQuery(parsedBase);
-    const auto existingItems = mergedQuery.queryItems(QUrl::FullyDecoded);
-    QUrlQuery appendedQuery(normalizedQuery);
-    const auto appendedItems = appendedQuery.queryItems(QUrl::FullyDecoded);
-    if (appendedItems.isEmpty()) {
-        return appendQueryStringFallback(baseUrl, normalizedQuery);
-    }
-
-    mergedQuery.clear();
-    for (const auto &item : existingItems) {
-        mergedQuery.addQueryItem(item.first, item.second);
-    }
-    for (const auto &item : appendedItems) {
-        mergedQuery.addQueryItem(item.first, item.second);
-    }
-
-    parsedBase.setQuery(mergedQuery);
-    const auto resolved = parsedBase.toString();
-    return resolved.isEmpty() ? appendQueryStringFallback(baseUrl, normalizedQuery) : resolved;
+    // Append the encoded fragment verbatim. Decoding/re-encoding would alter
+    // literal percent sequences, plus signs and signed provider queries.
+    return appendQueryStringFallback(baseUrl, normalizedQuery);
 }
 
 QString extensionFromStreamUrl(const QString &streamUrl)

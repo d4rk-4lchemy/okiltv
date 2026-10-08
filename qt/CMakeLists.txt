@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(OKILTVQt VERSION 0.6.0 LANGUAGES CXX)
+project(OKILTVQt VERSION 0.6.1 LANGUAGES CXX)
 
 # Keep runtime identification independent of packaging metadata.  Core code also
 # uses this in tests, where QCoreApplication may not have an application version.
@@ -90,6 +90,10 @@ qt_add_executable(OKILTVQt
     src/app/dvrcontroller.h
     src/app/epggridmodel.cpp
     src/app/epggridmodel.h
+    src/app/epgsearchcontroller.cpp
+    src/app/epgsearchcontroller.h
+    src/app/epgsearchmodel.cpp
+    src/app/epgsearchmodel.h
     src/app/guidestatemodel.cpp
     src/app/guidestatemodel.h
     src/app/main.cpp
@@ -141,6 +145,8 @@ qt_add_executable(OKILTVQt
     src/core/epgcache_service.h
     src/core/epgstore.cpp
     src/core/epgstore.h
+    src/core/epgsearchtypes.cpp
+    src/core/epgsearchtypes.h
     src/core/epgservice.cpp
     src/core/epgservice.h
     src/core/iconcache_service.cpp
@@ -300,6 +306,9 @@ set(OKILTV_QML_FILES
     qml/components/AppButton.qml
     qml/components/VodPlaybackList.qml
     qml/components/PlaybackSearchHeader.qml
+    qml/components/EpgSearchOverlay.qml
+    qml/components/EpgSearchResultDelegate.qml
+    qml/components/EpgSearchDetailsPane.qml
     qml/components/VodPlaybackInfo.qml
     qml/components/VodMarqueeTitle.qml
     qml/components/VodMarqueeController.qml

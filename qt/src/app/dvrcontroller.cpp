@@ -5,6 +5,7 @@
 #include "../core/appdatapaths.h"
 #include "../core/debuglogger.h"
 #include "../core/processutils.h"
+#include "../core/mediarequest.h"
 
 #include <QDir>
 #include <QFile>
@@ -44,8 +45,6 @@ constexpr int kProcessForceKillRetryMs = 500;
 constexpr int kProcessForceKillRetries = 10;
 constexpr int kTempDeleteRetryDelayMs = 1000;
 constexpr int kTempDeleteMaxRetries = 90;
-constexpr int kRemuxProbeStartTimeoutMs = 3000;
-constexpr int kRemuxProbeTimeoutMs = 10000;
 constexpr double kRemuxDurationMatchToleranceSeconds = 1.0;
 
 QString cleanText(const QVariantMap &map, const QString &key)
@@ -90,84 +89,6 @@ bool isProcessAlive(const qint64 pid)
 }
 #endif
 
-std::optional<double> probeMediaDurationSeconds(const QString &path, QString *errorText = nullptr)
-{
-    const auto normalizedPath = path.trimmed();
-    if (normalizedPath.isEmpty()) {
-        if (errorText != nullptr) {
-            *errorText = QStringLiteral("empty-path");
-        }
-        return std::nullopt;
-    }
-
-    if (!QFileInfo::exists(normalizedPath)) {
-        if (errorText != nullptr) {
-            *errorText = QStringLiteral("missing-file");
-        }
-        return std::nullopt;
-    }
-
-    const auto ffprobe = Core::resolveProcessBinary(QStringLiteral("ffprobe"));
-    QProcess probe;
-    probe.setProcessChannelMode(QProcess::MergedChannels);
-    const QStringList args {
-        QStringLiteral("-v"), QStringLiteral("error"),
-        QStringLiteral("-show_entries"), QStringLiteral("format=duration"),
-        QStringLiteral("-of"), QStringLiteral("default=noprint_wrappers=1:nokey=1"),
-        normalizedPath
-    };
-
-    probe.start(ffprobe, args);
-    if (!probe.waitForStarted(kRemuxProbeStartTimeoutMs)) {
-        if (errorText != nullptr) {
-            *errorText = QStringLiteral("failed-to-start");
-        }
-        return std::nullopt;
-    }
-
-    if (!probe.waitForFinished(kRemuxProbeTimeoutMs)) {
-        probe.kill();
-        probe.waitForFinished(kProcessKillTimeoutMs);
-        if (errorText != nullptr) {
-            *errorText = QStringLiteral("timeout");
-        }
-        return std::nullopt;
-    }
-
-    auto payload = QString::fromLocal8Bit(probe.readAll()).trimmed();
-    if (payload.isEmpty()) {
-        if (errorText != nullptr) {
-            *errorText = QStringLiteral("empty-output");
-        }
-        return std::nullopt;
-    }
-
-    const auto lines = payload.split(QRegularExpression(QStringLiteral("[\\r\\n]+")), Qt::SkipEmptyParts);
-    for (const auto &line : lines) {
-        bool ok = false;
-        const auto duration = line.trimmed().toDouble(&ok);
-        if (ok && std::isfinite(duration) && duration >= 0.0) {
-            return duration;
-        }
-    }
-
-    bool ok = false;
-    const auto duration = payload.toDouble(&ok);
-    if (ok && std::isfinite(duration) && duration >= 0.0) {
-        return duration;
-    }
-
-    if (errorText != nullptr) {
-        auto compact = payload;
-        compact.replace(u'\r', u' ');
-        compact.replace(u'\n', QStringLiteral(" | "));
-        if (compact.size() > 160) {
-            compact = compact.left(160) + QStringLiteral("...");
-        }
-        *errorText = QStringLiteral("invalid-output=%1").arg(compact);
-    }
-    return std::nullopt;
-}
 
 } // namespace
 
@@ -890,7 +811,10 @@ bool DvrController::startPreparedSession(const MergedWindow &window)
         QStringLiteral("-y"),
         QStringLiteral("-hide_banner"),
         QStringLiteral("-loglevel"), QStringLiteral("warning"),
-        QStringLiteral("-nostdin"),
+        QStringLiteral("-nostdin")
+    };
+    const auto inputOptions = Core::mediaInputOptions(window.streamUrl, m_settings->current().mpvOptions, m_settings->current().playerUserAgent);
+    const auto ingestArgs = args + inputOptions + QStringList {
         QStringLiteral("-i"), window.streamUrl,
         QStringLiteral("-map"), QStringLiteral("0"),
         QStringLiteral("-c"), QStringLiteral("copy"),
@@ -1006,7 +930,7 @@ bool DvrController::startPreparedSession(const MergedWindow &window)
         return false;
     }
 
-    it->second->ingestProcess->start(ffmpeg, args);
+    it->second->ingestProcess->start(ffmpeg, ingestArgs);
     emit stateChanged();
     return true;
 }
@@ -1408,7 +1332,7 @@ void DvrController::maybeStartRemux(const Session &session)
                 }
             }
 
-            const auto remuxAccepted = finalExists && finalSize > 0 && durationMatches;
+            const auto remuxAccepted = normalExit && exitCode == 0 && finalExists && finalSize > 0 && durationMatches;
             if (remuxAccepted) {
                 DebugLogger::instance().log(
                     QStringLiteral("dvr"),

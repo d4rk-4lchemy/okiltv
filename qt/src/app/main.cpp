@@ -8,6 +8,7 @@
 #include "displaysleepblocker.h"
 #include "dvrcontroller.h"
 #include "epggridmodel.h"
+#include "epgsearchcontroller.h"
 #include "guidestatemodel.h"
 #include "multiviewcontroller.h"
 #include "nownextmodel.h"
@@ -25,6 +26,7 @@
 #include "../core/appdatapaths.h"
 #include "../core/database_service.h"
 #include "../core/debuglogger.h"
+#include "../core/epgcache_service.h"
 #include "../core/epgservice.h"
 #include "../core/networkaccess.h"
 #include "../core/portablebootstrap.h"
@@ -561,6 +563,7 @@ int main(int argc, char *argv[])
                     appServices.settingsController.get(),
                     coreServices.epgService.get());
             });
+        OKILTV::App::EpgSearchController epgSearchController(appController.get());
         appServices.uiTestBridge->attachControllers(
             appController.get(),
             appServices.shellController.get(),
@@ -595,9 +598,11 @@ int main(int argc, char *argv[])
             QStringLiteral("series"), [&vodRuntime](const QUuid &id) { return vodRuntime.sourceCategories(id, OKILTV::Vod::CatalogKind::Series); });
         for (auto *groups : {&movieSourceGroups, &seriesSourceGroups}) {
             groups->setAutoPersist(false);
-            const auto updateSyncState = [&vodRuntime, groups]() {
+            const auto kind = groups == &seriesSourceGroups
+                ? OKILTV::Vod::CatalogKind::Series : OKILTV::Vod::CatalogKind::Movies;
+            const auto updateSyncState = [&vodRuntime, groups, kind]() {
                 const QUuid id(groups->profileId());
-                groups->setSyncState(vodRuntime.syncing(id), vodRuntime.syncError(id));
+                groups->setSyncState(vodRuntime.syncing(id), vodRuntime.syncError(id, kind));
             };
             QObject::connect(&vodRuntime, &OKILTV::Vod::VodRuntime::sourceSyncChanged, groups,
                 [updateSyncState](const QUuid &) { updateSyncState(); });
@@ -633,6 +638,7 @@ int main(int argc, char *argv[])
         registerQmlContextProperties(engine, appController.get(), appServices);
         engine.rootContext()->setContextProperty(QStringLiteral("movieSourceGroupsModel"), &movieSourceGroups);
         engine.rootContext()->setContextProperty(QStringLiteral("seriesSourceGroupsModel"), &seriesSourceGroups);
+        engine.rootContext()->setContextProperty(QStringLiteral("epgSearchController"), &epgSearchController);
         engine.rootContext()->setContextProperty(QStringLiteral("vodRuntime"), &vodRuntime);
         engine.rootContext()->setContextProperty(QStringLiteral("vodCatalog"), &vodCatalog);
         engine.rootContext()->setContextProperty(QStringLiteral("vodSeriesCatalog"), &vodSeriesCatalog);
@@ -737,6 +743,8 @@ int main(int argc, char *argv[])
                 return;
             }
             shutdownHandled = true;
+            epgSearchController.shutdown();
+            OKILTV::Core::EpgCacheService::shutdownSearchPreparations();
             vodRuntime.shutdown();
             appServices.updateCheckController->shutdown();
 

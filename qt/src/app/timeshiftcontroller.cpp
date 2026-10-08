@@ -7,6 +7,7 @@
 #include "../core/appdatapaths.h"
 #include "../core/debuglogger.h"
 #include "../core/processutils.h"
+#include "../core/mediarequest.h"
 #include "../core/redaction.h"
 #include "../core/settingsmanager.h"
 
@@ -1825,8 +1826,6 @@ bool TimeshiftController::switchToNextGenerationPlayback(const QString &reason, 
     const auto switchingFromFailedSession = m_session->state == SessionState::Failed;
     const auto preferReconnectReadyAnchor = switchingFromFailedSession
         || reason == QLatin1String("failed-generation-deplete");
-    const auto requireNewerLiveEdge = !switchingFromFailedSession
-        && reason != QLatin1String("failed-generation-deplete");
     const auto currentLive = sessionLiveEdgeEpochMs(*m_session);
     Session *candidate = nullptr;
     qint64 candidateStart = 0;
@@ -1837,7 +1836,7 @@ bool TimeshiftController::switchToNextGenerationPlayback(const QString &reason, 
         if (start <= 0 || end <= start) {
             continue;
         }
-        if (requireNewerLiveEdge && currentLive > 0 && end <= currentLive) {
+        if (currentLive > 0 && end <= currentLive) {
             continue;
         }
         const auto selectionAnchor = preferReconnectReadyAnchor && retained.reconnectReadyOldestEpochMs > 0
@@ -1869,7 +1868,7 @@ bool TimeshiftController::switchToNextGenerationPlayback(const QString &reason, 
         ? m_session->reconnectReadyOldestEpochMs
         : 0;
     const auto oldestOrReconnectTarget = reconnectReadyTarget > 0 ? reconnectReadyTarget : oldestTarget;
-    const auto switchTarget = reliableStart > 0 ? reliableStart : oldestOrReconnectTarget;
+    const auto switchTarget = std::max(currentLive, reliableStart > 0 ? reliableStart : oldestOrReconnectTarget);
     playSessionFromAnchor(switchTarget, pauseWhenReady);
     if (emitNotice) {
         setNoticeText(QStringLiteral("Requested time was unavailable. Jumped to the next available segment."), kGapSnapNoticeDurationMs);
@@ -2109,7 +2108,10 @@ bool TimeshiftController::startDetachedGeneration(const QString &reason)
         QStringLiteral("-y"),
         QStringLiteral("-hide_banner"),
         QStringLiteral("-loglevel"), QStringLiteral("warning"),
-        QStringLiteral("-nostdin"),
+        QStringLiteral("-nostdin")
+    };
+    args += Core::mediaInputOptions(created.inputUrl, m_settings->current().mpvOptions, m_settings->current().playerUserAgent);
+    args += QStringList {
         QStringLiteral("-i"), created.inputUrl,
         QStringLiteral("-map"), QStringLiteral("0:v?"),
         QStringLiteral("-map"), QStringLiteral("0:a?"),
@@ -2898,9 +2900,10 @@ bool TimeshiftController::startSessionForCurrentChannel(const bool pauseWhenRead
             QStringLiteral("-y"),
             QStringLiteral("-hide_banner"),
             QStringLiteral("-loglevel"), QStringLiteral("warning"),
-            QStringLiteral("-nostdin"),
-            QStringLiteral("-i"), sessionRef.inputUrl
+            QStringLiteral("-nostdin")
         };
+        args += Core::mediaInputOptions(sessionRef.inputUrl, m_settings->current().mpvOptions, m_settings->current().playerUserAgent);
+        args << QStringLiteral("-i") << sessionRef.inputUrl;
 
         const auto streamLayoutUsable = streamLayout.valid && streamLayout.primaryVideo.has_value();
         if (streamLayoutUsable) {
@@ -3117,9 +3120,10 @@ bool TimeshiftController::startSessionForCurrentChannel(const bool pauseWhenRead
         QStringLiteral("-show_streams"),
         QStringLiteral("-show_entries"),
             QStringLiteral("stream=index,codec_type,codec_name:stream_tags=language,title:stream_disposition=default"),
-        QStringLiteral("-of"), QStringLiteral("json"),
-        m_session->inputUrl
+        QStringLiteral("-of"), QStringLiteral("json")
     };
+    probeArgs += Core::mediaInputOptions(m_session->inputUrl, m_settings->current().mpvOptions, m_settings->current().playerUserAgent);
+    probeArgs << m_session->inputUrl;
     Core::DebugLogger::instance().log(
         QStringLiteral("timeshift.session.start"),
         QStringLiteral("Starting async ffprobe preflight for %1 (%2).")

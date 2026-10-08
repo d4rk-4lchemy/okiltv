@@ -22,13 +22,13 @@ jobs:
       matrix:
         include:
           - group: core
-            targets: OKILTVQtCoreTests OKILTVQtDatabaseStartupTests OKILTVQtVodDomainTests OKILTVQtVodProviderTests OKILTVQtVodStorageTests
+            targets: OKILTVQtEpgSearchStoreTests OKILTVQtCoreTests OKILTVQtDatabaseStartupTests OKILTVQtVodDomainTests OKILTVQtVodProviderTests OKILTVQtVodStorageTests
           - group: app
-            targets: OKILTVQtAppTests OKILTVQtDownloadTests OKILTVQtVodContractTests
+            targets: OKILTVQtEpgSearchModelTests OKILTVQtAppTests OKILTVQtDownloadTests OKILTVQtVodContractTests
           - group: playback
             targets: OKILTVQtPlaybackTests OKILTVQtCatchupTests OKILTVQtVodMpvTests OKILTVQtVodRangeTests
           - group: qml
-            targets: ''
+            targets: OKILTVQtEpgSearchQmlTests
           - group: ui
             targets: OKILTVQt
     defaults:
@@ -55,7 +55,7 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
             libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 \
             libxcb-image0 libxcb-render-util0 libdbus-1-dev zlib1g-dev libssl-dev \
-            libmpv2 libsecret-1-0 ffmpeg xvfb xauth openbox xdotool x11-utils \
+            libmpv2 libsecret-1-0 ffmpeg imagemagick xvfb xauth openbox xdotool x11-utils \
             dbus-x11 gnome-keyring
           source scripts/ci/dependencies.env
           python -m pip install "aqtinstall==$AQT_VERSION"

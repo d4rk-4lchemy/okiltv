@@ -9,6 +9,7 @@ Item {
     property alias text: fullTitle.text
     property alias font: fullTitle.font
     property alias color: fullTitle.color
+    property alias textFormat: fullTitle.textFormat
     readonly property real availableWidth: width
     implicitWidth: fullTitle.implicitWidth
     implicitHeight: fullTitle.implicitHeight
@@ -34,6 +35,7 @@ Item {
     }
     onEligibleChanged: restart()
     onTextChanged: restart()
+    onTextFormatChanged: restart()
     onContentIdentityChanged: restart()
     onAvailableWidthChanged: restart()
     onFontChanged: restart()
@@ -46,7 +48,7 @@ Item {
             anchors.fill: parent
             visible: !root.scrolling
             text: root.text
-            textFormat: Text.PlainText
+            textFormat: root.textFormat
             font: root.font
             color: root.color
             elide: Text.ElideRight
@@ -68,7 +70,7 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             visible: root.scrolling
             text: root.text
-            textFormat: Text.PlainText
+            textFormat: root.textFormat
             font: root.font
             color: root.color
             Accessible.ignored: true

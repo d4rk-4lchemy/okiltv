@@ -37,6 +37,7 @@ function vodScrollBarColor(pressed, hovered) {
     return pressed ? vodScrollBarThumbPressed : hovered ? vodScrollBarThumbHover : vodScrollBarThumb
 }
 var success = "#5ac88f"
+var epgSearchPast = "#f0a050"
 var warning = "#d4aa56"
 var danger = "#e17474"
 var shadow = "#66000000"
@@ -83,6 +84,8 @@ var mediaModeHeight = 34
 var mediaModeInset = 3
 var mediaModeFontSize = 13
 // Live media navigation shares the rail palette; VOD uses overlay tokens.
+var playbackSearchFontSize = 14
+var playbackSearchBackground = "#960d1822"
 var liveRailBackground = "#82070d12"
 var liveRailSelection = "#96182431"
 var liveRailHover = "#6d111a24"

@@ -9,7 +9,7 @@ namespace OKILTV::Vod {
 enum class ErrorCode {
     Cancelled, Timeout, Unauthorized, Forbidden, RateLimited, ProviderUnavailable,
     UnsupportedCapability, InvalidResponse, ResponseTooLarge, ContentUnavailable,
-    StorageUnavailable, SecretUnavailable, PlaybackConflict, PlaybackFailed
+    StorageUnavailable, SecretUnavailable, PlaybackConflict, PlaybackFailed, StorageBusy
 };
 struct Error {
     ErrorCode code;

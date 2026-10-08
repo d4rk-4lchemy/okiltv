@@ -29,7 +29,9 @@ Item {
     readonly property bool interactionActive: choosingFile || queuePanel.visible || cancelDialog.visible
     property var pendingChannel: ({})
     property var pendingProgram: ({})
+    property var pendingValidator: null
     property string notice: ""
+    signal requestFailed(var channel, var program, string reason)
 
     function positionPanel() {
         const overlay = root.Overlay.overlay
@@ -54,7 +56,7 @@ Item {
         noticeTimer.restart()
     }
 
-    function requestDownload(channel, program) {
+    function requestDownload(channel, program, completionValidator = null) {
         if (root.interactionActive || root.controller.shuttingDown)
             return
         if (!channel || !program || !program.start) {
@@ -65,12 +67,15 @@ Item {
         if (!state.visible)
             return
         if (!state.enabled) {
-            root.showNotice(state.reason || "This programme cannot be downloaded.")
+            const reason = state.reason || "This programme cannot be downloaded."
+            root.showNotice(reason)
+            root.requestFailed(channel, program, reason)
             return
         }
         // Keep the exact target while native dialogs run a nested event loop.
         root.pendingChannel = Object.assign({}, channel)
         root.pendingProgram = Object.assign({}, program)
+        root.pendingValidator = completionValidator
         const destination = root.controller.suggestedDestination(
             String(program.title || "").trim(), String(channel.name || ""), new Date(program.start))
         root.choosingFile = true
@@ -438,16 +443,26 @@ Item {
         target: root.controller
         function onDestinationChosen(destination) {
             root.choosingFile = false
-            const error = root.app.enqueueCatchupDownload(root.pendingChannel, root.pendingProgram, destination)
+            // A search request can lose its source, generation or selection
+            // while the native dialog runs. Other callers keep their existing
+            // validation in enqueueCatchupDownload.
+            const current = !root.pendingValidator || root.pendingValidator()
+            const error = current
+                ? root.app.enqueueCatchupDownload(root.pendingChannel, root.pendingProgram, destination)
+                : qsTr("This search result is no longer current. Select the programme again.")
+            if (error.length > 0) {
+                root.showNotice(error)
+                root.requestFailed(root.pendingChannel, root.pendingProgram, error)
+            }
             root.pendingChannel = ({})
             root.pendingProgram = ({})
-            if (error.length > 0)
-                root.showNotice(error)
+            root.pendingValidator = null
         }
         function onDestinationCancelled() {
             root.choosingFile = false
             root.pendingChannel = ({})
             root.pendingProgram = ({})
+            root.pendingValidator = null
         }
         function onSummaryChanged() {
             if (queuePanel.visible && root.controller.unread)

@@ -52,6 +52,7 @@ private:
     void syncProfileActivityFlagsAndMirror();
     void rebuildSummaryMirrorFromSourceSummaries();
     bool saveSourceSummaries();
+    void finishPendingProfileRemovals();
     void clearProfileDetailCache(const QUuid &id);
     void migrateLegacyProfilesIfNeeded(const AppSettings &legacySettings);
     QList<SourceSummary> buildSummariesFromProfiles(const QList<ServerProfile> &profiles) const;

@@ -15,9 +15,13 @@ same PR; a failed group does not cancel other groups.
 | `windows` | Native Windows process ownership, cleanup and DVR reconciliation |
 
 Linux jobs use CTest labels and build only their required targets. CTest verbose
-output shows individual Qt Test results while the group is running. The UI job
+output shows individual Qt Test results while the group is running. The QML job
+builds `OKILTVQtEpgSearchQmlTests` for the EPG overlay's embedded action icons;
+the other component suites run through the SDK's `qmltestrunner`. The UI job
 uses FFmpeg-generated media and a separate unlocked disposable Secret Service
-keyring for each scenario. No IPTV account or private recording is needed.
+keyring for each scenario. Linux dependencies include ImageMagick (`convert`)
+for UI-14's rendered station-logo pixel assertions. No IPTV account or private
+recording is needed.
 Windows runs process ownership tests and the two Windows-only DVR controller
 cases using Qt/MinGW on `windows-2022`. JUnit reports and diagnostic logs are
 saved as separate Actions artifacts for seven days. VOD library QML screenshots

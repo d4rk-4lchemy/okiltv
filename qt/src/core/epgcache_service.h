@@ -37,6 +37,9 @@ public:
     static Cancellation beginImport(const QUuid &profileId);
     static void cancel(const Cancellation &token);
     static void invalidateSource(const QUuid &profileId);
+    static void prepareSearch(const std::shared_ptr<EpgStore> &store);
+    // Process-lifetime shutdown fence: no later imports/preparation can start.
+    static void shutdownSearchPreparations();
     static QString manifestFile(const QUuid &profileId);
     CacheData build(const QUuid &profileId, const QString &fingerprint,
         const EpgStore::Producer &producer, bool deduplicate = false,

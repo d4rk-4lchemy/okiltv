@@ -15,11 +15,67 @@ requests. QML checks hover controls and click isolation on grid/shelf posters,
 detail actions, tooltips and write gating. UI-12 verifies details, automatic removal,
 re-adding watched films and the new playback groups using local fixtures.
 
+## EPG search validation
+
+`OKILTVQtEpgSearchStoreTests` verifies the actual QSQLITE FTS5 capability, shared
+Unicode normalization/highlight mapping, prefix/AND matching (including
+`Spider-M` → `Spider-Man` and one-character fragments after punctuation), title/subtitle
+date-first ordering ahead of match quality, cross-section pagination, time boundaries, exact deduplication, multiple playback channels per
+EPG key, filter-before-pagination and indexed/memory equivalence. It also covers
+legacy local index rebuilding, failure/cancellation and pinned-generation life.
+`OKILTVQtEpgSearchModelTests` uses injected asynchronous ports and controlled
+semaphores to test immediate stale-action blocking, latest queued requests,
+close/source/generation fences, details races, retained selection, page retry and
+restart/default routing after resume availability changes without a UI refresh.
+`QAbstractItemModelTester` checks row notifications. Model tests also verify
+cached station-logo file URLs with spaces and URL punctuation, remote fallback
+and absent logos. Broadcast-state checks use deterministic UTC samples at
+start/stop boundaries, verify status-label agreement and role notifications, and
+retain frozen sections and result identities without model resets.
+
+`OKILTVQtEpgSearchOverlayTests` covers query-only opening, fixed query/close
+geometry, clearing, inline selected-only details, available/missing logos,
+blue upcoming/green current/orange past result stripes in standard and compact
+layouts, unchanged stripe colors on selection, dynamic airing-state updates
+preserving selection/scroll and opaque stripes regardless of UI transparency,
+Live transparency, unchanged bright background pixels and blocked outside clicks, tiny-layout action reachability, double-click and button Enter
+isolation, selected-header collapse/reopen and double-click in both states,
+collapse cancellation and deferred double-click activation/cancellation while details load,
+independent description wheel scrolling, native editor keys, focus
+cycling with Shift+Tab, cyclic Tab time-filter switching from query/list/buttons,
+query/cursor preservation, modifier and protected-input guards, loaded SVG action icons, hover tooltips/accessibility labels, absent primary buttons
+with retained inline descriptions for unavailable playback, hidden
+unscheduled-past DVR and Ctrl+Enter/Return restart/default routing from editors/list/buttons and
+escaped provider text, overflowing title marquee, text-field clipping/scrollbar
+reservation, automatic scrolling of the initial selection with the pointer outside
+results, and reset when input is blocked. Focused AppController tests cover unstarted, resumable,
+completed and sub-minute archive progress plus current-airing restart. The initial
+EPG preparation case waits for the harness's startup EPG refresh to finish before
+simulating an empty active refresh, retaining the assertions for preparation,
+published results, cached browsing during refresh and a completed empty generation.
+`UI-14-epg-search` exercises the real Main/Live routing with isolated local
+fixtures with station logos and verifies the close button's 12 px horizontal gap
+and top alignment with the query field; screenshot pixel assertions verify that two different
+channel logos actually render beside the result text. Existing channel/grid search
+scenarios use Tab. Run these with
+`ctest --preset qt-linux-debug -L epg-search --output-on-failure`, then the UI
+scenario and affected Live/Guide/inactivity/multiview/download/VOD regressions.
+
+The store suite's opt-in `OKILTV_EPG_SEARCH_BENCHMARK=100000` or `1000000` runs
+a generated fixture benchmark; timing remains diagnostic, with no CI time
+threshold assertion. Record build/SDK/hardware, generation size, build time,
+cold/warm query time and cancellation separately. See the
+[EPG search validation record](epg-search-validation.md) for actual results and
+remaining platform/manual acceptance. A Linux build or MinGW cross-build alone
+does not establish Windows QSQLITE, keyboard, dialogs or rendering acceptance.
+
 ## Dependencies and native Linux build
 
 The project uses C++20, CMake 3.25+, Ninja and Qt 6.10+. Required Qt modules are
 declared in [qt/CMakeLists.txt](../qt/CMakeLists.txt); Qt Test is needed only with
-tests enabled. Linux also needs Qt DBus, zlib and OpenSSL Crypto. Runtime playback
+tests enabled. Native component tests also require Qt Quick Test. The EPG QML
+runner (`OKILTVQtEpgSearchQmlTests`) embeds the same four action SVGs as the app
+so its warning-strict tests verify real resource loading and icon rendering. Linux also needs Qt DBus, zlib and OpenSSL Crypto. Runtime playback
 uses libmpv; protected storage needs libsecret and a desktop Secret Service.
 ffmpeg/ffprobe support timeshift, remux/probing and media integration tests.
 
@@ -71,6 +127,14 @@ episode once, preserves resume semantics and ignores status-button gestures.
 `vodSourceSynchronizationAndDisable` covers aggregate refresh state through
 startup readiness, delayed Series publication, errors, concurrent sources,
 disablement/removal, replacement requests and shutdown.
+The synchronization test also opens both cached libraries during a SQLite write
+reservation, retries a blocked refresh, recovers reads after an exclusive lock and
+checks independent Movie/Series errors plus valid empty snapshots. Storage tests
+verify read-only unchanged source snapshots after invalidation and distinguish
+BUSY/LOCKED from permanent SQL errors. Contract tests verify retry worker-slot
+release, unchanged operation identity, cancellation/deadlines and no retry of
+permanent failures. QML tests distinguish refresh warnings on an empty saved
+catalogue from an initial read failure and display the actual error.
 `vodLibraryWaitsForStorage` verifies that initialization failure clears queued
 source refresh state while the library retains its separate retry window. App cases
 `vodRuntimeLibraryPause`, `vodRuntimeExplicitLiveWaitsForProgress` and `appControllerReturnsToLastPlayedChannel` verify session-owned pause/resume,
@@ -85,6 +149,8 @@ exercises the standalone switch in windowed/fullscreen
 mode, library pause/resume, fixed navigation throughout library animations and
 library-close-before-Live-panel-reveal ordering during VOD-to-Live handoff, with
 background Live still playing and its observed position advancing without rewind.
+Settings checks require all three media navigation segments to disappear over
+fullscreen Live and windowed VOD playback.
 The external runner validates animation ordering in sampled states and requires
 the intended settled overlay and enabled target controls. It does not require
 each short animation phase to appear in HTTP polling: a slow CI read can span
@@ -116,6 +182,14 @@ The VOD Mpv/Runtime tests validate shared backend load/seek telemetry. Windows
 visual acceptance still needs hardware testing after the cross-build.
 
 Test definitions and labels live in [qt/tests/CMakeLists.txt](../qt/tests/CMakeLists.txt).
+Every registered test must carry at least one PR matrix label; CMake rejects
+unreachable tests at configuration, including QML channel-number coverage. EPG
+store fixtures set Portable mode and assert their actual AppDataPaths root equals
+the temporary directory before writes on every platform. Regression cases cover
+failed remux retention, atomic removal recovery/failed commits, XMLTV DST,
+encoded provider queries, late playback decisions, XMLTV-only edits, retained
+HLS failures, native mpv HLS playback through redirects and relative resources,
+fragmented deflate and VOD progress initialization retry.
 Inspect registered tests rather than relying on a fixed suite count:
 
 ```bash
@@ -132,6 +206,18 @@ episode render cases. Its two-minute local fixture checkpoints beyond the
 60-second resume threshold and verifies the restored position, including the
 five-second rewind, within ten seconds. Ordinary playback from zero cannot
 satisfy the resume assertion; the test does not wait for media time to catch up.
+This software-rendered fixture uses Mesa softpipe with mpv's
+`gpu-dumb-mode=yes`, which keeps the OpenGL render API while disabling advanced
+GPU features unsuitable for the software driver. The unrestricted pipeline can
+spin inside Mesa drawing/swap, reproduced with Ubuntu 24.04's mpv 0.37.
+The production `MpvVideoItem` and red-frame assertion remain in use; hardware
+picture-shader quality requires separate platform acceptance.
+Its local provider/media HTTP fixture runs on a dedicated Qt thread, so requests
+continue while the GUI waits for a rendered frame or mpv telemetry during track
+changes/seeks. Counters/path observations are synchronized, and teardown destroys
+the server on its owning thread and joins it before fixture data disappears.
+The application and desktop UI scenarios keep their normal GPU settings. This CTest
+entry uses Qt Test `-v2` so timeout artifacts identify the last completed assertion.
 
 | Area | Main coverage |
 |---|---|
@@ -320,6 +406,10 @@ tests because both reserve X displays. UI-12 follows current button bounds until
 hover is confirmed before clicking (or bounds stay stable for controls without
 hover telemetry). Its playback-list reveal retries wait for settled chrome so
 a repeated Left does not open Groups after the list has already begun opening.
+Caption clicks also require stable on-screen bounds while media navigation and
+the Settings rail settle, preventing a Sources click from selecting Player at
+an earlier rail position. Live channel-search steps use Tab; Ctrl+F retains its
+VOD search behavior and opens EPG search in Live.
 It sends transition-key bursts with an
 explicit short delay so the burst remains within the animation window. Provider credentials
 are restricted to separate local manual integration, never automated tests.
@@ -335,7 +425,8 @@ ctest --preset qt-linux-debug -L '^ui$' --output-on-failure
 
 [scripts/ci/run_ui_test.sh](../scripts/ci/run_ui_test.sh) supplies an isolated
 D-Bus session and disposable keyring. The harness uses Xvfb, Openbox, xdotool and
-generated local media; setup is documented in
+generated local media; ImageMagick's `convert` is required for UI-14's rendered
+station-logo pixel assertions. Setup is documented in
 [ui-tests/linux-ui-tests.md](../ui-tests/linux-ui-tests.md) and
 [scripts/ci/README.md](../scripts/ci/README.md). CTest serializes desktop scenarios.
 Each harness invocation keeps a unique appdata/artifact directory; do not reuse
@@ -375,6 +466,9 @@ DPAPI, native-dialog and installer checks.
 ## CI and releases
 
 [pr-tests.yml](../.github/workflows/pr-tests.yml) owns grouped test execution.
+The QML group builds `OKILTVQtEpgSearchQmlTests` before running its label; this
+runner embeds the EPG action icons, while other QML suites use the SDK's
+`qmltestrunner` directly.
 The playback group builds `OKILTVQtVodRangeTests` as well as the policy, catch-up
 and native mpv targets. MinGW compiles `tst_app_models.cpp` with `-Wa,-mbig-obj`
 to accommodate the Debug object's section count without removing debug symbols.

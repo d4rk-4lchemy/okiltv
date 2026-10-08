@@ -31,6 +31,7 @@ signals, slots and invokable methods; controllers do not manipulate QML objects.
 |---|---|
 | `AppController` | Active source loading, channel/EPG orchestration, catch-up validation, startup restoration and watch tracking |
 | `ShellController` | Exclusive overlays, shell visibility, layout and interaction state |
+| `EpgSearchController` / `EpgSearchModel` | Local EPG query sessions, debounce, bounded background search, result selection and validated programme actions |
 | `PlayerController` | A player's backend objects, observed playback state and execution of playback policy decisions |
 | `MultiViewController` | PiP/grid slots, promotion, retained streams and backend ownership transitions |
 | `SettingsController` | Editable drafts, validation, Save/reload and presentation settings |
@@ -46,7 +47,7 @@ instances: `nowNextModel` follows browse selection, while
 `playbackNowNextModel` follows the playing channel. Never merge them.
 
 The QML player context property is `appPlayerController`, not `playerController`.
-Other important names include `appController`, `shellController`, `vodRuntime`,
+Other important names include `appController`, `shellController`, `epgSearchController`, `vodRuntime`,
 `vodCatalog`, `vodSeriesCatalog`, `vodPlaybackCatalog`, `movieSourceGroupsModel`, `seriesSourceGroupsModel`, `settingsController`, `dateTimeFormatter`, `dvrController` and
 `multiViewController`. Verify the full list in `main.cpp` before adding bindings.
 `MpvVideoItem` is registered in the `OKILTV 1.0` QML module.
@@ -105,6 +106,15 @@ late callbacks and writes into destroyed services.
 - VOD library models wait for runtime storage readiness for up to 15 seconds,
   retrying initialization asynchronously during that window. Closing/source changes
   cancel the wait; successful reconciliation resumes catalogue requests.
+- Ordinary VOD source snapshots use read transactions for unchanged revisions.
+  SQLite BUSY/LOCKED jobs retry asynchronously within their original deadline and
+  a 15-second retry window, releasing worker slots between attempts. Source/operation
+  cancellation and shutdown invalidate queued retries. Movie/Series refresh errors
+  are scoped by source and stage; cached catalogue availability is independent.
+- Source removal commits its summary/tombstone atomically before cleanup; startup
+  resumes pending cleanup before validating details. Removing the loaded source
+  clears Live/EPG contexts. A profile refresh may restore playback only if the
+  player's generation has not changed during the request.
 - `AppController` generation counters reject obsolete profile, EPG and programme
   detail results. Check identity/generation again when publishing a result.
 - Cancellation alone is insufficient: already completed callbacks may still be

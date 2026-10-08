@@ -166,12 +166,24 @@ def main():
         time.sleep(.25)
 
     def click_text(label, prop="text"):
-        state = wait("Control available: " + label, lambda s: any(
-            i.get("text") == label and i.get("property") == prop and i.get("enabled")
-            and i.get("bounds", {}).get("y", -1) >= 0 for i in s["inventory"]))
-        item = next(i for i in state["inventory"] if i.get("text") == label
-                    and i.get("property") == prop and i.get("enabled") and i.get("bounds", {}).get("y", -1) >= 0)
-        bounds = item["bounds"]
+        previous_bounds = None
+        stable_since = 0
+        bounds = None
+        def ready(state):
+            nonlocal previous_bounds, stable_since, bounds
+            item = next((i for i in state["inventory"] if i.get("text") == label
+                         and i.get("property") == prop and i.get("enabled")
+                         and 0 <= i.get("bounds", {}).get("x", -1) < state["window"]["width"]
+                         and 0 <= i.get("bounds", {}).get("y", -1) < state["window"]["height"]), None)
+            current = item["bounds"] if item else None
+            if current != previous_bounds or state["window"]["chromeAnimationsRunning"]:
+                previous_bounds = current
+                stable_since = time.monotonic()
+            bounds = current
+            # Settings rail positions can move while media navigation hides.
+            # Clicking an earlier Sources position can accidentally select Player.
+            return current is not None and time.monotonic() - stable_since >= .4
+        wait("Control ready: " + label, ready)
         runner.xdotool("mousemove", "--window", runner.window_id,
                        str(round(bounds["x"] + bounds["width"] / 2)), str(round(bounds["y"] + bounds["height"] / 2)))
         runner.xdotool("click", "1")
@@ -337,7 +349,8 @@ def main():
         click("ui.live.settingsButton")
         wait("Fullscreen Settings frame reaches the top edge", lambda s:
              s["window"]["visibleOverlay"] == "settings"
-             and any(r["name"] == "settings_overlay" and abs(r["y"]) < 1 for r in s["regions"]))
+             and any(r["name"] == "settings_overlay" and abs(r["y"]) < 1 for r in s["regions"])
+             and all(not named(s, "ui.navigation." + mode) for mode in ("movies", "live", "series")))
         key("Escape")
         wait("Fullscreen Settings closes", lambda s: s["window"]["visibleOverlay"] == "none")
         click_mode_and_check_transition("ui.navigation.movies")
@@ -355,7 +368,8 @@ def main():
         click_mode_and_check_transition("ui.navigation.live", closing=True)
         wait("Fullscreen navigation returns to Live", lambda s: s["window"]["visibleOverlay"] == "none")
         key("f")
-        key("ctrl+f")
+        key("Tab")
+        wait("Tab focuses Live channel search", lambda s: s["multiview"]["searchFocused"])
         key("Tab")
         wait("Tab from Live search focuses media navigation", lambda s: s["window"]["navigationFocused"])
         key("Right")
@@ -867,17 +881,10 @@ def main():
         key("Left")
         click_text("Settings", "caption")
         wait("Settings opens over VOD", lambda s: s["window"]["visibleOverlay"] == "settings")
-        state = wait("Title navigation is disabled in Settings", lambda s:
-             named(s, "ui.navigation.live") and not named(s, "ui.navigation.live").get("enabled"))
-        bounds = named(state, "ui.navigation.live")["bounds"]
-        settings_size = (state["window"]["width"], state["window"]["height"])
-        runner.xdotool("mousemove", "--window", runner.window_id,
-                       str(round(bounds["x"] + bounds["width"] / 2)), str(round(bounds["y"] + bounds["height"] / 2)))
-        runner.xdotool("click", "--repeat", "2", "--delay", "80", "1")
-        state = runner.read_state()
-        assert state["window"]["visibleOverlay"] == "settings"
-        assert (state["window"]["width"], state["window"]["height"]) == settings_size
-        checks.append("Disabled navigation does not maximize or leave Settings")
+        wait("Media navigation is hidden in Settings", lambda s:
+             s["window"]["visibleOverlay"] == "settings"
+             and all(not named(s, "ui.navigation." + mode) for mode in ("movies", "live", "series")))
+        checks.append("Settings hides Movies/Live TV/Series navigation over Live and VOD")
         click_text("Sources", "caption")
         select_source("Local Cinema")
         state = scroll_to("ui.sources.enableVod")

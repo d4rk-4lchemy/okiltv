@@ -32,7 +32,7 @@ Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
             radius: 4
-            color: Theme.uiBackground(root.neutralPalette ? Theme.overlaySurface : "#960d1822", root.uiTransparency)
+            color: Theme.uiBackground(root.neutralPalette ? Theme.overlaySurface : Theme.playbackSearchBackground, root.uiTransparency)
             border.width: search.activeFocus ? 1 : 0
             border.color: root.neutralPalette ? Theme.overlayBorder : Theme.borderStrong
 
@@ -47,7 +47,7 @@ Item {
                 bottomPadding: 10
                 placeholderTextColor: root.neutralPalette ? Theme.overlayTextMuted : Theme.textMuted
                 color: root.neutralPalette ? Theme.overlayTextPrimary : Theme.textPrimary
-                font.pixelSize: 14
+                font.pixelSize: Theme.playbackSearchFontSize
                 selectByMouse: true
                 hoverEnabled: true
                 background: Item {}

@@ -21,6 +21,7 @@ class VodCatalogModel final : public QAbstractListModel {
     Q_PROPERTY(bool hasMore READ hasMore NOTIFY changed)
     Q_PROPERTY(int count READ count NOTIFY changed)
     Q_PROPERTY(QString errorText READ errorText NOTIFY changed)
+    Q_PROPERTY(bool catalogLoaded READ catalogLoaded NOTIFY changed)
     Q_PROPERTY(QVariantList continueMovies READ continueMovies NOTIFY changed)
     Q_PROPERTY(bool continueMoviesLoaded READ continueMoviesLoaded NOTIFY changed)
     Q_PROPERTY(QVariantMap movie READ movie NOTIFY changed)
@@ -48,7 +49,8 @@ public:
     bool probePlayBlocked() const { return m_probePlayDelay.isActive(); }
     bool hasMore() const { return m_next.has_value(); }
     int count() const { return static_cast<int>(m_rows.size()); }
-    QString errorText() const { return m_error; }
+    QString errorText() const;
+    bool catalogLoaded() const { return m_catalogLoaded; }
     QVariantList continueMovies() const;
     bool continueMoviesLoaded() const { return m_continueMoviesLoaded; }
     QVariantMap movie() const { return m_movie; }
@@ -127,6 +129,7 @@ private:
     QHash<QByteArray, MovieListState> m_movieLists;
     QList<MovieSummary> m_rows, m_continueRows;
     bool m_continueMoviesLoaded = false;
+    bool m_catalogLoaded = false;
     bool m_marking = false;
     QHash<QByteArray, double> m_progress;
     QHash<QByteArray,QString> m_episodeLabels;

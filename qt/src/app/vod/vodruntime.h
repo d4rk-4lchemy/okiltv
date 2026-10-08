@@ -101,7 +101,7 @@ public:
     Q_INVOKABLE void synchronizeSource(const QString &profile);
     void policyChanged(const QUuid &profile);
     QList<Core::ChannelCategory> sourceCategories(const QUuid &, CatalogKind) const;
-    QString syncError(const QUuid &id) const { return m_syncErrors.value(id); }
+    QString syncError(const QUuid &id, std::optional<CatalogKind> kind = {}) const;
     bool syncing(const QUuid &id) const { return m_syncing.contains(id) || m_queuedSync.contains(id); }
     bool sourceSyncInProgress() const { return !m_syncing.isEmpty() || !m_queuedSync.isEmpty(); }
     void retryInitialization();
@@ -179,7 +179,8 @@ private:
     QHash<QUuid, SyncRequest> m_syncRequests;
     QSet<QUuid> m_syncing;
     QSet<QUuid> m_queuedSync;
-    QHash<QUuid, QString> m_syncErrors;
+    QHash<QUuid, QHash<SyncStage, QString>> m_syncErrors;
+    void setSyncError(const QUuid &, SyncStage, const QString &);
     void receiveSync(const VodEvent &);
     bool reconcileCategories(const CategorySnapshot &);
     void finishSync(const QUuid &);

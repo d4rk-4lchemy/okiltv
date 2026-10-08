@@ -17,10 +17,12 @@ exclusive overlays, not routes to replacement playback pages.
 | [VodLibraryPage](../qt/qml/screens/VodLibraryPage.qml) | Shared full-window movie/series library and details; VodMoviesPage is a compatibility wrapper |
 
 Use [Theme.js](../qt/qml/theme/Theme.js) for colors, dimensions, typography and
-animation tokens. All new overlays use the shared black/grey `overlayBackground`,
+animation tokens. New overlays use the shared black/grey `overlayBackground`,
 `overlaySidebar`, `overlaySurface*`, `overlayBorder` and `overlayText*` palette.
 Large backgrounds, cards and controls remain neutral; color belongs to small
-selection accents, status indicators and semantic badges. VOD library buttons, navigation and selectors use neutral grey interaction states,
+selection accents, status indicators and semantic badges. Compact Live EPG search
+is the explicit exception: its field, results, close button and actions share the
+Live rail/channel-search palette. VOD library buttons, navigation and selectors use neutral grey interaction states,
 including keyboard focus. The primary movie Play/Resume button is the explicit
 exception: blue background, play icon and Play or Resume · HH:MM text. Other movie
 detail actions use icon buttons with descriptive tooltips. Watched/unwatched,
@@ -85,7 +87,9 @@ retain native system move, double-click maximization and Windows Snap.
 otherwise a movie selects Movies, an episode selects Series and Live/idle selects
 Live TV. Clicking an already open library is idempotent; clicking its segment
 during playback opens that library. V/B retain toggle behavior and independent
-library browsing state. Settings, modal/download interactions, library/title-bar
+library browsing state. Opening Settings hides the switch with its normal fade/slide
+and releases its local content inset; closing Settings restores it with playback chrome.
+Modal/download interactions, library/title-bar
 transitions and pending Live handoffs disable navigation. Library errors and
 source opt-outs retain their existing presentation without enabling VOD.
 
@@ -107,6 +111,12 @@ position, pause state and refill policy. GO LIVE remains a separate transport
 action. Catch-up returns to direct Live through its existing transport; an
 engine-bound catch-up recording prevents that switch.
 
+VOD library refresh errors identify the failed movie/series stage. They remain in
+an inline banner while a readable saved catalogue, including an empty/search result,
+keeps its normal presentation. Initial read failure displays the actual reason;
+transient database contention retries in the background before becoming a visible
+error. Movies never displays an error belonging only to Series, and vice versa.
+
 The standalone switch follows revealed playback chrome in every window mode,
 using a transparent 50 px control area below the windowed title bar or at the
 fullscreen top edge. `Main.topBarReservedHeight` is zero in fullscreen: Live/VOD
@@ -119,9 +129,10 @@ after that close and the VOD stop/progress barrier. The switch remains visible
 through both animations and the handoff, with navigation disabled until settled.
 `navigationTopInset` keeps the library toolbar below it while the category
 sidebar remains full height. Guide, its collapse control and centered numeric/
-multiview HUDs move down locally;
-Settings content and narrow playback controls crossing the centered switch receive
-a local content inset without moving panel backgrounds.
+multiview HUDs move down locally.
+Narrow playback controls crossing the centered switch receive a local content
+inset without moving panel backgrounds. Settings does not reserve switch clearance
+once navigation finishes hiding.
 `mediaNavigationHeight`/`mediaNavigationWidth` describe this control area separately
 from the title-bar inset. Disabled segments consume clicks so underlying overlays
 remain open. Hover/focus
@@ -153,7 +164,8 @@ ownership. Modified Tab is not plain Tab; `Ctrl+Tab` is unbound. Do not implemen
 | `F` | Fullscreen, or favourite toggle in left-pane keyboard channel navigation |
 | `F1` / `F2` / `F3` | Active audio picker / subtitle picker / diagnostic bubble |
 | `F6` | Always-on-top toggle |
-| `Tab`, `Ctrl+F` | Live search; movie overlay uses `Ctrl+F` for its own search |
+| `Tab` | Live channel search; cycle All → Now → Upcoming → Past → All inside EPG search |
+| `Ctrl+F` | Exclusive Live EPG search; VOD keeps its own search context |
 | `Ctrl+S`, `Ctrl+G` | Live source/group picker |
 | `Ctrl+Up` | Guide outside grid selection; grid tile selection when applicable |
 | `Ctrl+P`, `Ctrl+Shift+P` | PiP toggle / swap |
@@ -244,6 +256,121 @@ scrollbars stay visible while their options overflow. The Continue watching
 shelf's horizontal scrollbar follows the same overflow rule.
 Series details keep the outer viewport non-scrolling and use
 separate overflow-dependent scrollbars for information and episodes.
+
+## EPG search interaction
+
+`EpgSearchOverlay.qml` is an explicitly injected modal `Popup.Item` in the
+window's overlay layer. The `epg-search` shell state owns input and suppresses
+ordinary playback chrome, title bar, navigation, HUDs, bubbles and reveal timers.
+Video/audio, pause, timeshift, PiP/grid layout and focused tile remain unchanged.
+Protected dialogs, pickers, Guide, Settings and VOD keep their existing context.
+The overlay does not dim the video or auto-hide. Clicks outside its controls are
+consumed without closing it or reaching playback.
+
+Opening shows only the query field with the `Search...` placeholder and a separate
+40 × 40 px close button, 12 px to its right with their top edges aligned.
+The field is horizontally centered near one
+quarter of the window height, 60 px high and at most 720 px wide. Its position
+stays fixed when results appear or the query is cleared; small windows clamp its
+geometry to keep both controls on screen. Query typography is twice the shared
+PlaybackSearchHeader font (28 versus 14 px), with the Live channel field's padding,
+background and four-pixel corner radius. The query field has no border, including
+while focused.
+
+A nonempty query shows a compact status/results surface below the field. After a
+valid query, compact All, Now, Upcoming and Past tabs appear above results.
+They have no persistent button fill or rounded outline; the active tab has a
+small accent underline, with subtle hover/pressed fills and visible keyboard focus.
+Clearing the query hides that entire surface, even though the controller retains
+its session-level expanded flag. Query, list, close and action backgrounds share
+the Live rail palette and follow the global UI transparency setting exactly once;
+text and icons remain opaque. There is no outer window/card around the query.
+
+The virtualized, reusable list has a maximum 320 px viewport (five 64 px
+collapsed rows), further limited by the remaining window height. Tiny-window rows
+are 56 px high. Available channel logos occupy a 40 px image area (32 px in tiny
+windows), with a stable text inset while loading. Cached paths are published as
+proper file URLs, including paths containing spaces or URL punctuation. Channels
+without a logo have no placeholder. Two lines on the right contain the title and
+channel/local date-time; the airing status sits at the right of the second line
+outside tiny layouts. Subtitle/episode information appears in selected details.
+Matching words keep the core's escaped emphasis spans, including during title scrolling.
+Overflowing titles use the shared VOD marquee: after 1000 ms of keyboard
+indication or pointer hover, they scroll continuously at 35 logical px/s with a
+32 px gap. The latest input chooses one target; when the pointer does not
+indicate a result, the selected row is the fallback, including the automatically
+selected first result without further input. Leaving the viewport, stale
+results or blocked input resets scrolling. Titles are clipped to their text
+field, and result widths reserve at least 12 px or the scrollbar width, whichever
+is greater, so text never paints into the scrollbar area. Hover does not select; click selects and double
+click invokes the primary action. A viewport mouse handler accepts row-header
+gestures and retains the first header identity through the system double-click
+interval, so expansion cannot redirect the second click into another control.
+Its containment mask leaves descriptions, actions, scrollbars and wheel handling
+with their own controls; invalidated results or closing clear the gesture. If the
+newly selected airing is still loading details, double-click activation waits for
+that same airing to become ready. Query/filter/selection changes, result
+invalidation, protected interactions and closing cancel the pending intent; the
+controller revalidates the action normally before playback.
+Result headers retain a 3 px left stripe, inset 12 px from the top with a
+1 px radius and height equal to the header height minus 24 px. Upcoming programmes
+use blue `Theme.accent`; currently airing programmes use green `Theme.success`;
+ended programmes use orange `Theme.epgSearchPast` (`#f0a050`). Selection and hover
+preserve these airing colors; selection retains its Live row fill and inline
+details. Stripes remain opaque at every UI transparency setting.
+The model refreshes their current-time state with status
+labels every 30 seconds without regrouping results.
+A newly selected row uses the Live selection fill and
+automatically expands inline with its description and existing Live/archive/DVR/
+download actions. Clicking its header again collapses the details; clicking a
+collapsed selected header reopens them. Collapse waits for the system double-click
+interval, so double-click invokes the primary action once without collapsing the
+row. Only the selected expanded row instantiates the details component. Collapse
+preserves selection/playback and survives detail updates and page appends; a new
+selection/query or reopening search restores expansion.
+Pending collapse is cancelled on invalidation, protected interaction or closing.
+If a hidden detail control held focus, collapse transfers it to the results list.
+There is no side-by-side or replacement details screen.
+
+Selected details align with the result text, below the two-line header. Descriptions
+scroll independently within at most 48 px (40 px in tiny windows), with 12 px text.
+For past airings, Play from beginning is shown only when a valid saved resume
+point exists; otherwise the primary Play already starts at zero. Current airings
+retain their available restart action. Results without a Live/catch-up primary
+action show no primary button; their inline description remains available through
+selection/header expansion, without a redundant Show details action. Actions are 28 × 28 px icon buttons with
+18 px images: `play.svg` for Play/Resume/Watch live, `start-from-beginning.svg` for restart, `dvr.svg` for recording/cancel, and
+`download.svg` for Download. Original action labels remain the accessible names
+and hover tooltips (400 ms delay). Unscheduled past airings hide the DVR button;
+an existing scheduled job retains Cancel recording. Icons wrap on narrow windows. Keyboard
+focus reveals each action through the outer list, including in 426 × 240 windows. Selection navigation reveals the row header,
+so an expanded card taller than the viewport stays navigable. Asynchronous detail
+updates and page appends do not deliberately reposition the list. There is no
+result-count summary. More results retain the list's Load more action and automatic
+pagination. Errors retain a footer with Retry, including failed page requests with
+usable current rows.
+
+Ctrl+F refocuses/selects the query. Up/Down in the query or results move selection
+without wrapping or transferring editor focus; Enter/Return invokes the current
+primary action. Ctrl+Enter/Return invokes Play from beginning when available,
+otherwise the same primary action as Enter, from any popup control. Stale results,
+pending details and protected interactions block it; IME confirmation remains
+with the editor. Buttons retain
+standard Enter/Space handling, and description arrows scroll their own viewport.
+Tab cycles All → Now → Upcoming → Past → All from any popup control and focuses
+the query without changing its text, cursor or selection. It also works before
+typing a query and while results load; the existing request fences prevent stale
+actions. Held-key repeats do not cycle. Shift+Tab cycles focus backwards through
+visible enabled controls inside the popup; Ctrl+Tab remains unbound. Protected
+interactions and IME composition block filter cycling. Ctrl+R toggles
+programme DVR only; Ctrl+D requests the existing validated download file dialog.
+Other playback shortcuts are blocked even when focus leaves the editor. A single
+Escape closes search while preserving fullscreen. Closing restores video focus
+and hides chrome, preserving the channel query, category and favourites.
+
+Stable automation names use `ui.epgSearch.*`; the UI bridge exposes search state,
+result identities and the active focus object. Component checks do not replace
+the full-window shortcut and modal-context scenario.
 
 ## Series interaction
 
@@ -358,6 +485,10 @@ an explicit parent and anchor to its viewport rather than mixing conflicting
 attached geometry and anchors.
 
 ## Settings and formatting
+
+Ordinary VOD Play/Resume delegates resume selection to the backend, including
+while progress is loading. Its caption never turns an unknown zero into an
+explicit restart; Play from beginning is the separate restart action.
 
 Settings edits are drafts. Async source work preserves unsaved drafts. Save applies
 changes; discard/reload restores persisted state. UI transparency previews live,

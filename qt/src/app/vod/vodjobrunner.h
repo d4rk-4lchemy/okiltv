@@ -28,7 +28,11 @@ public:
     bool drain(int deadlineMs);
     [[nodiscard]] int pending() const;
 private:
-    struct Job { QUuid profile; RequestContext request; Work work; Completion completion; };
+    struct Job {
+        QUuid profile; RequestContext request; Work work; Completion completion;
+        QDeadlineTimer readyAt{0};
+        std::optional<QDeadlineTimer> busyDeadline;
+    };
     void pump();
     int m_limit;
     int m_perSource;

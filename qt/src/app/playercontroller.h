@@ -8,6 +8,7 @@
 #include "playback/catchupplaybacksession.h"
 
 #include <QObject>
+#include <QFutureSynchronizer>
 #include <QSet>
 #include <QElapsedTimer>
 #include <QList>
@@ -145,6 +146,7 @@ public:
     Q_INVOKABLE bool takeScreenshot(const QString &outputDir, const QString &channelName, const QString &programmeName);
     Q_INVOKABLE bool startRecording(const QString &outputDir, const QString &channelName, const QString &programmeName);
     Q_INVOKABLE void stopRecording();
+    quint64 playbackGeneration() const { return m_playbackGeneration; }
     bool isRecording() const;
     bool isRemuxing() const;
 
@@ -451,6 +453,7 @@ private:
     bool m_liveBufferAtLiveEdge { true };
     bool m_isRecording { false };
     bool m_isRemuxing { false };
+    QFutureSynchronizer<bool> m_remuxValidationTasks;
     bool m_remuxToMkv { true };
     QString m_remuxTempPath;
     QString m_remuxFinalPath;
