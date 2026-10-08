@@ -8,6 +8,8 @@
 #include <QMutexLocker>
 #include <QSqlDatabase>
 #include <QSqlQuery>
+#include <QSqlError>
+#include <QDebug>
 #include <QSet>
 #include <QVariant>
 #include <QTimeZone>
@@ -75,18 +77,29 @@ struct Connection {
         // removed even on an open failure.
     }
     ~Connection() { if (inTransaction) db.rollback(); db.close(); db = {}; QSqlDatabase::removeDatabase(name); }
+    [[noreturn]] void fail(const QSqlError &error, QStringView action) const
+    {
+        bool validCode = false;
+        const auto code = error.nativeErrorCode().toInt(&validCode);
+        // Driver text and SQL bindings may contain protected data. Log only
+        // the numeric SQLite code, action and opaque operation identity.
+        qWarning().noquote() << QStringLiteral("VOD SQL failure: operation=%1 action=%2 code=%3")
+            .arg(uuid(context.operationId), action.toString(), validCode ? QString::number(code) : QStringLiteral("unknown"));
+        const bool busy = validCode && ((code & 0xff) == 5 || (code & 0xff) == 6);
+        throw Error{busy ? ErrorCode::StorageBusy : ErrorCode::StorageUnavailable, context.operationId, busy};
+    }
     QSqlQuery sql(const QString &statement, const QVariantList &values = {})
     {
         QSqlQuery query(db);
-        if (!query.prepare(statement)) throw Error{ErrorCode::StorageUnavailable, context.operationId};
+        if (!query.prepare(statement)) fail(query.lastError(), u"prepare");
         for (const auto &value : values) query.addBindValue(value);
-        if (!query.exec()) throw Error{ErrorCode::StorageUnavailable, context.operationId};
+        if (!query.exec()) fail(query.lastError(), u"execute");
         return query;
     }
     void open()
     {
         if (const auto error = context.interruption()) throw *error;
-        if (!db.open()) throw Error{ErrorCode::StorageUnavailable, context.operationId};
+        if (!db.open()) fail(db.lastError(), u"open");
         sql(QStringLiteral("PRAGMA foreign_keys=ON"));
     }
     void begin(bool write = true) { sql(write ? QStringLiteral("BEGIN IMMEDIATE") : QStringLiteral("BEGIN")); inTransaction = true; }
@@ -312,30 +325,50 @@ Result<SourceContext> SqliteVodStore::snapshot(const QUuid &id)
             throw Error{ErrorCode::InvalidResponse, context.operationId};
         // Disabled sources remain readable for current-session progress/recovery.
         // Network and new playback admission belong to VodController.
-        Connection connection(m_path, context); connection.open(); connection.begin();
-        // Serialize publication with invalidate(), including the SQL commit. A
-        // loader that started before a source mutation must never restore it.
-        QMutexLocker lock(&m_stateMutex);
-        if (m_epochs.value(id) != epoch) throw Error{ErrorCode::Cancelled, context.operationId};
+        Connection connection(m_path, context); connection.open(); connection.begin(false);
         const auto configuredRevision = source.revision.credentialRevision;
-        auto query = connection.sql(QStringLiteral("SELECT namespace,revision,removed,configuration_revision,mutation_pending FROM vod_source_state WHERE profile=?"), {uuid(id)});
-        if (query.next()) {
+        const auto readState = [&]() {
+            auto query = connection.sql(QStringLiteral("SELECT namespace,revision,removed,configuration_revision,mutation_pending FROM vod_source_state WHERE profile=?"), {uuid(id)});
+            if (!query.next()) {
+                source.revision.catalogNamespace = QUuid::createUuid();
+                source.revision.credentialRevision = configuredRevision;
+                return false;
+            }
             if (query.value(2).toInt() != 0 || query.value(4).toInt() != 0
                 || query.value(3).toULongLong() > configuredRevision)
                 throw Error{ErrorCode::Cancelled, context.operationId};
             source.revision.catalogNamespace = QUuid(query.value(0).toString());
             const auto storedRevision = query.value(1).toULongLong();
-            if (query.value(3).toULongLong() == configuredRevision) source.revision.credentialRevision = storedRevision;
-            else {
-                if (storedRevision >= quint64(std::numeric_limits<qint64>::max()))
-                    throw Error{ErrorCode::StorageUnavailable, context.operationId};
-                source.revision.credentialRevision = std::max(configuredRevision, storedRevision + 1);
+            if (query.value(3).toULongLong() == configuredRevision) {
+                source.revision.credentialRevision = storedRevision;
+                return true;
             }
-        } else source.revision.catalogNamespace = QUuid::createUuid();
-        query.finish();
-        connection.sql(QStringLiteral("INSERT INTO vod_source_state(profile,namespace,revision,configuration_revision) VALUES(?,?,?,?) "
-            "ON CONFLICT(profile) DO UPDATE SET revision=excluded.revision,configuration_revision=excluded.configuration_revision"),
-            {uuid(id), uuid(source.revision.catalogNamespace), QVariant::fromValue(source.revision.credentialRevision), QVariant::fromValue(configuredRevision)});
+            if (storedRevision >= quint64(std::numeric_limits<qint64>::max()))
+                throw Error{ErrorCode::StorageUnavailable, context.operationId};
+            source.revision.credentialRevision = std::max(configuredRevision, storedRevision + 1);
+            return false;
+        };
+        const bool unchanged = readState();
+        // Release shared SQL locks before taking the state mutex: a writer
+        // holding that mutex may be waiting for readers to finish its commit.
+        connection.commit();
+        if (unchanged) {
+            QMutexLocker lock(&m_stateMutex);
+            if (m_epochs.value(id) != epoch) throw Error{ErrorCode::Cancelled, context.operationId};
+            m_current[id] = source.revision;
+            return source;
+        }
+        // Re-read after acquiring a write reservation: another snapshot may
+        // have created or reconciled this source while we waited. Serialize
+        // publication with invalidate(), including this write transaction.
+        connection.begin();
+        QMutexLocker lock(&m_stateMutex);
+        if (m_epochs.value(id) != epoch) throw Error{ErrorCode::Cancelled, context.operationId};
+        if (!readState()) {
+            connection.sql(QStringLiteral("INSERT INTO vod_source_state(profile,namespace,revision,configuration_revision) VALUES(?,?,?,?) "
+                "ON CONFLICT(profile) DO UPDATE SET revision=excluded.revision,configuration_revision=excluded.configuration_revision"),
+                {uuid(id), uuid(source.revision.catalogNamespace), QVariant::fromValue(source.revision.credentialRevision), QVariant::fromValue(configuredRevision)});
+        }
         connection.commit();
         m_current[id] = source.revision;
         return source;

@@ -260,7 +260,7 @@ if (NOT CMAKE_CROSSCOMPILING)
         qt_add_resources(OKILTVQtEpgSearchQmlTests epg_search_test_icons
             PREFIX "/" BASE "${CMAKE_CURRENT_SOURCE_DIR}/.."
             FILES ../resources/icons/play.svg ../resources/icons/start-from-beginning.svg
-                ../resources/icons/dvr.svg ../resources/icons/movie-info.svg ../resources/icons/download.svg)
+                ../resources/icons/dvr.svg ../resources/icons/download.svg)
         set_tests_properties(OKILTVQtEpgSearchOverlayTests PROPERTIES LABELS "qml;epg-search" TIMEOUT 60
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
         add_test(NAME OKILTVQtMediaModeSwitchTests

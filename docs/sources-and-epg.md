@@ -157,6 +157,12 @@ results on the UI thread. Query/filter/context edits immediately invalidate old
 actions. Request, source, channel revision and EPG generation checks reject stale
 responses; closing cancels work and shutdown joins the worker. Details are loaded
 only for the selected result using the existing generation-checked detail API.
+The model exposes `broadcastState` (`upcoming`, `now`, `past`) independently
+of the frozen `sectionKey`. It shares a sampled UTC clock with `statusLabel`,
+refreshed by the existing 30-second controller timer; start is inclusive and stop
+is exclusive for `now`. Current-time changes update labels and left stripe colors
+without resetting, regrouping or reordering the list. `refreshLabels` defaults to
+the current UTC clock and accepts an explicit sample for deterministic tests.
 The model publishes cached station logos as `file:` URLs via `QUrl::fromLocalFile`,
 preserving spaces and URL punctuation; uncached logos retain their source URL.
 
@@ -209,7 +215,9 @@ Schedule recording control; existing scheduled jobs retain their cancellation. C
 their available catch-up restart. Ctrl+Enter routes through
 `EpgSearchController::activateSelectedFromBeginningOrDefault`, which revalidates
 the current restart availability before choosing restart or the primary action;
-a stale/expired resume point cannot suppress the fallback. Future/unavailable airings open details. Explicit Live activation
+a stale/expired resume point cannot suppress the fallback. Future/unavailable airings have an empty `actionKind`/`primaryLabel` and
+`primaryEnabled=false`; no redundant details button or activation signal exists.
+Their description is available through normal selected-row expansion. Explicit Live activation
 resolves source/channel identity without changing rail filters and follows the
 focused multiview destination. Archive playback is visibly unavailable in grid
 multiview because the legacy archive path would dismantle the grid; PiP retains

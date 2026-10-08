@@ -89,7 +89,6 @@ public:
 signals:
     void stateChanged();
     void closeRequested();
-    void showDetailsRequested();
     void downloadRequested(const QVariantMap& channel, const QVariantMap& program);
 
 private:

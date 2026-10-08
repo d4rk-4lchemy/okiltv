@@ -106,6 +106,11 @@ late callbacks and writes into destroyed services.
 - VOD library models wait for runtime storage readiness for up to 15 seconds,
   retrying initialization asynchronously during that window. Closing/source changes
   cancel the wait; successful reconciliation resumes catalogue requests.
+- Ordinary VOD source snapshots use read transactions for unchanged revisions.
+  SQLite BUSY/LOCKED jobs retry asynchronously within their original deadline and
+  a 15-second retry window, releasing worker slots between attempts. Source/operation
+  cancellation and shutdown invalidate queued retries. Movie/Series refresh errors
+  are scoped by source and stage; cached catalogue availability is independent.
 - Source removal commits its summary/tombstone atomically before cleanup; startup
   resumes pending cleanup before validating details. Removing the loaded source
   clears Live/EPG contexts. A profile refresh may restore playback only if the

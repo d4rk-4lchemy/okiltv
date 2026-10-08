@@ -16,7 +16,6 @@ FocusScope {
     implicitHeight: column.implicitHeight
     signal tabRequested(bool backwards)
     signal controlFocused(var item)
-    function focusDetails() { descriptionView.forceActiveFocus() }
     function handleTab(event) {
         if ((event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab)
             && (event.modifiers === Qt.NoModifier || event.modifiers === Qt.ShiftModifier)) {
@@ -128,9 +127,9 @@ FocusScope {
             Action {
                 id: primaryButton
                 objectName: "ui.epgSearch.primary"
-                text: String(root.details.primaryLabel || qsTr("Show details"))
-                iconSource: root.details.actionKind === "live" || root.details.actionKind === "catchup"
-                    ? "qrc:/resources/icons/play.svg" : "qrc:/resources/icons/movie-info.svg"
+                text: String(root.details.primaryLabel || "")
+                iconSource: "qrc:/resources/icons/play.svg"
+                visible: root.details.actionKind === "live" || root.details.actionKind === "catchup"
                 enabled: !root.inputBlocked && root.controller.resultsCurrent && Boolean(root.details.primaryEnabled)
                 onClicked: root.controller.activateSelected()
             }

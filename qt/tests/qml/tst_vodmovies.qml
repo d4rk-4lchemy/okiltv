@@ -42,6 +42,7 @@ TestCase {
         property bool probePlayBlocked: false
         property bool hasMore: false
         property string errorText: ""
+        property bool catalogLoaded: true
         property var movie: ({})
         property int selectedIndex: -1
         property int playCount: 0
@@ -321,6 +322,16 @@ TestCase {
         backend.busy = false; backend.errorText = "VOD storage unavailable after 15 seconds. Try again."
         tryCompare(spinner, "visible", false); verify(!spinner.running)
     }
+    function test_emptyLibraryDistinguishesRefreshAndReadErrors() {
+        backend.clear(); backend.catalogLoaded = true
+        backend.errorText = "Movies refresh failed: Source unavailable."
+        const message = findChild(page, "ui.vod.emptyLibraryMessage")
+        tryCompare(message, "text", "No movies in this library.")
+        backend.catalogLoaded = false
+        tryCompare(message, "text", backend.errorText)
+        backend.errorText = "VOD database is busy. Try again."
+        tryCompare(message, "text", backend.errorText)
+    }
     function test_seriesDetailsBoundedAndStatusPreservesScroll() {
         backend.series = true
         for (let i = 0; i < 80; ++i) stableEpisodes.append({modelData: {
@@ -457,6 +468,7 @@ TestCase {
         backend.movie = ({}); backend.searchText = ""; backend.busy = false
         backend.probePlayBlocked = false; backend.startingPlayback = false
         backend.errorText = ""; backend.sourceId = "one"; backend.categoryId = ""; backend.selectedIndex = -1; backend.playCount = 0
+        backend.catalogLoaded = true
         page.initialSelectionDone = false; page.initialSelectionPending = false
         page.browseArea = "grid"; page.gridIndex = 0; page.shelfIndex = 0; page.shelfKey = ""; page.shelfOffset = 0
         closed.clear(); page.prepareForOpen(); wait(50)

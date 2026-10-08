@@ -2694,14 +2694,14 @@ QVariantMap AppController::epgSearchActionState(const QVariantMap& channel, cons
         reason = catchup.value(QStringLiteral("reason")).toString();
     const QString kind = live    ? QStringLiteral("live")
         : past && catchupEnabled ? QStringLiteral("catchup")
-                                 : QStringLiteral("details");
+                                 : QString();
     const QString label = live ? tr("Watch live")
         : kind == QStringLiteral("catchup")
         ? (catchup.value(QStringLiteral("resumeAvailable")).toBool() ? tr("Resume") : tr("Play"))
-        : tr("Show details");
+        : QString();
     return { { QStringLiteral("actionKind"), kind }, { QStringLiteral("primaryLabel"), label },
         { QStringLiteral("primaryEnabled"),
-            valid && (kind == QStringLiteral("details") || !protectedRecording) },
+            valid && !kind.isEmpty() && !protectedRecording },
         { QStringLiteral("fromBeginningEnabled"),
             catchupEnabled && (!past || catchup.value(QStringLiteral("resumeAvailable")).toBool()) },
         { QStringLiteral("recordingLabel"), scheduled ? tr("Cancel recording") : tr("Schedule recording") },

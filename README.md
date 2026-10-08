@@ -17,6 +17,7 @@
 - **Xtream + M3U Sources** - Add Xtream Codes providers, M3U URLs, or local M3U files.
 - **Overlay-First UI** - Live video remains the base layer; Guide and Settings open as overlays.
 - **Guide Timeline Navigation** - Move across channels and time in a continuous EPG grid.
+- **EPG Search** - Search your EPG data for anything.
 - **Source/Group Management** - Per-profile group hide/show, ordering, and filtering.
 - **Favourites Model** - Runtime favourites (watch-time based) plus manual pinning.
 - **Catch-up** - Supports XC provider timeshift to watch past programme.
@@ -25,11 +26,11 @@
 - **PiP + Multiview** - Keep multiple live sessions and switch/swap quickly.
 - **Keyboard-First Controls** - Full shortcut workflow for playback and navigation.
 
-## Screenshots (as of version 0.5.4)
+## Screenshots (as of version 0.6.1)
 
 ![Live TV main screen](docs/screenshots/01-live-tv-main.jpg)
 
-![Guide overlay](docs/screenshots/02-guide-overlay.jpg)
+![Guide overlay](docs/screenshots/02-guide-overlay.png)
 
 ![Settings overlay](docs/screenshots/03-settings-overlay.jpg)
 
@@ -38,6 +39,10 @@
 ![Picture-in-Picture mode](docs/screenshots/05-pip-mode.jpg)
 
 ![Multiview grid](docs/screenshots/06-multiview-grid.jpg)
+
+![VOD library](docs/screenshots/07-vod-library.jpg)
+
+![EPG search](docs/screenshots/08-epg-search.jpg)
 
 ## Installation
 
@@ -152,26 +157,32 @@ Test binaries:
 
 ## Keyboard Shortcuts
 
+Shortcuts depend on the active screen and keyboard focus. Search fields keep normal
+text editing; Guide, Settings, libraries, pickers and dialogs own their input.
+`Enter` below includes both Return and numeric-keypad Enter. `Ctrl+Tab` is unbound.
+
 ### Global / Live TV
 
 | Key | Action |
 |-----|--------|
-| `Space` | Play/Pause |
-| `J` / `L` | Seek back/forward 10 seconds when available (timeshift, catch-up or live back-buffer) |
-| `Home` | Jump to buffered live anchor/live edge |
+| `V` / `B` | Toggle Movies / Series; the other key switches the open library |
+| `Space` | Play/Pause the active stream (Live, catch-up, focused multiview tile or VOD) |
+| `J` / `L` | Seek back/forward 10 seconds when available (timeshift, catch-up, live back-buffer or VOD) |
+| `Home` | Jump to buffered live anchor/live edge when Live/catch-up transport seeking is available |
 | `F` | Fullscreen (or favourite toggle in left-pane keyboard mode) |
-| `F1` / `F2` | Open audio/subtitle track picker |
+| `F1` / `F2` | Open audio/subtitle track picker for the active stream |
 | `F3` | Toggle live debug bubble |
 | `F6` | Toggle always-on-top |
 | `M` | Mute/Unmute |
 | `,` / `.` | Volume down/up 5% |
 | `Up` / `Down` | Prev/Next channel when overlays are hidden |
 | `Backspace` | Return to previously played channel when overlays are hidden |
-| `0-9` | Direct numeric tune (2s idle commit) |
+| `0-9` | Enter a Live channel number; tune after 2 seconds without input (outside editors, overlays and pickers) |
+| `.` / locale decimal separator | While entering a channel number, enter its fractional part (e.g. `12.1`) |
 | `Ctrl+Up` | Select tile above in grid; otherwise open Guide |
 | `Left` / `Right` | Enter channel/programme pane keyboard navigation |
-| `Tab` | Focus live channel search |
-| `Ctrl+F` | Search programme titles/subtitles across the active source’s local EPG |
+| `Tab` | Focus Live channel search; from that search, focus the Movies / Live TV / Series switch |
+| `Ctrl+F` | Open local EPG title/subtitle search in Live TV; focus movie/series search in VOD |
 | `Ctrl+S` | Open source picker |
 | `Ctrl+G` | Open group picker |
 | `Ctrl+P` | Toggle PiP |
@@ -179,12 +190,15 @@ Test binaries:
 | `Ctrl+O` | Open multiview; close an active grid and its secondary streams, or stop retained background streams |
 | `Ctrl+Arrow` | Select grid tile while holding Ctrl; release Ctrl to confirm |
 | `Ctrl+Enter` | Promote selected multiview tile and close grid, respecting retention |
+| `Enter` | Tune the highlighted Live channel, or activate the programme in right-pane keyboard navigation |
+| `Delete` | Close the focused PiP/grid tile |
 | `Ctrl+D` | Download explicitly selected ended programme in Guide or the right EPG pane |
-| `Ctrl+R` | DVR schedule toggle (programme) or manual recording fallback |
-| `Esc` | Stepwise close search/guide/overlay/fullscreen states |
+| `Ctrl+R` | Toggle DVR for the selected/hovered programme; otherwise toggle manual recording |
+| `Esc` | Cancel grid selection, close a picker/overlay or dismiss playback chrome; exit fullscreen once transient UI is closed (see VOD behavior below) |
 
-Character shortcuts are disabled while editing search. Guide, Settings, pickers and dialogs
-use their own keyboard context. Plain Tab focuses search; Ctrl+Tab is unbound.
+V/B are disabled in text editors, Settings and modal interactions. Opening a library
+pauses active VOD; closing it resumes only the same session paused by the library.
+An existing manual pause is preserved. Live TV playback continues while browsing.
 
 ### Live programme search validation
 
@@ -224,7 +238,23 @@ OKILTV_EPG_SEARCH_SMOKE=preparing bash scripts/ci/run_ui_test.sh ui-tests/tests/
 | `Up` / `Down` | Move channel highlight (wraparound) |
 | `Left` | Open group picker |
 | `Right` | Jump to right pane |
-| `Return` | Tune highlighted channel |
+| `Enter` | Tune highlighted channel and dismiss playback chrome |
+| `F` | Toggle highlighted channel's favourite status |
+
+From the channel search field, Down/Enter focuses the channel list. Tab enters the
+media switch when available; its Left/Right keys choose a segment, Enter/Space
+activates it, and Esc returns focus to playback.
+
+### Source, Group and Track Pickers
+
+| Key | Action |
+|-----|--------|
+| `Down` / `Tab` / `Enter` in source/group search | Focus the first result |
+| `Up` / `Down` | Move the highlighted source, group or track |
+| `Enter` | Confirm the highlighted source, group or track |
+| `Right` in group list | Confirm the group and return to channels/movies/series without starting playback |
+| `Delete` in VOD subtitle picker | Remove the highlighted uploaded subtitle file |
+| `Esc` | Close the picker |
 
 ### Right-Pane Keyboard Navigation
 
@@ -232,7 +262,11 @@ OKILTV_EPG_SEARCH_SMOKE=preparing bash scripts/ci/run_ui_test.sh ui-tests/tests/
 |-----|--------|
 | `Up` / `Down` | Move programme highlight (no wraparound) |
 | `Left` | Jump back to left pane |
-| `Return` | Resume catch-up for a completed programme, or tune the channel for NOW/future |
+| `Enter` | Resume eligible catch-up for a completed programme, or tune the channel for NOW/future |
+| `Ctrl+D` | Download the explicitly selected ended programme, when eligible |
+| `Ctrl+R` | Toggle selected/hovered programme DVR; otherwise toggle manual recording |
+
+Unavailable archives do not fall back to Live TV in this pane.
 
 ### Multiview Selection Mode
 
@@ -242,7 +276,7 @@ OKILTV_EPG_SEARCH_SMOKE=preparing bash scripts/ci/run_ui_test.sh ui-tests/tests/
 | Release `Ctrl` | Commit candidate as active tile and audio owner |
 | `Ctrl+Enter` | Promote the candidate (or active tile) to main view and close the grid; retain other streams only when enabled |
 | `Ctrl+O` | Fully close the grid or stop retained background streams; next press opens a new grid |
-| `Delete` | Close the active tile |
+| `Delete` | Close the focused tile |
 | `Esc` | Cancel without changing active tile or audio |
 
 This gesture is grid-only; PiP tiles remain selectable with the mouse. Ctrl alone does nothing.
@@ -272,12 +306,63 @@ Focus-border contract:
 |-----|--------|
 | Arrow keys | Navigate programme grid |
 | `Space` | Toggle selected programme details |
-| `Return` | Play catch-up for an eligible completed programme; otherwise tune selected channel |
+| `Enter` | Play catch-up for an eligible completed programme; otherwise tune selected channel |
 | `Ctrl+Enter` | Start selected eligible programme in catch-up from the beginning |
 | `Ctrl+D` | Download selected ended programme |
-| `Ctrl+R` | Toggle programme DVR schedule |
+| `Ctrl+R` | Toggle selected/hovered programme DVR; otherwise toggle manual recording |
 | `Ctrl+Down` | Collapse Guide to video-only |
 | `Esc` | Close Guide + transient overlay state |
+
+### Live EPG Search
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+F` | Focus the query field |
+| `Up` / `Down` in query/results | Select the previous/next result |
+| `Tab` | Cycle time filters: All → Now → Upcoming → Past → All |
+| `Shift+Tab` | Move focus backwards between search controls and available result actions |
+| `Enter` in query/results | Activate the selected result's available Live/catch-up action |
+| `Ctrl+Enter` | Play eligible catch-up from the beginning; otherwise use the available primary playback action |
+| `Ctrl+R` | Toggle DVR for the selected programme |
+| `Ctrl+D` | Download the selected ended programme, when eligible |
+| `Esc` | Close EPG search and return focus to playback |
+
+### Movies / Series Library
+
+| Key | Action |
+|-----|--------|
+| `V` / `B` | Close the matching library, or switch to Movies / Series |
+| `Ctrl+F` | Focus title search while browsing posters |
+| Arrow keys in poster grid | Move poster selection |
+| `Home` / `End` in poster grid | Select the first/last poster in the loaded grid |
+| `Left` / `Right` on Continue watching shelf | Select the previous/next poster without wrapping |
+| `Down` on shelf / `Up` in first grid row | Move between the shelf and poster grid |
+| `Enter` on poster | Open details |
+| `Up` / `Down` in series details episode list | Select the previous/next episode without wrapping |
+| `Left` / `Right` in series details episode list | Change season without wrapping and select its first episode |
+| `Enter` in episode list | Play/resume the selected episode when available |
+| `Tab` / `Shift+Tab` | Move focus between controls |
+| `Delete` in subtitle selector | Remove the selected uploaded subtitle file |
+| `Esc` | Close an open selector, return from details to posters, then close the library |
+
+### VOD Playback
+
+| Key | Action |
+|-----|--------|
+| `Space`, `J` / `L`, `F`, `M`, `,` / `.` | Play/pause, seek ±10 seconds, fullscreen, mute and volume ±5% |
+| `F1` / `F2` / `F3` / `F6` | Audio picker, subtitle picker, debug bubble and always-on-top |
+| `Tab` / `Ctrl+F` | Focus movie/series search; Tab from search enters the media switch when available |
+| `Down` / `Enter` in search | Focus the movie/series list |
+| `Left` | Focus the movie/series list; another Left from that list opens its groups |
+| `Right` | Show movie information or focus the series episode list |
+| `Up` / `Down` in list | Select a movie/series or episode without starting playback |
+| `Enter` in list | Play/resume the selected movie/series or episode |
+| `Esc` | Close an open season selector or track picker, then dismiss visible chrome; with chrome hidden, stop/checkpoint VOD and return to its library/details |
+| `Backspace` with chrome hidden | Stop/checkpoint VOD and return to the movie library or owning series details |
+
+Search Backspace keeps normal text editing. In the playback episode panel, Left
+returns to the series list; change seasons with its selector. Live numeric tuning,
+Guide, recording and multiview shortcuts do not control VOD playback.
 
 </details>
 

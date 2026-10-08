@@ -48,6 +48,40 @@ App::EpgSearchController::Actions actions(int* activated)
 class EpgSearchModelTests : public QObject {
     Q_OBJECT
 private slots:
+    void broadcastStateUsesRefreshedClockWithoutRegrouping()
+    {
+        App::EpgSearchModel model;
+        const auto start = QDateTime::fromString(QStringLiteral("2026-10-07T12:00:00Z"), Qt::ISODate);
+        auto result = row(QStringLiteral("airing"));
+        result.program.start = start;
+        result.program.stop = start.addSecs(3600);
+        result.sectionKey = QStringLiteral("upcoming");
+        model.replace({ result });
+        QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
+        QSignalSpy reset(&model, &QAbstractItemModel::modelReset);
+        QCOMPARE(model.roleNames().value(App::EpgSearchModel::BroadcastStateRole), QByteArray("broadcastState"));
+        const QList<QDateTime> times { start.addMSecs(-1), start, result.program.stop.addMSecs(-1), result.program.stop };
+        const QStringList states { QStringLiteral("upcoming"), QStringLiteral("now"), QStringLiteral("now"), QStringLiteral("past") };
+        for (int i = 0; i < times.size(); ++i) {
+            model.refreshLabels(times.at(i));
+            const auto index = model.index(0);
+            QCOMPARE(model.data(index, App::EpgSearchModel::BroadcastStateRole).toString(), states.at(i));
+            const auto label = model.data(index, App::EpgSearchModel::StatusLabelRole).toString();
+            if (states.at(i) == QStringLiteral("upcoming"))
+                QCOMPARE(label, QStringLiteral("Upcoming"));
+            else if (states.at(i) == QStringLiteral("past"))
+                QCOMPARE(label, QStringLiteral("Past broadcast"));
+            else
+                QVERIFY(label.startsWith(QStringLiteral("On now")));
+            QCOMPARE(model.data(index, App::EpgSearchModel::SectionKeyRole).toString(), result.sectionKey);
+            QCOMPARE(model.indexOfKey(result.resultKey), 0);
+            const auto roles = qvariant_cast<QList<int>>(changed.last().at(2));
+            QVERIFY(roles.contains(App::EpgSearchModel::BroadcastStateRole));
+            QVERIFY(roles.contains(App::EpgSearchModel::StatusLabelRole));
+        }
+        QCOMPARE(changed.count(), static_cast<int>(times.size()));
+        QCOMPARE(reset.count(), 0);
+    }
     void channelLogosUseLocalFileUrls()
     {
         App::EpgSearchModel model;

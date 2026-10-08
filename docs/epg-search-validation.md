@@ -9,15 +9,17 @@ storage and keyrings. No provider accounts or repository secrets are used.
 ## Implementation under test
 
 Live `Ctrl+F` opens a modal programme search over the current video surface.
-The compact UI opens with only a fixed-position 28 px query field and a diagonal
-close button. The query field is borderless, including while focused. It does not
+The compact UI opens with only a fixed-position 28 px query field with `Search...`
+and a close button aligned with the field's top edge, 12 px to its right.
+All, Now, Upcoming and Past use tabs with an active underline. There is no
+result-count summary; pagination and error/Retry controls remain available.
+The query field is borderless, including while focused. It does not
 dim the video. Live rail chrome and global transparency
 apply to the field/results/actions; clearing hides filters, results and details.
 The selected result expands inline; descriptions are bounded and actions wrap.
 Actions use 28 × 28 px icon buttons with 18 px SVG images and the original labels
 in accessible names and hover tooltips (400 ms delay). Play/Watch live/Resume use
-`play.svg`, restart uses `start-from-beginning.svg`, DVR uses `dvr.svg`, details
-use `movie-info.svg`, and downloads use `download.svg`. Unscheduled past airings
+`play.svg`, restart uses `start-from-beginning.svg`, DVR uses `dvr.svg`, and downloads use `download.svg`. Unscheduled past airings
 hide Schedule recording; an existing job retains Cancel recording.
 The shared channel field keeps its 14 px typography and original behavior.
 Channel search remains on Tab; Guide, Settings, VOD and protected dialogs keep

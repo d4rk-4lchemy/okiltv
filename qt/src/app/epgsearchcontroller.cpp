@@ -382,10 +382,6 @@ void EpgSearchController::play(bool beginning, bool fallbackToPrimary)
             .value(beginning ? QStringLiteral("fromBeginningEnabled") : QStringLiteral("primaryEnabled"))
             .toBool())
         return;
-    if (!beginning && m_details.value(QStringLiteral("actionKind")).toString() == QStringLiteral("details")) {
-        emit showDetailsRequested();
-        return;
-    }
     m_actionPending = true;
     const auto* r = m_model.row(m_selected);
     const bool accepted = m_actions.play && m_actions.play(toVariantMap(r->channel), m_program, beginning);

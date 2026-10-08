@@ -4,6 +4,7 @@ import QtQuick.Controls
 import QtTest
 import QtQuick.Window
 import "../../qml/components"
+import "../../qml/theme/Theme.js" as Theme
 
 TestCase {
     id: testCase
@@ -47,7 +48,6 @@ TestCase {
         property bool expanded: false
         property bool active: true
         signal stateChanged()
-        signal showDetailsRequested()
         function setQuery(value) { query = value; status = value.trim().length >= 2 ? "ready" : "idle"; if (value.length >= 2) expanded = true; stateChanged() }
         function setTimeFilter(value) { timeFilter = value; stateChanged() }
         function selectIndex(value) { selectedIndex = value; selectedKey = rows.get(value).resultKey; stateChanged() }
@@ -65,8 +65,8 @@ TestCase {
     }
     ListModel {
         id: rows
-        ListElement { resultKey: "test-1"; title: "Planet <Earth> & Ocean"; subTitle: "Oceans"; episodeNum: "S01E01"; channelName: "Fixture"; channelLogo: ""; sectionKey: "now"; timeLabel: "Today, 12:00–13:00"; statusLabel: "Now"; titleHighlights: []; subTitleHighlights: [] }
-        ListElement { resultKey: "test-2"; title: "Planet Earth"; subTitle: "Mountains"; episodeNum: "S01E02"; channelName: "Fixture"; channelLogo: ""; sectionKey: "upcoming"; timeLabel: "Tomorrow, 12:00–13:00"; statusLabel: "Upcoming"; titleHighlights: []; subTitleHighlights: [] }
+        ListElement { resultKey: "test-1"; title: "Planet <Earth> & Ocean"; subTitle: "Oceans"; episodeNum: "S01E01"; channelName: "Fixture"; channelLogo: ""; sectionKey: "now"; broadcastState: "now"; timeLabel: "Today, 12:00–13:00"; statusLabel: "Now"; titleHighlights: []; subTitleHighlights: [] }
+        ListElement { resultKey: "test-2"; title: "Planet Earth"; subTitle: "Mountains"; episodeNum: "S01E02"; channelName: "Fixture"; channelLogo: ""; sectionKey: "upcoming"; broadcastState: "upcoming"; timeLabel: "Tomorrow, 12:00–13:00"; statusLabel: "Upcoming"; titleHighlights: []; subTitleHighlights: [] }
     }
     EpgSearchOverlay {
         id: overlay
@@ -94,7 +94,105 @@ TestCase {
         tryCompare(overlay, "opened", true)
         tryCompare(overlay.queryField, "activeFocus", true)
     }
-    function cleanup() { overlay.close(); tryCompare(overlay, "opened", false); if (rows.count > 2) rows.remove(2, rows.count - 2) }
+    function cleanup() {
+        rows.setProperty(0, "title", "Planet <Earth> & Ocean")
+        rows.setProperty(1, "broadcastState", "upcoming")
+        if (rows.count > 2) rows.remove(2, rows.count - 2)
+        // Flush removals before detaching the model so reused delegates cannot
+        // retain the paginated fixture's roles in the next test.
+        overlay.resultsView.forceLayout()
+        overlay.close()
+        tryCompare(overlay, "opened", false)
+    }
+    function test_resultIndicators_data() {
+        const cases = []
+        for (const compact of [false, true]) {
+            for (const state of ["upcoming", "now", "past"]) {
+                for (const selected of [false, true]) {
+                    cases.push({tag: state + "-" + selected + "-" + compact,
+                        state: state, selected: selected, compact: compact})
+                }
+            }
+        }
+        return cases
+    }
+    function test_resultIndicators(data) {
+        if (data.compact) { testCase.width = 426; testCase.height = 240 }
+        controller.setQuery("planet")
+        rows.setProperty(1, "broadcastState", data.state)
+        controller.selectIndex(data.selected ? 1 : 0)
+        overlay.resultsView.forceLayout()
+        tryVerify(() => overlay.resultsView.itemAtIndex(1) !== null)
+        const row = overlay.resultsView.itemAtIndex(1)
+        verify(row !== null)
+        tryCompare(row, "compact", data.compact)
+        const indicator = findChild(row, "ui.epgSearch.result.test-2.indicator")
+        verify(indicator !== null)
+        const expectedColor = data.state === "upcoming" ? Theme.accent
+            : data.state === "now" ? Theme.success : Theme.epgSearchPast
+        compare(indicator.visible, true)
+        compare(indicator.color, expectedColor)
+        compare(indicator.color.a, 1)
+        compare(indicator.width, 3)
+        compare(indicator.height, row.headerHeight - 24)
+        compare(indicator.y, 12)
+        compare(indicator.radius, 1)
+        // Moving selection preserves the airing color, even for expanded details.
+        controller.selectIndex(data.selected ? 0 : 1)
+        compare(indicator.visible, true)
+        compare(indicator.color, expectedColor)
+    }
+    function test_airingStatusUpdatesKeepSelectionAndScroll() {
+        controller.setQuery("planet")
+        overlay.resultsView.forceLayout()
+        tryVerify(() => overlay.resultsView.itemAtIndex(1) !== null)
+        const row = overlay.resultsView.itemAtIndex(1)
+        const indicator = findChild(row, "ui.epgSearch.result.test-2.indicator")
+        verify(indicator !== null)
+        waitForRendering(overlay.contentItem)
+        const offset = overlay.resultsView.contentY
+        compare(indicator.color, Theme.accent)
+        mouseMove(row, row.width / 2, row.headerHeight / 2)
+        compare(indicator.color, Theme.accent)
+        rows.setProperty(1, "broadcastState", "now")
+        compare(indicator.visible, true)
+        compare(indicator.color, Theme.success)
+        rows.setProperty(1, "broadcastState", "past")
+        compare(indicator.visible, true)
+        compare(indicator.color, Theme.epgSearchPast)
+        overlay.uiTransparency = 0
+        compare(indicator.color.a, 1)
+        compare(controller.selectedKey, "test-1")
+        compare(overlay.resultsView.contentY, offset)
+    }
+    function test_longTitleScrollsWithinItsField() {
+        rows.setProperty(0, "title", "Planet <Earth> & Ocean — " + "A very long programme title ".repeat(12))
+        // Establish pointer input outside the results before publishing them.
+        // The default selection must scroll without a subsequent input event.
+        mouseMove(overlay.queryField, 20, 20)
+        controller.setQuery("Planet")
+        overlay.resultsView.forceLayout()
+        const row = overlay.resultsView.itemAtIndex(0)
+        verify(row !== null)
+        const title = findChild(row, "ui.epgSearch.result.test-1.title")
+        verify(title !== null)
+        verify(title.clip)
+        verify(title.overflowing)
+        verify(title.text.indexOf("&lt;Earth&gt;") >= 0)
+        const right = title.mapToItem(overlay.resultsView, title.width, 0).x
+        verify(right <= row.width)
+        verify(row.width <= overlay.resultsView.width - 12)
+        tryCompare(title, "scrolling", true, 1600)
+        wait(150)
+        verify(title.offset > 0)
+        controller.setQuery("")
+        tryCompare(title, "scrolling", false)
+        controller.setQuery("Planet Earth")
+        tryCompare(title, "scrolling", true, 1600)
+        overlay.inputBlocked = true
+        tryCompare(title, "scrolling", false)
+        compare(title.offset, 0)
+    }
     function test_noDimmerAndOutsideInputIsBlocked() {
         waitForRendering(overlay.contentItem)
         const frame = grabImage(testCase.Window.window.contentItem)
@@ -117,7 +215,7 @@ TestCase {
         const close = findChild(overlay.contentItem, "ui.epgSearch.close")
         const closeOrigin = close.mapToItem(testCase, 0, 0)
         compare(closeOrigin.x, origin.x + field.width + 12)
-        compare(closeOrigin.y + close.height, origin.y - 12)
+        compare(closeOrigin.y, origin.y)
         controller.setQuery("planet")
         waitForRendering(overlay.contentItem)
         compare(field.mapToItem(testCase, 0, 0), origin)
@@ -179,8 +277,7 @@ TestCase {
     function test_iconActions_data() {
         return [{tag: "live", kind: "live", label: "Watch live", icon: "play.svg"},
             {tag: "play", kind: "catchup", label: "Play", icon: "play.svg"},
-            {tag: "resume", kind: "catchup", label: "Resume", icon: "play.svg"},
-            {tag: "details", kind: "details", label: "Show details", icon: "movie-info.svg"}]
+            {tag: "resume", kind: "catchup", label: "Resume", icon: "play.svg"}]
     }
     function test_iconActions(data) {
         controller.setQuery("planet")
@@ -217,6 +314,16 @@ TestCase {
         waitForRendering(overlay.contentItem)
         verify(button.visible)
         compare(button.ToolTip.text, "Cancel recording")
+        controller.selectedDetails = saved
+    }
+    function test_noPrimaryActionKeepsInlineDetails() {
+        const saved = controller.selectedDetails
+        controller.selectedDetails = Object.assign({}, saved, {actionKind: "", primaryLabel: "", primaryEnabled: false})
+        controller.setQuery("planet")
+        waitForRendering(overlay.contentItem)
+        verify(overlay.activeDetailsPane !== null)
+        verify(!findChild(overlay.contentItem, "ui.epgSearch.primary").visible)
+        verify(findChild(overlay.contentItem, "ui.epgSearch.description").visible)
         controller.selectedDetails = saved
     }
     function test_controlEnter_data() {
@@ -318,14 +425,10 @@ TestCase {
         verify(first.detailsPane)
         compare(actions, 1)
     }
-    function test_collapsedDetailsReopenOnSelectionOrRequest() {
+    function test_collapsedDetailsReopenOnSelection() {
         controller.setQuery("planet")
         waitForRendering(overlay.contentItem)
         const first = overlay.resultsView.itemAtIndex(0)
-        mouseClick(first, 20, 20)
-        tryVerify(() => first.detailsPane === null)
-        controller.showDetailsRequested()
-        tryVerify(() => first.detailsPane !== null)
         mouseClick(first, 20, 20)
         tryVerify(() => first.detailsPane === null)
         controller.selectIndex(1)
@@ -439,24 +542,20 @@ TestCase {
     function test_pageAppendAndActionUpdatesPreserveScroll() {
         controller.setQuery("planet")
         for (let i = 0; i < 30; ++i) {
-            rows.append({resultKey: "page-" + i, title: "Planet page " + i, subTitle: "", episodeNum: "", channelName: "Fixture", channelLogo: "", sectionKey: "upcoming", timeLabel: "Tomorrow", statusLabel: "Upcoming", titleHighlights: [], subTitleHighlights: []})
+            rows.append({resultKey: "page-" + i, title: "Planet page " + i, subTitle: "", episodeNum: "", channelName: "Fixture", channelLogo: "", sectionKey: "upcoming", broadcastState: "upcoming", timeLabel: "Tomorrow", statusLabel: "Upcoming", titleHighlights: [], subTitleHighlights: []})
         }
         waitForRendering(overlay.contentItem)
         overlay.resultsView.contentY = 600
         const offset = overlay.resultsView.contentY
         verify(offset > 0)
         controller.hasMore = true
-        const countLabel = findChild(overlay.contentItem, "ui.epgSearch.resultCount")
-        compare(countLabel.text, "Shown 32 results · more available")
         controller.stateChanged()
         compare(overlay.resultsView.contentY, offset)
-        rows.append({resultKey: "next-page", title: "Planet next page", subTitle: "", episodeNum: "", channelName: "Fixture", channelLogo: "", sectionKey: "upcoming", timeLabel: "Tomorrow", statusLabel: "Upcoming", titleHighlights: [], subTitleHighlights: []})
+        rows.append({resultKey: "next-page", title: "Planet next page", subTitle: "", episodeNum: "", channelName: "Fixture", channelLogo: "", sectionKey: "upcoming", broadcastState: "upcoming", timeLabel: "Tomorrow", statusLabel: "Upcoming", titleHighlights: [], subTitleHighlights: []})
         controller.stateChanged()
         compare(overlay.resultsView.contentY, offset)
         compare(controller.selectedKey, "test-1")
-        tryCompare(countLabel, "text", "Shown 33 results · more available")
         controller.hasMore = false
-        compare(countLabel.text, "Shown 33 results")
     }
     function test_normalizedShortQueryHint() {
         controller.setQuery("a b")
@@ -552,7 +651,6 @@ TestCase {
         const closeButton = findChild(overlay.contentItem, "ui.epgSearch.close")
         verify(closeButton.visible)
         verify(overlay.resultsView.height >= 56)
-        controller.showDetailsRequested()
         tryVerify(() => overlay.activeDetailsPane !== null)
         wait(0)
         for (const button of overlay.activeDetailsPane.focusTargets) {

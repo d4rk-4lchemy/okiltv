@@ -55,13 +55,15 @@ QVariant EpgSearchModel::data(const QModelIndex& index, int role) const
         return r->sectionKey;
     case TimeLabelRole:
         return timeLabel(*r);
+    case BroadcastStateRole:
     case StatusLabelRole: {
-        const auto now = QDateTime::currentDateTimeUtc();
-        if (now < r->program.start)
-            return tr("Upcoming");
-        if (now >= r->program.stop)
-            return tr("Past broadcast");
-        return tr("On now · %1 min remaining").arg(std::max<qint64>(1, now.secsTo(r->program.stop) / 60));
+        const bool state = role == BroadcastStateRole;
+        if (m_nowUtc < r->program.start)
+            return state ? QStringLiteral("upcoming") : tr("Upcoming");
+        if (m_nowUtc >= r->program.stop)
+            return state ? QStringLiteral("past") : tr("Past broadcast");
+        return state ? QStringLiteral("now")
+                     : tr("On now · %1 min remaining").arg(std::max<qint64>(1, m_nowUtc.secsTo(r->program.stop) / 60));
     }
     case TitleHighlightsRole:
         return r->titleHighlights;
@@ -80,11 +82,12 @@ QHash<int, QByteArray> EpgSearchModel::roleNames() const
         { SubTitleHighlightsRole, "subTitleHighlights" }, { ProfileIdRole, "profileId" },
         { PlaybackChannelIdRole, "playbackChannelId" }, { EpgChannelKeyRole, "epgChannelKey" },
         { StartUtcMsRole, "startUtcMs" }, { StopUtcMsRole, "stopUtcMs" }, { ChannelRole, "channel" },
-        { ProgramRole, "program" } };
+        { ProgramRole, "program" }, { BroadcastStateRole, "broadcastState" } };
 }
 void EpgSearchModel::replace(QList<Core::EpgSearchRow> rows)
 {
     beginResetModel();
+    m_nowUtc = QDateTime::currentDateTimeUtc();
     m_rows = std::move(rows);
     endResetModel();
 }
@@ -111,10 +114,11 @@ int EpgSearchModel::indexOfKey(const QString& key) const
             return i;
     return -1;
 }
-void EpgSearchModel::refreshLabels()
+void EpgSearchModel::refreshLabels(QDateTime nowUtc)
 {
+    m_nowUtc = std::move(nowUtc);
     if (!m_rows.isEmpty())
-        emit dataChanged(index(0), index(rowCount() - 1), { TimeLabelRole, StatusLabelRole });
+        emit dataChanged(index(0), index(rowCount() - 1), { TimeLabelRole, StatusLabelRole, BroadcastStateRole });
 }
 void EpgSearchModel::setSummaries(bool summaries)
 {

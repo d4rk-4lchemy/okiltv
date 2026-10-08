@@ -173,6 +173,7 @@ Popup {
         tabKey(event)
         if (event.accepted || !root.interactive || event.modifiers !== Qt.NoModifier || query.inputMethodComposing) return
         if (event.key === Qt.Key_Up || event.key === Qt.Key_Down) {
+            resultMarquee.useKeyboard()
             controller.moveSelection(event.key === Qt.Key_Down ? 1 : -1)
             event.accepted = true
         } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
@@ -200,14 +201,6 @@ Popup {
     Shortcut { sequence: "Ctrl+Enter"; autoRepeat: false; enabled: root.interactive && !query.inputMethodComposing; onActivated: root.activateFromBeginningOrDefault() }
     Connections {
         target: root.controller
-        function onShowDetailsRequested() {
-            root.collapsedDetailsKey = ""
-            resultPointer.collapseKey = ""
-            results.positionViewAtIndex(root.controller.selectedIndex, ListView.Beginning)
-            Qt.callLater(function() {
-                if (root.interactive && root.activeDetailsPane) root.activeDetailsPane.focusDetails()
-            })
-        }
         function onStateChanged() {
             if (root.pendingActivationKey) {
                 if (!root.interactive || !root.controller.resultsCurrent
@@ -266,6 +259,47 @@ Popup {
             border.color: Theme.borderStrong
         }
     }
+    component SearchTab: TabButton {
+        id: tab
+        implicitHeight: root.compact ? 24 : 30
+        leftPadding: 14
+        rightPadding: 14
+        font.pixelSize: 13
+        activeFocusOnTab: true
+        Accessible.name: text
+        Keys.onPressed: event => {
+            root.tabKey(event)
+            if (!event.accepted && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                && event.modifiers === Qt.NoModifier && !event.isAutoRepeat) {
+                tab.clicked()
+                event.accepted = true
+            }
+        }
+        contentItem: Text {
+            text: tab.text
+            textFormat: Text.PlainText
+            font: tab.font
+            color: tab.checked || tab.hovered || tab.activeFocus ? Theme.textPrimary : Theme.textMuted
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
+        }
+        background: Item {
+            Rectangle {
+                anchors.fill: parent
+                visible: tab.hovered || tab.down
+                color: Theme.uiBackground(tab.down ? Theme.liveRailPressed : Theme.liveRailHover, root.uiTransparency)
+            }
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: 2
+                visible: tab.checked || tab.activeFocus
+                color: tab.checked ? Theme.accent : Theme.borderStrong
+            }
+        }
+    }
     contentItem: FocusScope {
         id: content
         enabled: !root.inputBlocked
@@ -283,7 +317,7 @@ Popup {
             bottomPadding: 10
             font.pixelSize: Theme.playbackSearchFontSize * 2
             text: root.controller.query
-            placeholderText: qsTr("Enter a programme title…")
+            placeholderText: qsTr("Search...")
             placeholderTextColor: Theme.textMuted
             color: Theme.textPrimary
             selectByMouse: true
@@ -301,7 +335,7 @@ Popup {
             id: closeButton
             objectName: "ui.epgSearch.close"
             x: query.x + query.width + 12
-            y: 0
+            y: query.y
             width: 40
             height: 40
             text: "×"
@@ -317,7 +351,12 @@ Popup {
             width: query.width
             height: Math.max(0, content.height - y)
             implicitHeight: (filters.visible ? filters.implicitHeight + 4 : 0)
-                + (root.currentResults ? Math.min(320, results.contentHeight) : Math.max(64, message.implicitHeight + 16))
+                // Avoid feeding the ListView's viewport-dependent content estimate
+                // back into its own height when the error footer appears/disappears.
+                + (root.currentResults ? Math.min(320, results.count * (root.compact ? 56 : 64)
+                    + (root.activeDetailsPane ? root.activeDetailsPane.implicitHeight + 8 : 0)
+                    + (root.controller.fetchingMore || root.controller.hasMore ? 40 : 0))
+                    : Math.max(64, message.implicitHeight + 16))
                 + (footer.visible ? footer.implicitHeight + 4 : 0)
             visible: root.hasQuery
             color: Theme.uiBackground(Theme.liveRailBackground, root.uiTransparency)
@@ -339,11 +378,11 @@ Popup {
                     flickableDirection: Flickable.HorizontalFlick
                     Row {
                         id: filterRow
-                        spacing: 6
+                        spacing: 0
                         Repeater {
                             id: filterButtons
                             model: [{label: qsTr("All"), key: "all"}, {label: qsTr("Now"), key: "now"}, {label: qsTr("Upcoming"), key: "upcoming"}, {label: qsTr("Past"), key: "past"}]
-                            SearchButton {
+                            SearchTab {
                                 required property var modelData
                                 objectName: "ui.epgSearch.filter." + modelData.key
                                 text: modelData.label
@@ -371,13 +410,23 @@ Popup {
                         activeFocusOnTab: true
                         enabled: root.currentResults && !root.inputBlocked
                         Keys.onPressed: event => root.resultKey(event)
+                        VodMarqueeController {
+                            id: resultMarquee
+                            ready: root.interactive && root.currentResults
+                            keyboardItem: results.currentItem
+                            pointerTarget: resultPointer.hoveredHeader ? resultPointer.hoveredHeader.resultKey : ""
+                        }
                         delegate: EpgSearchResultDelegate {
                             id: resultDelegate
                             required property int index
-                            width: results.width - 12
+                            width: Math.max(0, results.width - Math.max(12, resultScrollBar.width))
                             compact: root.compact
                             uiTransparency: root.uiTransparency
                             pointerHovered: resultPointer.hoveredHeader === resultDelegate
+                            // A pointer outside result headers must not suppress
+                            // the automatically selected result (including row 0).
+                            marqueeIndicated: (resultMarquee.activeTarget || root.selectedResultKey) === resultKey
+                            inViewport: y + headerHeight > results.contentY && y < results.contentY + results.height
                             controller: root.controller
                             selected: resultKey === root.controller.selectedKey
                             showDetails: root.currentResults && selected && root.collapsedDetailsKey !== resultKey
@@ -442,7 +491,7 @@ Popup {
                                 }
                             }
                         }
-                        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                        ScrollBar.vertical: ScrollBar { id: resultScrollBar; policy: ScrollBar.AsNeeded }
                         Rectangle { anchors.fill: parent; color: "transparent"; border.color: Theme.borderStrong; visible: results.activeFocus }
                         onContentYChanged: {
                             if (root.currentResults && root.controller.hasMore && !root.controller.fetchingMore
@@ -493,20 +542,11 @@ Popup {
                 RowLayout {
                     id: footer
                     Layout.fillWidth: true
-                    visible: root.currentResults && (!root.compact || root.controller.errorText.length > 0)
+                    visible: root.currentResults && root.controller.errorText.length > 0
                     spacing: 8
                     Text {
-                        objectName: "ui.epgSearch.resultCount"
-                        visible: !root.compact
-                        Layout.fillWidth: true
-                        text: root.controller.hasMore ? qsTr("Shown %1 results · more available").arg(results.count) : qsTr("Shown %1 results").arg(results.count)
-                        color: Theme.textMuted
-                        font.pixelSize: 12
-                        elide: Text.ElideRight
-                    }
-                    Text {
                         visible: root.controller.errorText.length > 0
-                        Layout.maximumWidth: body.width * 0.45
+                        Layout.fillWidth: true
                         text: root.controller.errorText
                         textFormat: Text.PlainText
                         color: Theme.danger

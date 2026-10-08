@@ -23,7 +23,8 @@ public:
         StartUtcMsRole,
         StopUtcMsRole,
         ChannelRole,
-        ProgramRole
+        ProgramRole,
+        BroadcastStateRole
     };
     explicit EpgSearchModel(QObject* parent = nullptr)
         : QAbstractListModel(parent)
@@ -37,12 +38,13 @@ public:
     const Core::EpgSearchRow* row(int index) const;
     int indexOfKey(const QString& key) const;
     void setDateTimeFormat(Core::DateTimeFormatOptions options);
-    void refreshLabels();
+    void refreshLabels(QDateTime nowUtc = QDateTime::currentDateTimeUtc());
     void setSummaries(bool summaries);
     QString timeLabel(const Core::EpgSearchRow& row) const;
 
 private:
     QList<Core::EpgSearchRow> m_rows;
+    QDateTime m_nowUtc = QDateTime::currentDateTimeUtc();
     bool m_summaries = false;
     Core::DateTimeFormatOptions m_format = Core::systemDateTimeFormat();
 };

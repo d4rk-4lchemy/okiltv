@@ -111,6 +111,12 @@ position, pause state and refill policy. GO LIVE remains a separate transport
 action. Catch-up returns to direct Live through its existing transport; an
 engine-bound catch-up recording prevents that switch.
 
+VOD library refresh errors identify the failed movie/series stage. They remain in
+an inline banner while a readable saved catalogue, including an empty/search result,
+keeps its normal presentation. Initial read failure displays the actual reason;
+transient database contention retries in the background before becoming a visible
+error. Movies never displays an error belonging only to Series, and vice versa.
+
 The standalone switch follows revealed playback chrome in every window mode,
 using a transparent 50 px control area below the windowed title bar or at the
 fullscreen top edge. `Main.topBarReservedHeight` is zero in fullscreen: Live/VOD
@@ -261,8 +267,9 @@ Protected dialogs, pickers, Guide, Settings and VOD keep their existing context.
 The overlay does not dim the video or auto-hide. Clicks outside its controls are
 consumed without closing it or reaching playback.
 
-Opening shows only the query field and a separate 40 × 40 px close button, 12 px
-above and to the right of the field. The field is horizontally centered near one
+Opening shows only the query field with the `Search...` placeholder and a separate
+40 × 40 px close button, 12 px to its right with their top edges aligned.
+The field is horizontally centered near one
 quarter of the window height, 60 px high and at most 720 px wide. Its position
 stays fixed when results appear or the query is cleared; small windows clamp its
 geometry to keep both controls on screen. Query typography is twice the shared
@@ -271,7 +278,9 @@ background and four-pixel corner radius. The query field has no border, includin
 while focused.
 
 A nonempty query shows a compact status/results surface below the field. After a
-valid query, compact All, Now, Upcoming and Past filters appear above results.
+valid query, compact All, Now, Upcoming and Past tabs appear above results.
+They have no persistent button fill or rounded outline; the active tab has a
+small accent underline, with subtle hover/pressed fills and visible keyboard focus.
 Clearing the query hides that entire surface, even though the controller retains
 its session-level expanded flag. Query, list, close and action backgrounds share
 the Live rail palette and follow the global UI transparency setting exactly once;
@@ -285,7 +294,15 @@ proper file URLs, including paths containing spaces or URL punctuation. Channels
 without a logo have no placeholder. Two lines on the right contain the title and
 channel/local date-time; the airing status sits at the right of the second line
 outside tiny layouts. Subtitle/episode information appears in selected details.
-Matching words keep the core's escaped emphasis spans. Hover does not select; click selects and double
+Matching words keep the core's escaped emphasis spans, including during title scrolling.
+Overflowing titles use the shared VOD marquee: after 1000 ms of keyboard
+indication or pointer hover, they scroll continuously at 35 logical px/s with a
+32 px gap. The latest input chooses one target; when the pointer does not
+indicate a result, the selected row is the fallback, including the automatically
+selected first result without further input. Leaving the viewport, stale
+results or blocked input resets scrolling. Titles are clipped to their text
+field, and result widths reserve at least 12 px or the scrollbar width, whichever
+is greater, so text never paints into the scrollbar area. Hover does not select; click selects and double
 click invokes the primary action. A viewport mouse handler accepts row-header
 gestures and retains the first header identity through the system double-click
 interval, so expansion cannot redirect the second click into another control.
@@ -295,14 +312,22 @@ newly selected airing is still loading details, double-click activation waits fo
 that same airing to become ready. Query/filter/selection changes, result
 invalidation, protected interactions and closing cancel the pending intent; the
 controller revalidates the action normally before playback.
-A newly selected row uses the Live selection fill and a small accent stripe, and
+Result headers retain a 3 px left stripe, inset 12 px from the top with a
+1 px radius and height equal to the header height minus 24 px. Upcoming programmes
+use blue `Theme.accent`; currently airing programmes use green `Theme.success`;
+ended programmes use orange `Theme.epgSearchPast` (`#f0a050`). Selection and hover
+preserve these airing colors; selection retains its Live row fill and inline
+details. Stripes remain opaque at every UI transparency setting.
+The model refreshes their current-time state with status
+labels every 30 seconds without regrouping results.
+A newly selected row uses the Live selection fill and
 automatically expands inline with its description and existing Live/archive/DVR/
 download actions. Clicking its header again collapses the details; clicking a
 collapsed selected header reopens them. Collapse waits for the system double-click
 interval, so double-click invokes the primary action once without collapsing the
 row. Only the selected expanded row instantiates the details component. Collapse
 preserves selection/playback and survives detail updates and page appends; a new
-selection/query, explicit Show details or reopening search restores expansion.
+selection/query or reopening search restores expansion.
 Pending collapse is cancelled on invalidation, protected interaction or closing.
 If a hidden detail control held focus, collapse transfers it to the results list.
 There is no side-by-side or replacement details screen.
@@ -311,18 +336,19 @@ Selected details align with the result text, below the two-line header. Descript
 scroll independently within at most 48 px (40 px in tiny windows), with 12 px text.
 For past airings, Play from beginning is shown only when a valid saved resume
 point exists; otherwise the primary Play already starts at zero. Current airings
-retain their available restart action. Actions are 28 × 28 px icon buttons with
-18 px images: `play.svg` for Play/Resume/Watch live, `movie-info.svg` for Show
-details, `start-from-beginning.svg` for restart, `dvr.svg` for recording/cancel, and
+retain their available restart action. Results without a Live/catch-up primary
+action show no primary button; their inline description remains available through
+selection/header expansion, without a redundant Show details action. Actions are 28 × 28 px icon buttons with
+18 px images: `play.svg` for Play/Resume/Watch live, `start-from-beginning.svg` for restart, `dvr.svg` for recording/cancel, and
 `download.svg` for Download. Original action labels remain the accessible names
 and hover tooltips (400 ms delay). Unscheduled past airings hide the DVR button;
 an existing scheduled job retains Cancel recording. Icons wrap on narrow windows. Keyboard
 focus reveals each action through the outer list, including in 426 × 240 windows. Selection navigation reveals the row header,
 so an expanded card taller than the viewport stays navigable. Asynchronous detail
-updates and page appends do not deliberately reposition the list. Its footer
-reports the number shown and indicates more available results rather than claiming
-a total; its count is omitted in compact windows. Errors retain Retry, including
-failed page requests with usable current rows.
+updates and page appends do not deliberately reposition the list. There is no
+result-count summary. More results retain the list's Load more action and automatic
+pagination. Errors retain a footer with Retry, including failed page requests with
+usable current rows.
 
 Ctrl+F refocuses/selects the query. Up/Down in the query or results move selection
 without wrapping or transferring editor focus; Enter/Return invokes the current

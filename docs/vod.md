@@ -114,6 +114,24 @@ synchronize; ordering/search/Hide
 Unchecked do not import catalogue items. Errors/loading are independent of Live/EPG and
 are exposed in the VOD group editors and library. Series category failure does
 not prevent movie synchronization. Drafts survive category refresh.
+Synchronization records separate source-context,
+movie-category, series-category, movie-catalogue and series-catalogue errors.
+`syncError(profile, kind)` returns only the common/source and matching media errors;
+the aggregate overload remains available for source-wide diagnostics. Both source
+group editors and libraries use the media-specific overload. Messages identify the
+failed stage; a successful movie refresh cannot inherit a Series error.
+
+Ordinary source snapshots read the saved namespace/revision without acquiring a
+SQLite write reservation when the protected configuration revision is unchanged.
+Creation or revision reconciliation still uses a write transaction with a second
+state read, epoch checks and publication fencing. SQLite BUSY/LOCKED is a distinct
+`StorageBusy` error. Bounded VOD jobs retry it asynchronously at 100-ms intervals
+within a 15-second retry window and the original job deadline, releasing worker
+slots between attempts. A SQL attempt retains its at-most-one-second busy wait.
+Cancellation, source replacement and shutdown retain their existing fences;
+permanent storage failures and other errors are not automatically retried.
+SQL diagnostics contain only operation identity, action and numeric driver code,
+never raw SQL, bindings, paths, credentials or driver error text.
 
 Unique current provider categories for each media kind form the denominator. Below 30% selected,
 requests use `get_vod_streams&category_id=…` or `get_series&category_id=…` sequentially; at 30% or more, one full
@@ -144,6 +162,17 @@ category likewise leaves the session intact. Credential edits and removal retain
 the existing checkpoint/stop barrier.
 
 ## Library behavior
+
+`VodCatalogModel.catalogLoaded` distinguishes a readable complete snapshot,
+including a valid empty result, from a catalogue that could not be read. Failed
+refresh leaves cached rows available and reports the failed stage in the banner.
+A loaded empty/search result retains its normal empty-state message despite a
+refresh warning. A failed initial read shows the actual error instead of a generic
+library-unavailable message. Local read errors identify source context, categories
+or the movie/series catalogue. Retry starts a complete source synchronization even
+if a failed scope read left the library without a namespace.
+Runtime synchronization errors stay separate from
+model operation errors, so reloading source scope does not silently erase them.
 
 - Opening either library before VOD storage is ready shows a loading spinner and
   waits up to 15 seconds. Initialization failures during that window trigger

@@ -15,6 +15,7 @@ Item {
     required property string channelLogo
     required property string timeLabel
     required property string statusLabel
+    required property string broadcastState
     required property var titleHighlights
     required property var subTitleHighlights
     property bool selected: false
@@ -29,6 +30,9 @@ Item {
     readonly property real informationInset: channelLogo.length > 0 ? (compact ? 54 : 64) : 12
     readonly property var detailsPane: detailsLoader.item
     property bool pointerHovered: false
+    property bool marqueeIndicated: selected || hovered
+    property bool inViewport: true
+    readonly property string marqueeKey: resultKey
     readonly property bool hovered: pointerHovered || header.hovered
     implicitHeight: headerHeight + (detailsLoader.active ? detailsLoader.height + 8 : 0)
     height: implicitHeight
@@ -59,12 +63,14 @@ Item {
         color: Theme.uiBackground(root.selected ? Theme.liveRailSelection
             : root.hovered ? Theme.liveRailHover : "transparent", root.uiTransparency)
         Rectangle {
+            objectName: root.objectName + ".indicator"
             width: 3
             height: root.headerHeight - 24
             y: 12
             radius: 1
-            color: Theme.accent
-            visible: root.selected
+            color: root.broadcastState === "upcoming" ? Theme.accent
+                : root.broadcastState === "now" ? Theme.success : Theme.epgSearchPast
+            visible: root.broadcastState === "upcoming" || root.broadcastState === "now" || root.broadcastState === "past"
         }
     }
     ItemDelegate {
@@ -98,14 +104,16 @@ Item {
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: 4
-                Text {
+                VodMarqueeTitle {
+                    objectName: root.objectName + ".title"
                     width: parent.width
+                    height: implicitHeight
                     text: root.emphasized(root.title, root.titleHighlights)
                     textFormat: Text.RichText
+                    contentIdentity: root.resultKey
+                    indicated: root.marqueeIndicated && root.actionsCurrent && root.inViewport
                     color: Theme.textPrimary
                     font.pixelSize: root.compact ? 16 : 18
-                    maximumLineCount: 1
-                    elide: Text.ElideRight
                 }
                 Item {
                     width: parent.width

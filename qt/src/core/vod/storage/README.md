@@ -9,6 +9,20 @@ into the application; B4 integration is still undergoing verification.
 contract, never an application fallback. The logical table inventory is in
 `.project/OKILTV_ARCHITEKTURA_VOD.md`, section 8.
 
+Ordinary `snapshot()` calls use a read transaction when the persisted protected
+configuration revision is unchanged. They still validate removal/mutation state
+and check the in-process epoch before publishing the current revision. Only source
+creation or configuration reconciliation acquires a write reservation; it re-reads
+SQL state after acquiring that reservation to preserve competing snapshots' namespace
+and request revision. No schema migration is required for this behavior.
+
+SQLite native BUSY/LOCKED codes, including extended codes, return `StorageBusy`
+with `retryable=true`; other driver failures return `StorageUnavailable`.
+Connections keep an at-most-one-second busy timeout. The application job runner
+provides bounded asynchronous retries instead of waiting on the GUI thread.
+SQL failure logs include only opaque operation identity, action and numeric
+native code. Driver text, SQL statements/bindings and database paths are omitted.
+
 ## Identity and schema version 11
 
 Use the existing application database, additive `vod_*` tables, and an independent

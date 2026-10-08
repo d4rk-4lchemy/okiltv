@@ -37,6 +37,7 @@ function vodScrollBarColor(pressed, hovered) {
     return pressed ? vodScrollBarThumbPressed : hovered ? vodScrollBarThumbHover : vodScrollBarThumb
 }
 var success = "#5ac88f"
+var epgSearchPast = "#f0a050"
 var warning = "#d4aa56"
 var danger = "#e17474"
 var shadow = "#66000000"

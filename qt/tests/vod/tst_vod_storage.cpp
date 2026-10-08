@@ -5,6 +5,7 @@
 #include <QFile>
 #include <QSqlDatabase>
 #include <QSqlQuery>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QtTest>
 #include <algorithm>
@@ -71,6 +72,46 @@ void sql(const QString &path, const QString &statement)
 class VodStorageTests : public QObject {
     Q_OBJECT
 private slots:
+    void unchangedSourceSnapshotRemainsReadableDuringImport() {
+        Fixture fixture;
+        QVERIFY(std::holds_alternative<quint64>(fixture.publish(fixture.scope(), {fixture.movie()})));
+        const auto name = QUuid::createUuid().toString();
+        const auto remove = qScopeGuard([&]() { QSqlDatabase::removeDatabase(name); });
+        auto writer = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), name);
+        writer.setDatabaseName(fixture.path); QVERIFY(writer.open());
+        QSqlQuery lock(writer); QVERIFY(lock.exec(QStringLiteral("BEGIN IMMEDIATE")));
+        // Ordinary reads must not acquire a second write reservation, even
+        // after an in-process invalidation discarded the cached revision.
+        fixture.store->invalidate(fixture.source.revision.profileId);
+        const auto snapshot = fixture.store->snapshot(fixture.source.revision.profileId);
+        QVERIFY(std::holds_alternative<SourceContext>(snapshot));
+        QCOMPARE(std::get<SourceContext>(snapshot).revision, fixture.source.revision);
+        QVERIFY(fixture.store->isCurrent(fixture.source.revision));
+        CatalogQuery query; query.scope = fixture.scope();
+        const auto page = fixture.store->query(query, fixture.request());
+        QVERIFY(std::holds_alternative<CatalogPage>(page));
+        QCOMPARE(std::get<CatalogPage>(page).items.size(), 1);
+        QVERIFY(lock.exec(QStringLiteral("ROLLBACK")));
+    }
+    void sqliteBusyIsDistinctFromStorageFailure() {
+        Fixture fixture;
+        const auto name = QUuid::createUuid().toString();
+        const auto remove = qScopeGuard([&]() { QSqlDatabase::removeDatabase(name); });
+        auto writer = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), name);
+        writer.setDatabaseName(fixture.path); QVERIFY(writer.open());
+        QSqlQuery lock(writer); QVERIFY(lock.exec(QStringLiteral("BEGIN IMMEDIATE")));
+        auto request = fixture.request(); request.deadline = QDeadlineTimer(100);
+        const auto blocked = fixture.store->beginRefresh(fixture.scope(), request);
+        QVERIFY(std::holds_alternative<Error>(blocked));
+        QCOMPARE(std::get<Error>(blocked).code, ErrorCode::StorageBusy);
+        QVERIFY(std::get<Error>(blocked).retryable);
+        QVERIFY(lock.exec(QStringLiteral("ROLLBACK")));
+        QVERIFY(lock.exec(QStringLiteral("DROP TABLE vod_category_snapshots")));
+        const auto broken = fixture.store->readCategories(fixture.scope(), fixture.request());
+        QVERIFY(std::holds_alternative<Error>(broken));
+        QCOMPARE(std::get<Error>(broken).code, ErrorCode::StorageUnavailable);
+        QVERIFY(!std::get<Error>(broken).retryable);
+    }
     void uploadedSubtitlesSurviveRestartAndDoNotCreateProgress() {
         Fixture fixture;
         const auto ref = fixture.movie().ref;

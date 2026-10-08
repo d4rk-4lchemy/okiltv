@@ -9,6 +9,76 @@ using namespace OKILTV::Player;
 class VodContractTests : public QObject {
     Q_OBJECT
 private slots:
+    void busyJobsRetryWithoutBlockingOtherSources() {
+        VodJobRunner jobs(1, 1);
+        RequestContext request;
+        std::atomic_int attempts{0};
+        std::atomic_bool identityMatches{true};
+        int deliveries = 0;
+        jobs.submit(QUuid::createUuid(), request, [&](RequestContext context) -> Result<JobReply> {
+            if (context.operationId != request.operationId) identityMatches = false;
+            if (++attempts < 3) return Error{ErrorCode::StorageBusy, context.operationId, true};
+            return JobReply{{}, Success{}, {}};
+        }, [&](Result<JobReply> result) { QVERIFY(std::holds_alternative<JobReply>(result)); ++deliveries; });
+        bool otherFinished = false;
+        int otherSawAttempts = 0;
+        jobs.submit(QUuid::createUuid(), {}, [](RequestContext) -> Result<JobReply> { return JobReply{{}, Success{}, {}}; },
+            [&](Result<JobReply> result) { QVERIFY(std::holds_alternative<JobReply>(result)); otherSawAttempts = attempts.load(); otherFinished = true; });
+        QTRY_VERIFY(otherFinished);
+        QVERIFY(otherSawAttempts < 3);
+        QTRY_COMPARE(deliveries, 1);
+        QCOMPARE(attempts.load(), 3); QVERIFY(identityMatches.load()); QCOMPARE(jobs.pending(), 0);
+    }
+    void busyJobsRespectCancellationAndDeadline_data() {
+        QTest::addColumn<bool>("cancel");
+        QTest::addColumn<bool>("sourceCancel");
+        QTest::newRow("cancelled") << true << false;
+        QTest::newRow("source-cancelled") << true << true;
+        QTest::newRow("deadline") << false << false;
+    }
+    void busyJobsRespectCancellationAndDeadline() {
+        QFETCH(bool, cancel);
+        QFETCH(bool, sourceCancel);
+        VodJobRunner jobs;
+        const auto profile = QUuid::createUuid();
+        RequestContext request; request.deadline = QDeadlineTimer(cancel ? 5000 : 150);
+        std::atomic_int attempts{0};
+        std::optional<Result<JobReply>> completed;
+        jobs.submit(profile, request, [&](RequestContext context) -> Result<JobReply> {
+            ++attempts; return Error{ErrorCode::StorageBusy, context.operationId, true};
+        }, [&](Result<JobReply> result) { completed = std::move(result); });
+        QTRY_VERIFY(attempts.load() > 0);
+        if (sourceCancel) jobs.cancelSource(profile);
+        else if (cancel) jobs.cancel(request.operationId);
+        QTRY_VERIFY(completed.has_value());
+        QVERIFY(std::holds_alternative<Error>(*completed));
+        QCOMPARE(std::get<Error>(*completed).code, cancel ? ErrorCode::Cancelled : ErrorCode::Timeout);
+        QCOMPARE(jobs.pending(), 0);
+    }
+    void shutdownDropsBusyRetries() {
+        VodJobRunner jobs;
+        std::atomic_int attempts{0};
+        bool delivered = false;
+        jobs.submit(QUuid::createUuid(), {}, [&](RequestContext context) -> Result<JobReply> {
+            ++attempts; return Error{ErrorCode::StorageBusy, context.operationId, true};
+        }, [&](Result<JobReply>) { delivered = true; });
+        QTRY_VERIFY(attempts.load() > 0);
+        jobs.shutdown();
+        QTRY_COMPARE(jobs.pending(), 0);
+        const auto count = attempts.load(); QTest::qWait(150);
+        QCOMPARE(attempts.load(), count); QVERIFY(!delivered);
+    }
+    void permanentStorageFailureIsNotRetried() {
+        VodJobRunner jobs;
+        std::atomic_int attempts{0};
+        bool completed = false;
+        jobs.submit(QUuid::createUuid(), {}, [&](RequestContext context) -> Result<JobReply> {
+            ++attempts; return Error{ErrorCode::StorageUnavailable, context.operationId};
+        }, [&](Result<JobReply> result) {
+            QCOMPARE(std::get<Error>(result).code, ErrorCode::StorageUnavailable); completed = true;
+        });
+        QTRY_VERIFY(completed); QCOMPARE(attempts.load(), 1);
+    }
     void episodeTrackFallbackUsesCurrentConfirmation_data() {
         QTest::addColumn<bool>("savedTarget");
         QTest::newRow("current-confirmation") << false;

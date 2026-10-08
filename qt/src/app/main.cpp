@@ -598,9 +598,11 @@ int main(int argc, char *argv[])
             QStringLiteral("series"), [&vodRuntime](const QUuid &id) { return vodRuntime.sourceCategories(id, OKILTV::Vod::CatalogKind::Series); });
         for (auto *groups : {&movieSourceGroups, &seriesSourceGroups}) {
             groups->setAutoPersist(false);
-            const auto updateSyncState = [&vodRuntime, groups]() {
+            const auto kind = groups == &seriesSourceGroups
+                ? OKILTV::Vod::CatalogKind::Series : OKILTV::Vod::CatalogKind::Movies;
+            const auto updateSyncState = [&vodRuntime, groups, kind]() {
                 const QUuid id(groups->profileId());
-                groups->setSyncState(vodRuntime.syncing(id), vodRuntime.syncError(id));
+                groups->setSyncState(vodRuntime.syncing(id), vodRuntime.syncError(id, kind));
             };
             QObject::connect(&vodRuntime, &OKILTV::Vod::VodRuntime::sourceSyncChanged, groups,
                 [updateSyncState](const QUuid &) { updateSyncState(); });

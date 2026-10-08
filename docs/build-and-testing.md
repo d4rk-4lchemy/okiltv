@@ -29,18 +29,26 @@ close/source/generation fences, details races, retained selection, page retry an
 restart/default routing after resume availability changes without a UI refresh.
 `QAbstractItemModelTester` checks row notifications. Model tests also verify
 cached station-logo file URLs with spaces and URL punctuation, remote fallback
-and absent logos.
+and absent logos. Broadcast-state checks use deterministic UTC samples at
+start/stop boundaries, verify status-label agreement and role notifications, and
+retain frozen sections and result identities without model resets.
 
 `OKILTVQtEpgSearchOverlayTests` covers query-only opening, fixed query/close
-geometry, clearing, inline selected-only details, available/missing logos, Live
-transparency, unchanged bright background pixels and blocked outside clicks, tiny-layout action reachability, double-click and button Enter
+geometry, clearing, inline selected-only details, available/missing logos,
+blue upcoming/green current/orange past result stripes in standard and compact
+layouts, unchanged stripe colors on selection, dynamic airing-state updates
+preserving selection/scroll and opaque stripes regardless of UI transparency,
+Live transparency, unchanged bright background pixels and blocked outside clicks, tiny-layout action reachability, double-click and button Enter
 isolation, selected-header collapse/reopen and double-click in both states,
 collapse cancellation and deferred double-click activation/cancellation while details load,
 independent description wheel scrolling, native editor keys, focus
 cycling with Shift+Tab, cyclic Tab time-filter switching from query/list/buttons,
-query/cursor preservation, modifier and protected-input guards, loaded SVG action icons, hover tooltips/accessibility labels, hidden
+query/cursor preservation, modifier and protected-input guards, loaded SVG action icons, hover tooltips/accessibility labels, absent primary buttons
+with retained inline descriptions for unavailable playback, hidden
 unscheduled-past DVR and Ctrl+Enter/Return restart/default routing from editors/list/buttons and
-escaped provider text. Focused AppController tests cover unstarted, resumable,
+escaped provider text, overflowing title marquee, text-field clipping/scrollbar
+reservation, automatic scrolling of the initial selection with the pointer outside
+results, and reset when input is blocked. Focused AppController tests cover unstarted, resumable,
 completed and sub-minute archive progress plus current-airing restart. `UI-14-epg-search` exercises the real Main/Live routing with isolated local
 fixtures with station logos; screenshot pixel assertions verify that two different
 channel logos actually render beside the result text. Existing channel/grid search
@@ -61,7 +69,7 @@ does not establish Windows QSQLITE, keyboard, dialogs or rendering acceptance.
 The project uses C++20, CMake 3.25+, Ninja and Qt 6.10+. Required Qt modules are
 declared in [qt/CMakeLists.txt](../qt/CMakeLists.txt); Qt Test is needed only with
 tests enabled. Native component tests also require Qt Quick Test. The EPG QML
-runner (`OKILTVQtEpgSearchQmlTests`) embeds the same five action SVGs as the app
+runner (`OKILTVQtEpgSearchQmlTests`) embeds the same four action SVGs as the app
 so its warning-strict tests verify real resource loading and icon rendering. Linux also needs Qt DBus, zlib and OpenSSL Crypto. Runtime playback
 uses libmpv; protected storage needs libsecret and a desktop Secret Service.
 ffmpeg/ffprobe support timeshift, remux/probing and media integration tests.
@@ -114,6 +122,14 @@ episode once, preserves resume semantics and ignores status-button gestures.
 `vodSourceSynchronizationAndDisable` covers aggregate refresh state through
 startup readiness, delayed Series publication, errors, concurrent sources,
 disablement/removal, replacement requests and shutdown.
+The synchronization test also opens both cached libraries during a SQLite write
+reservation, retries a blocked refresh, recovers reads after an exclusive lock and
+checks independent Movie/Series errors plus valid empty snapshots. Storage tests
+verify read-only unchanged source snapshots after invalidation and distinguish
+BUSY/LOCKED from permanent SQL errors. Contract tests verify retry worker-slot
+release, unchanged operation identity, cancellation/deadlines and no retry of
+permanent failures. QML tests distinguish refresh warnings on an empty saved
+catalogue from an initial read failure and display the actual error.
 `vodLibraryWaitsForStorage` verifies that initialization failure clears queued
 source refresh state while the library retains its separate retry window. App cases
 `vodRuntimeLibraryPause`, `vodRuntimeExplicitLiveWaitsForProgress` and `appControllerReturnsToLastPlayedChannel` verify session-owned pause/resume,

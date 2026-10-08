@@ -976,12 +976,14 @@ FocusScope {
                                         visible: running
                                     }
                                     Label {
+                                        objectName: "ui.vod.emptyLibraryMessage"
                                         width: parent.width
                                         horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap
                                         color: Theme.overlayTextSecondary; font.pixelSize: 16
                                         text: root.catalog.sources.length === 0 ? "Enable VOD for an Xtream source in Settings to browse " + (root.seriesLibrary ? "series." : "movies.")
                                             : root.catalog.busy ? (root.seriesLibrary ? "Loading your series library…" : "Loading your movie library…")
-                                            : root.catalog.errorText.length > 0 ? "Your library is unavailable. Try again."
+                                            : root.catalog.errorText.length > 0 && !root.catalog.catalogLoaded
+                                                ? root.catalog.errorText
                                             : root.catalog.searchText.length > 0 ? root.seriesLibrary ? "No series match your search." : "No movies match your search."
                                             : root.seriesLibrary ? "No series in this library." : "No movies in this library."
                                     }

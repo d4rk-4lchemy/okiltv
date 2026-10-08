@@ -126,6 +126,45 @@ void AppModelTests::vodSourceSynchronizationAndDisable()
     CatalogQuery seriesQuery;seriesQuery.scope={profile.id,source.revision.catalogNamespace,CatalogKind::Series,{}};
     auto seriesPage=[&]() {return std::get<CatalogPage>(runtime.store()->query(seriesQuery,request));};
     QCOMPARE(seriesRequests,QStringList{QString{}});QCOMPARE(seriesPage().items.size(),10);
+    VodCatalogModel movieLibrary(&runtime, &settings);
+    VodCatalogModel seriesLibrary(&runtime, &settings, nullptr, VodCatalogModel::Purpose::Library, CatalogKind::Series);
+    {
+        const auto connectionName = guidToString(QUuid::createUuid());
+        const auto removeConnection = qScopeGuard([&]() { QSqlDatabase::removeDatabase(connectionName); });
+        auto writer = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        writer.setDatabaseName(dir.filePath(QStringLiteral("iptv.db"))); QVERIFY(writer.open());
+        QSqlQuery lock(writer); QVERIFY(lock.exec(QStringLiteral("BEGIN IMMEDIATE")));
+        movieLibrary.open(); seriesLibrary.open();
+        QTRY_COMPARE(movieLibrary.count(), 10); QTRY_COMPARE(seriesLibrary.count(), 10);
+        QTRY_VERIFY(!movieLibrary.busy() && !seriesLibrary.busy());
+        QVERIFY(movieLibrary.catalogLoaded()); QVERIFY(seriesLibrary.catalogLoaded());
+        QVERIFY(movieLibrary.errorText().isEmpty()); QVERIFY(seriesLibrary.errorText().isEmpty());
+        // Refresh needs a write reservation. Transient contention must retain
+        // the readable library and retry without exposing a terminal error.
+        movieLibrary.refresh(); QTest::qWait(1200);
+        QVERIFY(runtime.syncing(profile.id)); QCOMPARE(movieLibrary.count(), 10);
+        QVERIFY(movieLibrary.errorText().isEmpty());
+        QVERIFY(lock.exec(QStringLiteral("ROLLBACK")));
+        QTRY_VERIFY(!movieLibrary.busy() && !seriesLibrary.busy());
+        QCOMPARE(movieLibrary.count(), 10); QVERIFY(movieLibrary.errorText().isEmpty());
+        // An exclusive lock also blocks reads; reopening must recover after
+        // release without an explicit Retry click.
+        movieLibrary.close();
+        QVERIFY(lock.exec(QStringLiteral("BEGIN EXCLUSIVE")));
+        movieLibrary.open(); movieLibrary.setSearchText(QStringLiteral("Movie 1"));
+        QTest::qWait(1400); QVERIFY(movieLibrary.busy()); QVERIFY(movieLibrary.errorText().isEmpty());
+        QVERIFY(lock.exec(QStringLiteral("ROLLBACK")));
+        QTRY_VERIFY(!movieLibrary.busy()); QTRY_COMPARE(movieLibrary.count(), 2);
+        QVERIFY(movieLibrary.errorText().isEmpty());
+        movieLibrary.setSearchText(QString{}); QTRY_COMPARE(movieLibrary.count(), 10);
+    }
+    // Retry after an invalidated/failed scope must start a complete refresh,
+    // rather than only attempting another cached scope read.
+    emit runtime.sourceInvalidated(profile.id);
+    QVERIFY(!movieLibrary.catalogLoaded()); QCOMPARE(movieLibrary.count(), 0);
+    movieLibrary.refresh(); QVERIFY(runtime.syncing(profile.id));
+    QTRY_VERIFY(!movieLibrary.busy() && !seriesLibrary.busy());
+    QTRY_COMPARE(movieLibrary.count(), 10); QVERIFY(movieLibrary.catalogLoaded());
     auto selectSeries=[&](int count) {
         QStringList hidden;for (int i=count+1;i<=10;++i) hidden.append(QString::number(i));
         settings.current().hiddenGroupsByProfile[id+QStringLiteral("|series")]=hidden;settings.save();
@@ -141,6 +180,10 @@ void AppModelTests::vodSourceSynchronizationAndDisable()
     failSeriesCategory=QStringLiteral("2");selectSeries(2);QTRY_VERIFY(!runtime.syncing(profile.id));
     QVERIFY(!runtime.sourceSyncInProgress());
     QVERIFY(!runtime.syncError(profile.id).isEmpty());QCOMPARE(seriesPage().generation,seriesBeforeFailure);
+    QTRY_VERIFY(!movieLibrary.busy() && !seriesLibrary.busy());
+    QVERIFY(movieLibrary.errorText().isEmpty());
+    QVERIFY(runtime.syncError(profile.id, CatalogKind::Movies).isEmpty());
+    QVERIFY(seriesLibrary.errorText().contains(QStringLiteral("Series refresh failed:")));
     QVERIFY(page().generation>movieBeforeSeriesFailure);QCOMPARE(page().items.size(),10);
     failSeriesCategory.clear();selectSeries(4);QTRY_VERIFY(!runtime.syncing(profile.id));
 
@@ -156,8 +199,14 @@ void AppModelTests::vodSourceSynchronizationAndDisable()
     const auto seriesBeforeMovieFailure=seriesPage().generation;
     failCategory = QStringLiteral("2"); select(2); QTRY_VERIFY(!runtime.syncing(profile.id));
     QVERIFY(!runtime.syncError(profile.id).isEmpty()); QCOMPARE(page().generation, beforeFailure); QCOMPARE(page().items.size(), 4);
+    QTRY_VERIFY(!movieLibrary.busy() && !seriesLibrary.busy());
+    QVERIFY(movieLibrary.errorText().contains(QStringLiteral("Movies refresh failed:")));
+    QVERIFY(seriesLibrary.errorText().isEmpty());
     QVERIFY(seriesPage().generation>seriesBeforeMovieFailure);QCOMPARE(seriesPage().items.size(),4);
     failCategory.clear(); select(0); QTRY_VERIFY(!runtime.syncing(profile.id)); QVERIFY(catalogRequests.isEmpty()); QVERIFY(page().items.isEmpty());
+    QTRY_VERIFY(!movieLibrary.busy()); QCOMPARE(movieLibrary.count(), 0);
+    QVERIFY(movieLibrary.catalogLoaded()); QVERIFY(movieLibrary.errorText().isEmpty());
+    movieLibrary.close(); seriesLibrary.close();
     select(4); QTRY_VERIFY(!runtime.syncing(profile.id));
     // SQL category filtering runs before pagination and special-list membership.
     query.allowedCategories = QStringList{QStringLiteral("4")}; query.pageSize = 1;

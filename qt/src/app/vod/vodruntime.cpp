@@ -168,6 +168,29 @@ void VodRuntime::synchronizeSource(const QString &profileId)
     m_syncRequests.insert(m_module->controller()->scope(id), {id, SyncStage::Scope, {}});
     emit sourceSyncChanged(id);
 }
+QString VodRuntime::syncError(const QUuid &id, std::optional<CatalogKind> kind) const
+{
+    const auto errors = m_syncErrors.value(id);
+    QStringList messages;
+    for (const auto stage : {SyncStage::Scope, SyncStage::Movies, SyncStage::Series, SyncStage::Catalog, SyncStage::SeriesCatalog}) {
+        if (kind == CatalogKind::Movies && (stage == SyncStage::Series || stage == SyncStage::SeriesCatalog)) continue;
+        if (kind == CatalogKind::Series && (stage == SyncStage::Movies || stage == SyncStage::Catalog)) continue;
+        if (const auto message = errors.value(stage); !message.isEmpty()) messages.append(message);
+    }
+    return messages.join(u' ');
+}
+void VodRuntime::setSyncError(const QUuid &id, SyncStage stage, const QString &message)
+{
+    QString label;
+    switch (stage) {
+    case SyncStage::Scope: label = QStringLiteral("VOD source refresh failed: "); break;
+    case SyncStage::Movies: label = QStringLiteral("Movie categories refresh failed: "); break;
+    case SyncStage::Series: label = QStringLiteral("Series categories refresh failed: "); break;
+    case SyncStage::Catalog: label = QStringLiteral("Movies refresh failed: "); break;
+    case SyncStage::SeriesCatalog: label = QStringLiteral("Series refresh failed: "); break;
+    }
+    m_syncErrors[id][stage] = label + message;
+}
 bool VodRuntime::reconcileCategories(const CategorySnapshot &snapshot)
 {
     auto &settings = m_settings->current();
@@ -181,7 +204,9 @@ bool VodRuntime::reconcileCategories(const CategorySnapshot &snapshot)
     settings.groupOrderByProfile[key] = reconciled.groupOrder;
     m_settings->save();
     if (!m_settings->lastSaveError().isEmpty()) {
-        settings = before; m_syncErrors[id] = m_settings->lastSaveError(); return false;
+        settings = before;
+        setSyncError(id, snapshot.scope.kind == CatalogKind::Movies ? SyncStage::Movies : SyncStage::Series, m_settings->lastSaveError());
+        return false;
     }
     updatePolicy(id, discovered, snapshot.scope.kind);
     emit categoriesUpdated(id);
@@ -193,7 +218,7 @@ void VodRuntime::receiveSync(const VodEvent &event)
     if (it == m_syncRequests.end()) return;
     auto request = it.value(); m_syncRequests.erase(it);
     if (const auto *error = std::get_if<Error>(&event.result)) {
-        m_syncErrors[request.profile] = error->message();
+        setSyncError(request.profile, request.stage, error->message());
         // Series categories fail independently; movie synchronization still runs.
         if (request.stage == SyncStage::Scope) { finishSync(request.profile); return; }
     } else {
@@ -237,7 +262,7 @@ void VodRuntime::failQueuedSync(const QString &error)
 {
     const auto queued = m_queuedSync;
     for (const auto &id : queued) {
-        m_syncErrors[id] = error;
+        setSyncError(id, SyncStage::Scope, error);
         finishSync(id);
     }
 }

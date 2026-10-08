@@ -15212,8 +15212,8 @@ void AppModelTests::epgSearchScopeAndValidatedActions()
     entry.stop = entry.start.addSecs(3600);
     const auto channel = toVariantMap(channels.first());
     auto program = toVariantMap(entry);
-    QCOMPARE(harness.appController->epgSearchActionState(channel, program).value("actionKind").toString(),
-        QStringLiteral("details"));
+    QVERIFY(harness.appController->epgSearchActionState(channel, program).value("actionKind").toString().isEmpty());
+    QVERIFY(!harness.appController->epgSearchActionState(channel, program).value("primaryEnabled").toBool());
     QVERIFY(!harness.appController->activateEpgSearchResult(channel, program, false));
     QVERIFY(!harness.playerController->currentChannelValue());
     entry.title = QStringLiteral("Live show");
@@ -15236,7 +15236,10 @@ void AppModelTests::epgSearchScopeAndValidatedActions()
     entry.stop = QDateTime::currentDateTimeUtc().addSecs(-600);
     entry.start = entry.stop.addSecs(-3600);
     const auto archiveState = harness.appController->epgSearchActionState(channel, toVariantMap(entry));
-    QCOMPARE(archiveState.value("actionKind").toString(), QStringLiteral("details"));
+    QVERIFY(archiveState.value("actionKind").toString().isEmpty());
+    QVERIFY(archiveState.value("primaryLabel").toString().isEmpty());
+    QVERIFY(!archiveState.value("primaryEnabled").toBool());
+    QVERIFY(!harness.appController->activateEpgSearchResult(channel, toVariantMap(entry), false));
     QVERIFY(!archiveState.value("fromBeginningEnabled").toBool());
     QVERIFY(archiveState.value("reason").toString().contains(QStringLiteral("grid")));
     QVERIFY(!harness.appController->activateEpgSearchResult(channel, toVariantMap(entry), true));
