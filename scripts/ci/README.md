@@ -47,10 +47,14 @@ and verifies the required CI files before staging the clean checkout.
 # Release builds
 
 `.github/workflows/release.yml` builds Windows x64 (NSIS installer and portable
-ZIP) and Linux x86_64 (AppImage) on Ubuntu 24.04. Windows uses the existing
-MinGW/Wine scripts; both SDKs use the Qt version in `dependencies.env`.
-Release builds compile only the application and do not run tests; test execution
-belongs to `pr-tests.yml`. The Linux Release preset disables test targets, and
+ZIP) and Linux x86_64 (AppImage) on Ubuntu 24.04, plus a macOS Apple Silicon
+**beta** on `macos-15`. Windows uses the existing MinGW/Wine scripts; SDKs use
+the Qt version in `dependencies.env` (checked against the macOS pins).
+Windows/Linux release builds compile only the application and do not run tests;
+their test execution belongs to `pr-tests.yml`. The macOS job additionally builds
+and runs the disposable Keychain/SQLite/helper suite, verifies Apple's ad-hoc
+signatures and tests rejection of mutated bundles after archive extraction.
+The Linux Release preset disables test targets, and
 `build_linux.sh` explicitly builds `OKILTVQt` even with an older build cache.
 
 ## One-time setup
@@ -81,14 +85,15 @@ dependency asset in the same repository. Downloads use the built-in
 3. Publish a GitHub Release for that tag. Publishing a pre-release also works;
    saving a draft or pushing a tag alone does not start this workflow.
 
-The workflow checks that the tag matches CMake, builds both platforms and
+The workflow checks that the tag matches CMake, builds all three platforms and
 checks AppDir libraries/plugins, including the dynamic
-libmpv and libsecret ABI. Only after both jobs succeed does it attach:
+libmpv and libsecret ABI. Only after all build jobs succeed does it attach:
 
 - `OKILTV-qt-win-x64-<version>.zip`
 - `OKILTV-qt-win-x64-setup-<version>.exe`
 - `OKILTV-qt-linux-x86_64-<version>.AppImage`
-- `SHA256SUMS-windows.txt` and `SHA256SUMS-linux.txt`
+- `OKILTV-qt-macos-arm64-<version>-beta.tar.gz` and its `.tar.gz.sha256`
+- `SHA256SUMS-windows.txt`, `SHA256SUMS-linux.txt` and `SHA256SUMS-macos.txt`
 
 Re-running the workflow replaces assets with the same names. The release must
 allow asset uploads/updates: this publish-after-release flow is not compatible
@@ -115,8 +120,15 @@ build-draft-then-publish flow would be needed.
 - A running desktop Secret Service/keyring, graphics drivers and an audio
   service remain host requirements. FFmpeg/ffprobe command-line tools used for
   recording and timeshift remain external dependencies, as in existing builds.
-- Packages are unsigned. Playback, graphics, audio and installer behavior still
-  need a desktop smoke test on each target platform.
+- Windows/Linux packages are unsigned. macOS beta packages are ad-hoc signed
+  without Developer ID or notarization; the first native workflow run and full
+  Mac hardware/desktop acceptance remain pending. The macOS job installs its
+  own Qt and Homebrew inputs, records installed dependency versions/provenance,
+  and requires no Apple signing secrets. Homebrew/runner updates mean native
+  dependencies are not frozen by the Linux cross-build bottle lock. See
+  [macOS CI and acceptance](../../docs/macos-build.md#native-release-ci-beta).
+  Playback, graphics, audio and installer behavior still need a desktop smoke
+  test on each target platform.
 
 Local AppImage packaging after a Linux Release build:
 

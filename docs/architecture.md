@@ -75,6 +75,15 @@ workers before SQL/Qt teardown; source reconciliation also cleans orphan copies.
 
 ## Startup and shutdown
 
+The macOS cross port keeps these layers and playback ownership unchanged.
+Only platform protection (Keychain), sleep prevention (IOKit), Core OpenGL setup,
+bundle library discovery and desktop lifecycle differ. Bundle metadata/packaging
+are described in [macOS build](macos-build.md); application/catalogue schemas do
+not change. macOS data uses QStandardPaths outside the bundle, ignoring legacy
+Windows `APPDATA` imports. Native quit requests use the main window's existing
+confirmation/asynchronous shutdown route, and Dock activation restores a hidden
+window. Target desktop execution remains pending validation.
+
 1. Set up platform/bootstrap paths, Fusion style and the OpenGL rendering backend.
 2. Load settings and source summaries; initialize/migrate the database on a
    Qt-owned worker before ordinary database access.

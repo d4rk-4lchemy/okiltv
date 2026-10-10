@@ -6,6 +6,10 @@
 #include <QOpenGLFramebufferObject>
 #include <QOpenGLFramebufferObjectFormat>
 #include <QOpenGLFunctions>
+#ifdef Q_OS_MACOS
+#include <QOpenGLContext>
+#include <OpenGL/OpenGL.h>
+#endif
 #include <QMetaObject>
 #include <QPointer>
 #include <QQuickOpenGLUtils>
@@ -131,6 +135,16 @@ public:
     {
         if (!m_initialized) {
             initializeOpenGLFunctions();
+#ifdef Q_OS_MACOS
+            const auto *context = QOpenGLContext::currentContext();
+            if (context != nullptr) {
+                const auto format = context->format();
+                Core::DebugLogger::instance().log(QStringLiteral("video"),
+                    QStringLiteral("macOS OpenGL context %1.%2, profile=%3, current CGL=%4.")
+                        .arg(format.majorVersion()).arg(format.minorVersion())
+                        .arg(static_cast<int>(format.profile())).arg(CGLGetCurrentContext() != nullptr));
+            }
+#endif
             m_initialized = true;
         }
 

@@ -15,6 +15,36 @@ requests. QML checks hover controls and click isolation on grid/shelf posters,
 detail actions, tooltips and write gating. UI-12 verifies details, automatic removal,
 re-adding watched films and the new playback groups using local fixtures.
 
+## macOS local cross build
+
+`./build_macos.sh` builds an Apple Silicon app and relocatable tester archive on
+Linux using the pinned OSXCross/Qt/media installation. The arm64 cross presets
+use separate canonical trees; neither can execute Darwin tests on Linux. The
+default helper also compiles a small disposable-Keychain/SQLite/helper test for
+execution on the Mac. Packaging includes libmpv, Qt/QML/plugins, ffmpeg/ffprobe,
+fixtures, ad-hoc signatures, inventory/checksums and extraction verification.
+The dependency stack requires macOS 15.0+. See [macOS build](macos-build.md) for
+inputs, commands, bundle contracts and [Mac acceptance](macos-tester-checklist.md).
+The release workflow also configures a native `macos-15` arm64 beta job through
+`build_macos_native.sh` and `qt-macos-arm64-native-release`. It installs the pinned
+Qt SDK and Homebrew media dependencies, builds the app and platform test, packages
+with Apple's ad-hoc signer, verifies an extracted archive and runs the disposable
+Keychain/SQLite/helper suite and bundle mutation tests. Native workflow execution
+still needs its first GitHub run; full runtime/hardware acceptance and Developer
+ID signing/notarization remain pending. See [macOS build](macos-build.md#native-release-ci-beta).
+
+## EPG presentation clock validation
+
+The App suite's `epgPresentationFollowsSystemMinuteWithoutWaitingForReads` uses
+explicit UTC samples and occupies both production EPG read workers to verify
+immediate cached presentation at the next minute after startup at `:59`, unchanged
+same-minute samples, exact programme boundaries/gaps, forward/backward clock jumps,
+preserved Guide selection and no model resets/loading placeholders.
+`nowNextPublicationResamplesClock` rejects stale worker time presentation;
+`epgDiskModelsLoadDetailsAsync` also checks clock updates retain disk-backed tiles
+and hydrated details. These local checks do not establish Windows sleep/wake or
+visual rendering acceptance.
+
 ## EPG search validation
 
 `OKILTVQtEpgSearchStoreTests` verifies the actual QSQLITE FTS5 capability, shared
@@ -99,6 +129,34 @@ only the application, use `--target OKILTVQt`. `./build_linux.sh` is the reposit
 Linux release helper.
 
 ## Select validation by affected contract
+
+Live slowdown regressions in `OKILTVQtPlaybackTests` use explicit clocks to verify
+fresh-reserve/raised-target gating, two-second entry/exit ramps, a 30-second played
+budget, paused/frozen/missing clocks, sampling gaps, ignored repeated triggers,
+cooldown, cancellation and independent policy instances. App tests exercise the
+delivery-learning trigger and mode/seek/stop fences, plus synthetic WAV playback
+through real libmpv with null outputs to check progressing audio, speed changes
+without reload, pitch-option restoration, dormant-backend behavior and exclusion
+of custom speeds/compressed passthrough. Run Playback, App and Catchup suites;
+F3 and listening on Windows still require manual acceptance.
+
+`OKILTVQtPlaybackTests` covers distinct fresh samples over the 500-ms Live
+depletion confirmation window, ignored single zeros/stale observations, frozen
+refill targets and 0.3-second resume tolerance, capacity limits, 30-second hold
+deadlines, EOF/timeout tail draining, exhausted-reserve reconnect and separate
+audio-only decoder recovery. App tests cover conflicting raw versus displayed
+forward reserve, pause ownership, stop/seek/load fences, preserved delivery
+learning and rebuilding reserve on the same reconnect connection.
+`mpvLiveContinuouslyRefillsBeyondReserve` uses generated WAV/MPEG-TS fixtures to
+verify Live read-ahead beyond 11 seconds, a finite forward/back byte budget,
+refill as byte capacity opens, seek invalidation and resetting catch-up time
+options back to Live's memory-only limit. The byte-budget mapping remains
+independent of the backend's unlimited time options. Typed VOD loads on the same
+backend also retain their previous finite window. Run the
+Playback, App and Catchup suites after changing this contract. Full HTTP fixtures
+and Xvfb rendering require permission to open local TCP/X11 sockets; a sandbox
+that blocks these cannot establish those integration results. Windows provider
+buffering and audio/video continuity still require manual acceptance.
 
 Uploaded-subtitle coverage includes Storage tests for schema 10-to-11 migration,
 restart without original files, content isolation, deduplication, VobSub pairing,
@@ -472,9 +530,11 @@ runner embeds the EPG action icons, while other QML suites use the SDK's
 The playback group builds `OKILTVQtVodRangeTests` as well as the policy, catch-up
 and native mpv targets. MinGW compiles `tst_app_models.cpp` with `-Wa,-mbig-obj`
 to accommodate the Debug object's section count without removing debug symbols.
-[release.yml](../.github/workflows/release.yml) builds release assets; packaging
-does not implicitly execute tests. Release tags must match the version in
-`qt/CMakeLists.txt`; dependency releases are separate.
+[release.yml](../.github/workflows/release.yml) builds Windows/Linux release assets
+and an explicitly named macOS arm64 beta. Windows/Linux release packaging does
+not execute tests; the macOS job runs native bundle/platform gates. Publishing
+waits for all build jobs and verifies all three checksum lists. Release tags must
+match the version in `qt/CMakeLists.txt`; dependency releases are separate.
 
 [package_linux_appimage.sh](../scripts/package_linux_appimage.sh) bundles Qt/QML,
 libmpv and libsecret for the Linux package. The host still provides desktop

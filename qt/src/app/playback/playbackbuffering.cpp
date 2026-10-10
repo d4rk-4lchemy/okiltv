@@ -27,6 +27,10 @@ constexpr double kCatchupActiveCacheRefillMarginSeconds = 5.0;
 constexpr qint64 kCatchupActiveDemuxerMaxBytes = 96LL * 1024LL * 1024LL;
 constexpr qint64 kCatchupActiveDemuxerMaxBackBytes = 32LL * 1024LL * 1024LL;
 constexpr double kCatchupStandbyCacheHeadSeconds = 30.0;
+constexpr qint64 kLiveSlowdownDurationMs = 30000;
+constexpr qint64 kLiveSlowdownRampMs = 2000;
+constexpr qint64 kLiveSlowdownCooldownMs = 30000;
+constexpr double kLiveSlowdownSpeed = 0.90;
 double normalizedBufferTargetSeconds(double value)
 {
     return std::isfinite(value) ? std::clamp(value, kMinimumBufferSeconds, kMaximumBufferSeconds) : 3.0;
@@ -36,9 +40,9 @@ bool validCache(std::optional<double> cache)
     return cache.has_value() && std::isfinite(*cache) && *cache >= 0.0;
 }
 }
-double PlaybackBuffering::adaptiveSteadyStateCacheLimitSeconds(const double bufferTargetSeconds)
+double PlaybackBuffering::adaptiveLiveCacheBudgetSeconds(const double bufferTargetSeconds)
 {
-    return Player::MpvPlayer::steadyStateCacheLimitSecondsForBufferTarget(bufferTargetSeconds);
+    return Player::MpvPlayer::cacheBudgetSecondsForBufferTarget(bufferTargetSeconds);
 }
 
 double PlaybackBuffering::adaptiveSteadyStateCacheHysteresisSeconds(const double bufferTargetSeconds)
@@ -51,7 +55,7 @@ qint64 PlaybackBuffering::adaptiveSteadyStateMaxBytes(
     const std::optional<double> averageBitsPerSecond)
 {
     const auto totalLiveWindowSeconds =
-        adaptiveSteadyStateCacheLimitSeconds(bufferTargetSeconds) + Player::MpvPlayer::steadyStateBackBufferSeconds();
+        adaptiveLiveCacheBudgetSeconds(bufferTargetSeconds) + Player::MpvPlayer::steadyStateBackBufferSeconds();
     if (!averageBitsPerSecond.has_value()
         || !std::isfinite(averageBitsPerSecond.value())
         || averageBitsPerSecond.value() <= 0.0) {
@@ -155,6 +159,8 @@ std::optional<double> PlaybackBuffering::observeBitrate(std::optional<double> bi
 void PlaybackBuffering::resetAdaptation()
 {
     resetLiveReserve(false, false);
+    cancelLiveSlowdown(0);
+    m_liveSlowdownCooldownUntilMs.reset();
     m_tuner.reset();
     m_lastPolicy.reset();
 }
@@ -162,12 +168,70 @@ void PlaybackBuffering::observeDelivery(double nowSeconds, double endSeconds, bo
 {
     m_tuner.observe(nowSeconds, endSeconds, idle);
 }
+// Targets are seconds, and the explicit monotonic clock is milliseconds.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+bool PlaybackBuffering::beginLiveSlowdown(const Player::MpvPlayer::PlaybackBufferSnapshot &sample,
+                                         double previousTarget, double target, qint64 nowMs)
+{
+    if (m_liveSlowdownActive || liveReservePending()
+        || (m_liveSlowdownCooldownUntilMs && nowMs < *m_liveSlowdownCooldownUntilMs)
+        || !std::isfinite(previousTarget) || !std::isfinite(target) || target <= previousTarget
+        || !LiveBufferPolicy::valid(sample) || sample.readerEof.value_or(false)
+        || sample.seconds.value_or(0.0) >= target) return false;
+    m_liveSlowdownActive = true;
+    m_liveSlowdownPlayedMs = 0;
+    m_liveSlowdownSampleMs.reset();
+    m_liveSlowdownPosition.reset();
+    return true;
+}
+
+double PlaybackBuffering::advanceLiveSlowdown(qint64 nowMs, std::optional<double> position, bool playing)
+{
+    if (!m_liveSlowdownActive) return 1.0;
+    if (!playing || !position || !std::isfinite(*position) || *position < 0.0) {
+        // A pause, stalled/missing clock or suspended sampler owns no played time.
+        m_liveSlowdownSampleMs.reset();
+        m_liveSlowdownPosition.reset();
+    } else {
+        if (m_liveSlowdownSampleMs && m_liveSlowdownPosition) {
+            const auto elapsed = nowMs - *m_liveSlowdownSampleMs;
+            const auto advanced = *position - *m_liveSlowdownPosition;
+            if (elapsed > 0 && elapsed <= 1000 && advanced > 0.0
+                && advanced <= static_cast<double>(elapsed) / 1000.0 + 0.25)
+                m_liveSlowdownPlayedMs += elapsed;
+        }
+        m_liveSlowdownSampleMs = nowMs;
+        m_liveSlowdownPosition = position;
+    }
+    if (m_liveSlowdownPlayedMs >= kLiveSlowdownDurationMs) {
+        cancelLiveSlowdown(nowMs);
+        return 1.0;
+    }
+    const auto ramp = std::min({m_liveSlowdownPlayedMs,
+        kLiveSlowdownDurationMs - m_liveSlowdownPlayedMs, kLiveSlowdownRampMs});
+    return 1.0 - (1.0 - kLiveSlowdownSpeed) * static_cast<double>(ramp)
+        / static_cast<double>(kLiveSlowdownRampMs);
+}
+
+void PlaybackBuffering::cancelLiveSlowdown(qint64 nowMs)
+{
+    if (m_liveSlowdownActive) m_liveSlowdownCooldownUntilMs = nowMs + kLiveSlowdownCooldownMs;
+    m_liveSlowdownActive = false;
+    m_liveSlowdownPlayedMs = 0;
+    m_liveSlowdownSampleMs.reset();
+    m_liveSlowdownPosition.reset();
+}
+
+double PlaybackBuffering::liveSlowdownRemainingSeconds() const
+{
+    return m_liveSlowdownActive ? static_cast<double>(kLiveSlowdownDurationMs - m_liveSlowdownPlayedMs) / 1000.0 : 0.0;
+}
 std::optional<Player::MpvPlayer::SteadyStateBufferingPolicy> PlaybackBuffering::retune(
     bool catchup, double configured, std::optional<double> cache, bool fastLive, qint64 nowMs)
 {
     const auto target = targetSeconds(configured);
     Player::MpvPlayer::SteadyStateBufferingPolicy next {
-        .cacheLimitSeconds = catchup ? kCatchupActiveCacheHeadSeconds : adaptiveSteadyStateCacheLimitSeconds(target),
+        .cacheLimitSeconds = catchup ? kCatchupActiveCacheHeadSeconds : Player::MpvPlayer::unlimitedReadAheadSeconds(),
         .hysteresisSeconds = catchup ? kCatchupActiveCacheHeadSeconds - kCatchupActiveCacheRefillMarginSeconds
                                     : adaptiveSteadyStateCacheHysteresisSeconds(target),
         .maxBytes = catchup ? adaptiveCatchupMaxBytes(m_average) : adaptiveSteadyStateMaxBytes(target, m_average),
@@ -211,37 +275,45 @@ ReserveDecision PlaybackBuffering::resetLiveReserve(bool resume, bool manuallyPa
     m_livePhase = ReservePhase::Idle;
     m_liveTarget = 0.0;
     m_liveRetryMs.reset();
+    m_liveDepletion.reset();
     if (!preserveDelivery) interruptDelivery();
     return {pending && resume && !manuallyPaused ? PauseCommand::Resume : PauseCommand::None, false};
 }
-// Inputs retain distinct documented units (seconds, segment count or monotonic milliseconds).
+// Preserve the policy's seconds/monotonic-milliseconds calling convention.
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-ReserveDecision PlaybackBuffering::beginLiveReserve(std::optional<double> cache, bool readerIdle, double configured, qint64 nowMs)
+ReserveDecision PlaybackBuffering::beginLiveReserve(const Player::MpvPlayer::PlaybackBufferSnapshot &sample, double configured, qint64 nowMs)
 {
-    if (liveReservePending() || readerIdle || !validCache(cache) || cache.value_or(0.0) > 0.1
-        || (m_liveRetryMs && nowMs - *m_liveRetryMs < 10000)) return {PauseCommand::None, liveReservePending()};
+    if (liveReservePending()) return {PauseCommand::None, true};
+    if (m_liveRetryMs && nowMs - *m_liveRetryMs < 10000) {
+        m_liveDepletion.reset();
+        return {};
+    }
+    if (!m_liveDepletion.observe(sample, nowMs)) return {};
     m_liveTarget = std::max(3.0, targetSeconds(configured));
     m_livePhase = ReservePhase::Filling;
     m_liveStartedMs = nowMs;
-    return {PauseCommand::Pause, true};
+    m_liveDepletion.reset();
+    return {PauseCommand::Pause, true, false, QStringLiteral("confirmed-depletion")};
 }
-void PlaybackBuffering::raiseLiveTarget(double configured)
-{
-    m_liveTarget = std::max(m_liveTarget, targetSeconds(configured));
-}
-// Inputs retain distinct documented units (seconds, segment count or monotonic milliseconds).
+// The two clock arguments are hold age and monotonic time, respectively.
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-ReserveDecision PlaybackBuffering::advanceLiveReserve(std::optional<double> cache, bool readerIdle, bool eof,
-// Preserve the established positional contract; parameter names identify their roles.
+ReserveDecision PlaybackBuffering::advanceLiveReserve(const Player::MpvPlayer::PlaybackBufferSnapshot &sample,
+// Preserve the explicit hold-age/monotonic-time ordering.
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
                                                      qint64 elapsedMs, qint64 nowMs)
 {
     if (!liveReservePending()) return {};
-    const auto ready = validCache(cache) && cache.value_or(0.0) >= m_liveTarget;
-    const auto capacity = elapsedMs >= 1000 && readerIdle && validCache(cache) && cache.value_or(0.0) > 1.0;
-    const auto timeout = elapsedMs >= static_cast<qint64>(1000.0 * std::clamp(m_liveTarget * 2.0 + 2.0, 10.0, 30.0));
+    const auto valid = LiveBufferPolicy::valid(sample);
+    const auto cache = sample.seconds.value_or(0.0);
+    const auto ready = LiveBufferPolicy::ready(sample, m_liveTarget);
+    const auto capacity = elapsedMs >= 1000 && sample.readerIdle.value_or(false) && valid && cache > 1.0;
+    const auto eof = sample.fresh && sample.readerEof.value_or(false);
+    const auto timeout = elapsedMs >= LiveBufferPolicy::maximumHoldMs;
     if (!ready && !capacity && !timeout && !eof) return {PauseCommand::None, true};
-    const auto result = resetLiveReserve(true, false, ready);
+    auto result = resetLiveReserve(true, false, true);
+    result.reconnect = valid && cache <= 0.05 && (eof || timeout);
+    result.reason = ready ? QStringLiteral("target") : capacity ? QStringLiteral("capacity")
+        : eof ? QStringLiteral("eof-tail") : QStringLiteral("hold-timeout");
     if (!ready) m_liveRetryMs = nowMs;
     return result;
 }

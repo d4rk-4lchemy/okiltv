@@ -44,7 +44,7 @@ void LiveBufferTuner::observe(const double now, const double cacheEnd, const boo
         m_waitStarted = now;
     }
     // Relax the capacity slowly after the source stops showing long gaps.
-    // Changing capacity never seeks forward or changes playback speed.
+    // The tuner only learns capacity; the application owns any speed adaptation.
     if (m_lastEvidence.has_value() && now - *m_lastEvidence > 60.0
         && now - m_lastReduction >= 30.0) {
         m_target = std::max(0.0, m_target - 0.5);

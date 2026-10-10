@@ -24,10 +24,12 @@ QString &migrationAttemptedRootStorage()
 
 QString defaultRootDirectory()
 {
+#ifndef Q_OS_MACOS
     const auto appData = QProcessEnvironment::systemEnvironment().value(QStringLiteral("APPDATA"));
     if (!appData.isEmpty()) {
         return QDir(appData).filePath(QStringLiteral("OKILTV"));
     }
+#endif
 
     const auto fallback = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     return QDir(fallback).filePath(QStringLiteral("OKILTV"));
@@ -38,6 +40,7 @@ bool isAbsoluteDirectoryPath(const QString &path)
     return !path.trimmed().isEmpty() && QDir::isAbsolutePath(path.trimmed());
 }
 
+#ifndef Q_OS_MACOS
 bool copyMissingRecursively(const QString &sourcePath, const QString &targetPath)
 {
     const QFileInfo sourceInfo(sourcePath);
@@ -72,9 +75,13 @@ bool copyMissingRecursively(const QString &sourcePath, const QString &targetPath
     QDir().mkpath(QFileInfo(targetPath).absolutePath());
     return QFile::copy(sourcePath, targetPath);
 }
+#endif
 
 void migrateLegacyAppDataIfNeeded(const QString &targetRootDirectory)
 {
+#ifdef Q_OS_MACOS
+    Q_UNUSED(targetRootDirectory);
+#else
     const auto normalizedTargetRoot = QDir::cleanPath(targetRootDirectory);
     auto &attemptedRoot = migrationAttemptedRootStorage();
     if (attemptedRoot == normalizedTargetRoot) {
@@ -94,6 +101,7 @@ void migrateLegacyAppDataIfNeeded(const QString &targetRootDirectory)
     }
 
     copyMissingRecursively(normalizedLegacyRoot, normalizedTargetRoot);
+#endif
 }
 
 QString rootDirectory()

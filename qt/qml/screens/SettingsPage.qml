@@ -1722,7 +1722,7 @@ Item {
 
                     Layout.fillWidth: true
                     fillFieldWidth: true
-                    placeholderText: "Optional mpv DLL override"
+                    placeholderText: "Optional mpv library override"
                     nameFilters: ["Dynamic libraries (*.dll *.so *.dylib)", "All files (*)"]
                     onTextEdited: function(text) { root.settings.mpvDllPath = text }
 

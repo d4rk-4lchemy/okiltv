@@ -450,7 +450,13 @@ target_link_libraries(OKILTVQtVodRangeTests PRIVATE Qt6::Core Qt6::Network Qt6::
 add_test(NAME OKILTVQtVodRangeTests COMMAND OKILTVQtVodRangeTests)
 set_tests_properties(OKILTVQtVodRangeTests PROPERTIES LABELS "playback;vod" TIMEOUT 60)
 find_program(OKILTV_VOD_XVFB_RUN xvfb-run)
-if (OKILTV_VOD_XVFB_RUN AND NOT CMAKE_CROSSCOMPILING)
+if (APPLE)
+    add_test(NAME OKILTVQtVodMpvTests COMMAND OKILTVQtVodMpvTests)
+    add_test(NAME OKILTVQtVodRuntimeTests COMMAND OKILTVQtAppTests vodRuntimeNativePlayback -v2)
+    set_tests_properties(OKILTVQtVodRuntimeTests PROPERTIES LABELS "app;vod" TIMEOUT 90
+        ENVIRONMENT "QT_QPA_PLATFORM=cocoa;QSG_RHI_BACKEND=opengl;OKILTV_HEADLESS_TEST=0;OKILTV_VOD_RENDER_TEST=1")
+    set_tests_properties(OKILTVQtVodMpvTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=cocoa;QSG_RHI_BACKEND=opengl;OKILTV_HEADLESS_TEST=0")
+elseif (OKILTV_VOD_XVFB_RUN AND NOT CMAKE_CROSSCOMPILING)
     add_test(NAME OKILTVQtVodMpvTests COMMAND ${OKILTV_VOD_XVFB_RUN} -a $<TARGET_FILE:OKILTVQtVodMpvTests>)
     add_test(NAME OKILTVQtVodRuntimeTests COMMAND ${OKILTV_VOD_XVFB_RUN} -a $<TARGET_FILE:OKILTVQtAppTests> vodRuntimeNativePlayback -v2)
     set_tests_properties(OKILTVQtVodRuntimeTests PROPERTIES LABELS "app;vod" TIMEOUT 90
@@ -517,6 +523,16 @@ foreach(target OKILTVQtEpgSearchStoreTests OKILTVQtEpgSearchModelTests)
 endforeach()
 set_property(TEST OKILTVQtEpgSearchStoreTests APPEND PROPERTY LABELS core)
 set_property(TEST OKILTVQtEpgSearchModelTests APPEND PROPERTY LABELS app)
+
+if (APPLE)
+    qt_add_executable(OKILTVQtMacosPlatformTests tst_macos_platform.cpp
+        ../src/core/processutils.cpp)
+    target_include_directories(OKILTVQtMacosPlatformTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+    target_link_libraries(OKILTVQtMacosPlatformTests PRIVATE OKILTVMacosKeychain Qt6::Sql Qt6::Test)
+    set_target_properties(OKILTVQtMacosPlatformTests PROPERTIES MACOSX_BUNDLE FALSE)
+    add_test(NAME OKILTVQtMacosPlatformTests COMMAND OKILTVQtMacosPlatformTests)
+    set_tests_properties(OKILTVQtMacosPlatformTests PROPERTIES LABELS core TIMEOUT 60)
+endif ()
 
 # Every registered test must be reachable by a PR matrix label filter.
 get_property(OKILTV_REGISTERED_TESTS DIRECTORY PROPERTY TESTS)

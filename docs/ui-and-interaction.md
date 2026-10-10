@@ -4,6 +4,14 @@
 
 ## Shell and visual rules
 
+macOS retains the custom window chrome and existing overlay/input contracts.
+Command-Q uses `StandardKey.Quit`; Cocoa menu/Dock quit requests are intercepted
+until `Main.qml::finishExit` authorizes termination, preserving DVR/download
+confirmation and shutdown. Application activation restores a hidden window.
+The player setting labels its override as an mpv library and accepts `.dylib`
+alongside other platform formats. Cocoa dialogs, tray/Dock, Spaces, Retina,
+shortcuts and frameless behavior require [Mac acceptance](macos-tester-checklist.md).
+
 [Main.qml](../qt/qml/Main.qml) owns the application window and global shortcuts.
 [LiveTvPage.qml](../qt/qml/screens/LiveTvPage.qml) stays rendered behind overlays.
 `ShellController.activeOverlay` is `none`, `guide`, `settings` or `vod`; these are
@@ -501,6 +509,14 @@ conversion remain consistent. Do not change technical ISO/UTC timestamps, provid
 URLs, programme identity or elapsed durations when presentation preferences change.
 Bind to notifying patterns rather than retaining timer-formatted clock strings.
 
+Live EPG previews, cached programme progress and the Guide current-time line react
+to system minute changes, observed by a shared one-second controller clock poll.
+They update from retained data before asynchronous EPG reads; ordinary periodic
+NowNext refreshes keep cached content visible. Guide clock ticks preserve selection
+and scroll. The live screen's displayed clock still samples every second, and
+archive/buffer playback position retains its separate transport meaning. See the
+[EPG presentation clock](sources-and-epg.md#epg-presentation-clock).
+
 Native file/folder dialogs in [PathBrowseField](../qt/qml/components/PathBrowseField.qml)
 are created lazily; set `parentWindow` from `Window.window` before opening. Eager
 creation can stall Settings, and missing window ownership can break Windows dialogs.
@@ -512,7 +528,15 @@ using the current continuous audio/video cache bounds. Values have one decimal
 place, estimates carry `≈`, and stale/unavailable observations show `N/A`.
 Configured cache targets do not cap displayed reserve. Live, catch-up and VOD
 share this presentation; local Timeshift additionally reports distance to its
-live edge. See [buffer telemetry and recovery](playback.md#buffer-telemetry-and-live-recovery).
+live edge. The diagnostic snapshot reports Live's forward capacity as
+`Memory limited`, without a numeric download time ceiling; its existing byte
+budgets remain separate from the displayed reserve. During a Live refill hold,
+the displayed goal is frozen to the active
+hold's goal, including reconnect refill, rather than following later target
+changes. See [buffer telemetry and recovery](playback.md#buffer-telemetry-and-live-recovery).
+Ordinary Live additionally shows `Live slowdown`: inactive, or its temporary
+requested speed and remaining progressing-playback seconds. This diagnostic row
+does not appear during catch-up or active VOD.
 
 Register every new QML file in `qt_add_qml_module()` in
 [qt/CMakeLists.txt](../qt/CMakeLists.txt), and add resources through the existing

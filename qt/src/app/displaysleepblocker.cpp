@@ -73,6 +73,27 @@ void DisplaySleepBlocker::setBlocked(const bool blocked)
     } else {
         m_windowsRefreshTimer.stop();
     }
+#elif defined(Q_OS_MACOS)
+    if (m_blocked == blocked) return;
+    if (blocked) {
+        const auto displayResult = IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleDisplaySleep,
+            kIOPMAssertionLevelOn, CFSTR("OKILTV stream playback"), &m_displayAssertion);
+        const auto systemResult = IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep,
+            kIOPMAssertionLevelOn, CFSTR("OKILTV stream playback"), &m_systemAssertion);
+        if (displayResult != kIOReturnSuccess || systemResult != kIOReturnSuccess) {
+            if (m_displayAssertion != kIOPMNullAssertionID) IOPMAssertionRelease(m_displayAssertion);
+            if (m_systemAssertion != kIOPMNullAssertionID) IOPMAssertionRelease(m_systemAssertion);
+            m_displayAssertion = m_systemAssertion = kIOPMNullAssertionID;
+            Core::DebugLogger::instance().log(QStringLiteral("power"),
+                QStringLiteral("macOS sleep assertions failed (%1, %2).")
+                    .arg(displayResult).arg(systemResult));
+            return;
+        }
+    } else {
+        if (m_displayAssertion != kIOPMNullAssertionID) IOPMAssertionRelease(m_displayAssertion);
+        if (m_systemAssertion != kIOPMNullAssertionID) IOPMAssertionRelease(m_systemAssertion);
+        m_displayAssertion = m_systemAssertion = kIOPMNullAssertionID;
+    }
 #elif defined(OKILTV_HAS_DBUS_SLEEP_BLOCKER)
     if (m_blocked == blocked) {
         return;

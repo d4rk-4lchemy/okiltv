@@ -156,7 +156,7 @@ public:
     static QString formatDebugBufferDuration(double bufferDurationSeconds);
     static QString formatDebugFramerate(double framesPerSecond);
     static QString formatDebugBitrate(double bitsPerSecond);
-    static double adaptiveSteadyStateCacheLimitSeconds(double bufferTargetSeconds);
+    static double adaptiveLiveCacheBudgetSeconds(double bufferTargetSeconds);
     static double adaptiveSteadyStateCacheHysteresisSeconds(double bufferTargetSeconds);
     static qint64 adaptiveSteadyStateMaxBytes(
         double bufferTargetSeconds,
@@ -221,6 +221,7 @@ public:
     std::function<bool(std::function<void()>)> playbackStartGate;
     bool isSharedPlaybackPlayer(const Player::MpvPlayer *candidate) const;
     bool usingSharedPlayback() const;
+    void setLiveSlowdownEnabled(bool enabled);
     QString currentPlaybackUrl() const;
     double playbackPositionSeconds() const;
     bool inCatchupMode() const;
@@ -315,12 +316,13 @@ private:
     void resetAdaptiveSteadyStateBufferingState();
     std::optional<double> updateBitrateAverageBitsPerSecond(std::optional<double> instantaneousBitsPerSecond);
     void sampleLiveDelivery();
+    bool liveSlowdownEligible() const;
+    void updateLiveSlowdown();
+    void resetLiveSlowdown();
     void observeLiveDelivery(const Player::MpvPlayer::CacheReadState &readState);
     bool evaluateLiveReserve();
-    bool advanceLiveReserve(std::optional<double> cacheSeconds,
-                            const std::optional<Player::MpvPlayer::CacheReadState> &readState,
-                            qint64 elapsedMs);
-    bool beginLiveReserve(std::optional<double> cacheSeconds, bool readerIdle);
+    bool advanceLiveReserve(const Player::MpvPlayer::PlaybackBufferSnapshot &sample, qint64 elapsedMs);
+    bool beginLiveReserve(const Player::MpvPlayer::PlaybackBufferSnapshot &sample, qint64 nowMs);
     void resetLiveReserve(bool resumePlayback, bool preserveDeliveryObservation = false);
     double effectiveLiveBufferTargetSeconds() const;
     void maybeRetuneSteadyStateBuffering(std::optional<double> cacheDurationSeconds, double bufferTargetSeconds);
@@ -394,6 +396,7 @@ private:
     const Player::MpvPlayer *playbackPlayer() const;
 
     Playback::PlaybackBuffering m_buffering;
+    bool m_liveSlowdownEnabled { true };
     Playback::PlaybackRecovery m_recovery;
     Playback::CatchupPlaybackSession m_catchupSession;
     QSet<Player::MpvPlayer *> m_playbackSignalSources;

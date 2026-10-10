@@ -44,7 +44,7 @@ public:
 
     struct SteadyStateBufferingPolicy
     {
-        double cacheLimitSeconds;
+        double cacheLimitSeconds; // unlimitedReadAheadSeconds() for byte-limited Live.
         double hysteresisSeconds;
         qint64 maxBytes;
         qint64 maxBackBytes;
@@ -58,6 +58,9 @@ public:
         std::optional<double> inputBytesPerSecond;
         bool estimated { true };
         bool fresh { false };
+        std::optional<bool> readerIdle;
+        std::optional<bool> readerEof;
+        std::optional<qint64> sampledAtMs;
     };
     static PlaybackBufferSnapshot playbackBufferForCacheState(double positionSeconds, const QVariantMap &state);
     PlaybackBufferSnapshot playbackBufferSnapshot() const;
@@ -66,9 +69,10 @@ public:
     ~MpvPlayer() override;
 
     static qint64 demuxerMaxBytesForBufferSeconds(double bufferSeconds);
-    static double cacheWindowSecondsForBufferTarget(double bufferTargetSeconds);
+    // Reference duration for byte budget sizing, never a Live download ceiling.
+    static double cacheBudgetSecondsForBufferTarget(double bufferTargetSeconds);
     static double steadyStateBackBufferSeconds();
-    static double steadyStateCacheLimitSecondsForBufferTarget(double bufferTargetSeconds);
+    static double unlimitedReadAheadSeconds();
     static double steadyStateCacheHysteresisSecondsForBufferTarget(double bufferTargetSeconds);
 
     void configureLibraryPath(const QString &path);
@@ -104,6 +108,12 @@ public:
     void setHwdec(const QString &mode);
     void togglePause();
     void setPaused(bool paused);
+    // Temporary Live policy ownership; never initialize a dormant backend.
+    bool beginLiveSlowdown();
+    bool setLiveSlowdownSpeed(double speed);
+    void resetLiveSlowdown();
+    bool liveSlowdownActive() const { return m_liveSlowdownOriginalPitch.has_value(); }
+    double liveSlowdownSpeed() const { return m_liveSlowdownSpeed; }
     void setVolume(int volume);
     void setAudioEnabled(bool enabled);
     int requestedVolume() const;
@@ -313,12 +323,14 @@ private:
     QString m_appliedPictureShader;
     std::unique_ptr<QTemporaryDir> m_pictureShaderDirectory;
     double m_bufferSeconds { 3.0 };
-    double m_steadyStateCacheLimitSeconds { 6.0 };
+    double m_steadyStateCacheLimitSeconds { unlimitedReadAheadSeconds() };
     double m_steadyStateCacheHysteresisSeconds { 5.0 };
     qint64 m_steadyStateDemuxerMaxBytes { static_cast<qint64>(96) * 1024 * 1024 };
     qint64 m_steadyStateDemuxerMaxBackBytes { static_cast<qint64>(64) * 1024 * 1024 };
     QString m_userAgent;
     bool m_startupBufferingStrictMode { true };
+    std::optional<bool> m_liveSlowdownOriginalPitch;
+    double m_liveSlowdownSpeed { 1.0 };
     double m_liveRefillSeconds { 0.0 };
     bool m_reinitializePending { false };
     std::optional<bool> m_sourceInterlaced;

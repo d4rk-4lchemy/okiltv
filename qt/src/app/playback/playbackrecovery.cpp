@@ -60,6 +60,7 @@ void PlaybackRecovery::clearAttempt() {
     if (active()) m_phase = Phase::Ready;
     m_reconnectFileLoaded = false;
     m_reconnectReserveReady = false;
+    m_reserveDepletion.reset();
     resetStabilization();
 }
 bool PlaybackRecovery::attemptInFlight() const {
@@ -86,12 +87,12 @@ void PlaybackRecovery::beginLoad(bool reserve, double target, qint64 nowMs) {
     m_reconnectFileLoaded = false;
     m_reconnectReserveReady = false;
     m_reserveTarget = std::max(3.0, target);
-    m_reserveHighWater = 0.0;
-    m_reserveProgressMs = m_totalStartedMs = m_attemptStartedMs = nowMs;
+    m_reserveStartedMs = m_totalStartedMs = m_attemptStartedMs = nowMs;
+    m_reserveDepletion.reset();
 }
 void PlaybackRecovery::loaded(qint64 nowMs) {
     m_reconnectFileLoaded = true;
-    m_reserveProgressMs = nowMs;
+    m_reserveStartedMs = nowMs;
 }
 bool PlaybackRecovery::totalExpired(int waitMs, qint64 nowMs) const {
     if (stabilizing() && m_latestRecoveryPlayable && m_lastRecoveryObservationMs
@@ -109,40 +110,40 @@ QString PlaybackRecovery::attemptTimeout(int waitMs, int sampleIntervalMs, qint6
     if (nowMs - m_attemptStartedMs < limit) return {};
     return stabilizing() ? QStringLiteral("stabilization-timeout") : QStringLiteral("attempt-timeout");
 }
-PlaybackRecovery::ReserveResult PlaybackRecovery::reserve(std::optional<double> cache, bool idle, bool eof,
-// Preserve the established positional contract; parameter names identify their roles.
-// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-    bool buffering, double waitSeconds, qint64 nowMs) {
+PlaybackRecovery::ReserveResult PlaybackRecovery::reserve(
+    const Player::MpvPlayer::PlaybackBufferSnapshot &sample, qint64 nowMs) {
     if (!active() || !attemptInFlight() || !m_reconnectFileLoaded) return {};
-    const auto valid = cache.has_value() && std::isfinite(*cache) && *cache >= 0.0;
+    const auto valid = LiveBufferPolicy::valid(sample);
+    const auto cache = sample.seconds.value_or(0.0);
     auto action = ReserveResult::Action::None;
     if (!reservePending()) {
-        if (!valid || (*cache > 1.0 && !buffering)) return {};
+        if (!m_reserveDepletion.observe(sample, nowMs)) return {};
         m_phase = Phase::RebuildingReserve;
         m_reconnectReserveReady = false;
-        m_reserveHighWater = 0.0;
-        m_reserveProgressMs = nowMs;
+        m_reserveStartedMs = nowMs;
+        m_reserveDepletion.reset();
         action = ReserveResult::Action::Pause;
     }
-    if (valid && *cache > m_reserveHighWater + 0.1) {
-        m_reserveHighWater = *cache;
-        m_reserveProgressMs = nowMs;
-    }
-    const auto capacity = idle && !eof && nowMs - m_reserveProgressMs >= 1000 && valid && *cache > 1.0;
-    if (!eof && ((valid && *cache >= m_reserveTarget) || capacity)) {
+    const auto elapsed = nowMs - m_reserveStartedMs;
+    const auto capacity = sample.readerIdle.value_or(false) && valid && cache > 1.0 && elapsed >= 1000;
+    const auto eof = sample.fresh && sample.readerEof.value_or(false);
+    const auto timeout = elapsed >= LiveBufferPolicy::maximumHoldMs;
+    const auto ready = LiveBufferPolicy::ready(sample, m_reserveTarget);
+    if (ready || capacity || eof || timeout) {
+        // EOF and deadlines release playable cached media before replacing the
+        // transport. Unknown telemetry never becomes evidence of an empty cache.
+        if (valid && cache <= 0.05 && (eof || timeout)) {
+            clearAttempt();
+            return {ReserveResult::Action::Stop, true, eof ? QStringLiteral("reserve-eof") : QStringLiteral("reserve-empty-timeout")};
+        }
         m_phase = Phase::Loading;
         m_reconnectReserveReady = true;
         resetStabilization();
         m_attemptStartedMs = nowMs;
-        return {ReserveResult::Action::Resume, false, {}};
+        return {ReserveResult::Action::Resume, false, ready ? QStringLiteral("reserve-target")
+            : capacity ? QStringLiteral("reserve-capacity") : eof ? QStringLiteral("reserve-eof-tail") : QStringLiteral("reserve-hold-timeout")};
     }
-    const auto limit = static_cast<qint64>(1000.0 * std::max(normalizedWaitForDataStreamSeconds(waitSeconds),
-        std::clamp(m_reserveTarget * 2.0 + 2.0, 10.0, 120.0)));
-    if (eof || nowMs - m_reserveProgressMs >= limit) {
-        clearAttempt();
-        return {ReserveResult::Action::Stop, true, eof ? QStringLiteral("reserve-eof") : QStringLiteral("reserve-no-progress")};
-    }
-    return {action, true, {}};
+    return {action, true, action == ReserveResult::Action::Pause ? QStringLiteral("confirmed-depletion") : QString {}};
 }
 bool PlaybackRecovery::recovered() const {
     return stabilizing() && m_stabilizationReady;
@@ -184,17 +185,16 @@ QString PlaybackRecovery::noRefill(const StreamHealth &health, const RecoveryCon
         return {};
     }
 
-    const auto hasCacheSample = health.cacheDurationSeconds.has_value()
+    const auto hasCacheSample = health.sampleFresh && health.cacheDurationSeconds.has_value()
         && std::isfinite(health.cacheDurationSeconds.value())
         && health.cacheDurationSeconds.value() >= 0.0;
     const auto normalizedCacheDuration = hasCacheSample
         ? std::max(0.0, health.cacheDurationSeconds.value())
         : 0.0;
     const auto normalizedBufferTarget = normalizedBufferTargetSeconds(health.bufferTargetSeconds);
+    // Delivery gaps are harmless while any usable forward reserve remains.
     const auto bufferNeedsRefill = hasCacheSample
-        && std::isfinite(health.bufferTargetSeconds)
-        && health.bufferTargetSeconds > 0.0
-        && normalizedCacheDuration <= normalizedBufferTarget + kNoRefillCacheIncreaseEpsilonSeconds;
+        && normalizedCacheDuration <= kReconnectDepletedBufferThresholdSeconds;
     const auto cacheCriticallyLow = hasCacheSample
         && normalizedCacheDuration <= kReconnectDepletedBufferThresholdSeconds;
     const auto hasCacheSpeedSample = health.cacheSpeedBytesPerSecond.has_value()
@@ -203,8 +203,6 @@ QString PlaybackRecovery::noRefill(const StreamHealth &health, const RecoveryCon
     const auto normalizedCacheSpeed = hasCacheSpeedSample
         ? std::max(0.0, health.cacheSpeedBytesPerSecond.value())
         : 0.0;
-    const auto cacheSpeedRefilling = hasCacheSpeedSample
-        && normalizedCacheSpeed > kNoRefillCacheSpeedThresholdBytesPerSecond;
 
     bool cacheRefilling = false;
     bool cacheBaselineOnly = false;
@@ -224,7 +222,9 @@ QString PlaybackRecovery::noRefill(const StreamHealth &health, const RecoveryCon
     }
 
     const auto frameHealthy = framePtsAdvanced.value_or(playbackAdvanced);
-    if (!context.buffering && !context.stalled && playbackAdvanced && frameHealthy && !cacheDraining && !cacheCriticallyLow) {
+    // Observed consumption is stronger evidence than an empty demux queue:
+    // decoded media may still be playing while packets pass straight through.
+    if (!context.buffering && !context.stalled && playbackAdvanced && frameHealthy) {
         m_noRefillConsecutiveCount = 0;
         return {};
     }
@@ -240,7 +240,7 @@ QString PlaybackRecovery::noRefill(const StreamHealth &health, const RecoveryCon
         return {};
     }
 
-    if (cacheSpeedRefilling || cacheRefilling) {
+    if (cacheRefilling) {
         m_noRefillConsecutiveCount = 0;
         return {};
     }
@@ -322,33 +322,27 @@ QString PlaybackRecovery::videoFreeze(const StreamHealth &health, const Recovery
     const auto normalizedCacheSpeed = hasCacheSpeedSample
         ? std::max(0.0, health.cacheSpeedBytesPerSecond.value())
         : 0.0;
-    const auto hasCacheSample = health.cacheDurationSeconds.has_value()
+    const auto hasCacheSample = health.sampleFresh && health.cacheDurationSeconds.has_value()
         && std::isfinite(health.cacheDurationSeconds.value())
         && health.cacheDurationSeconds.value() >= 0.0;
     const auto normalizedCacheDuration =
         hasCacheSample ? std::max(0.0, health.cacheDurationSeconds.value()) : 0.0;
-    const auto streamHealthyEnough = (hasCacheSpeedSample
-                                      && normalizedCacheSpeed > kNoRefillCacheSpeedThresholdBytesPerSecond)
-        || (hasCacheSample && normalizedCacheDuration > kReconnectDepletedBufferThresholdSeconds);
+    const auto streamHealthyEnough = hasCacheSample
+        && normalizedCacheDuration > LiveBufferPolicy::depletionSeconds;
     if (!streamHealthyEnough) {
         m_videoFreezeConsecutiveCount = 0;
         return {};
     }
 
     const auto hasVideoTrack = context.hasVideo;
-    if (!hasVideoTrack) {
-        m_videoFreezeConsecutiveCount = 0;
-        return {};
-    }
-
-    const auto frameFrozen = !framePtsAdvanced.has_value() || !framePtsAdvanced.value();
-    const auto classicFreezeSignal = playbackAdvanced
+    const auto frameFrozen = !hasVideoTrack || !framePtsAdvanced.has_value() || !framePtsAdvanced.value();
+    const auto classicFreezeSignal = hasVideoTrack && playbackAdvanced
         && framePtsAdvanced.has_value()
         && !framePtsAdvanced.value()
         && !context.buffering
         && !context.stalled;
     const auto decoderStallSignal = frameFrozen
-        && (context.buffering || context.stalled || !playbackAdvanced);
+        && (hasVideoTrack ? (context.buffering || context.stalled || !playbackAdvanced) : !playbackAdvanced);
     if (!classicFreezeSignal && !decoderStallSignal) {
         m_videoFreezeConsecutiveCount = 0;
         return {};
@@ -466,7 +460,7 @@ bool PlaybackRecovery::observeRecovery(const StreamHealth &health, const Recover
     const auto normalizedCacheSpeed = hasCacheSpeedSample
         ? std::max(0.0, health.cacheSpeedBytesPerSecond.value())
         : 0.0;
-    const auto hasCacheSample = health.cacheDurationSeconds.has_value()
+    const auto hasCacheSample = health.sampleFresh && health.cacheDurationSeconds.has_value()
         && std::isfinite(health.cacheDurationSeconds.value())
         && health.cacheDurationSeconds.value() >= 0.0;
     const auto normalizedCacheDuration = hasCacheSample ? std::max(0.0, health.cacheDurationSeconds.value()) : 0.0;

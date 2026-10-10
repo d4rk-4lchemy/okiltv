@@ -23,7 +23,7 @@ class EpgGridModel final : public QAbstractListModel
     Q_PROPERTY(QString selectedProgramStart READ selectedProgramStart WRITE setSelectedProgramStart NOTIFY selectedProgramStartChanged)
     Q_PROPERTY(QVariantMap selectedProgram READ selectedProgram NOTIFY selectedProgramChanged)
     Q_PROPERTY(bool rebuildPending READ rebuildPending NOTIFY rebuildPendingChanged)
-    Q_PROPERTY(double currentTimeOffsetMinutes READ currentTimeOffsetMinutes NOTIFY timeSlotsChanged)
+    Q_PROPERTY(double currentTimeOffsetMinutes READ currentTimeOffsetMinutes NOTIFY currentTimeChanged)
 
 public:
     ~EpgGridModel() override;
@@ -44,6 +44,7 @@ public:
     explicit EpgGridModel(Core::EpgService *epg, QObject *parent = nullptr);
 
     void setDateTimeFormat(Core::DateTimeFormatOptions options);
+    void refreshTime(const QDateTime &nowUtc);
 
     int rowCount(const QModelIndex &parent = {}) const override;
     QVariant data(const QModelIndex &index, int role) const override;
@@ -82,6 +83,7 @@ signals:
     void programResolved(int channelId, const QVariantMap &program, bool adjacent);
     void rebuildPendingChanged();
     void timeSlotsChanged();
+    void currentTimeChanged();
     void visibleTimeSlotsChanged();
     void windowChanged();
     void selectedChannelIdChanged();
@@ -128,6 +130,7 @@ private:
     QList<Core::Channel> m_channels;
     QList<Row> m_rows;
     QDateTime m_windowStart;
+    QDateTime m_clockUtc = QDateTime::currentDateTimeUtc();
     int m_guidePastHours { 6 };
     int m_lookAheadHours { 24 };
     int m_windowSpanMinutes { (6 + 24) * 60 };

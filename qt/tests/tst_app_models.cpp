@@ -1,4 +1,6 @@
 #include <QAbstractItemModelTester>
+#include <QSemaphore>
+#include <QScopeGuard>
 #include "../src/core/secretprotection.h"
 #include <sstream>
 #include "../src/app/vod/vodruntime.h"
@@ -58,6 +60,9 @@
 
 #include "../src/player/mpvplaybackengine.h"
 #include <QQuickWindow>
+#ifdef Q_OS_MACOS
+#include <QSurfaceFormat>
+#endif
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -102,6 +107,28 @@ using namespace OKILTV::App;
 using namespace OKILTV::Core;
 
 namespace {
+
+using LiveSample = OKILTV::Player::MpvPlayer::PlaybackBufferSnapshot;
+LiveSample liveSample(std::optional<double> seconds, bool idle = false, bool eof = false)
+{
+    LiveSample sample;
+    sample.seconds = seconds;
+    if (seconds) sample.endSeconds = 100.0 + *seconds;
+    sample.fresh = true;
+    sample.readerIdle = idle;
+    sample.readerEof = eof;
+    return sample;
+}
+
+void setLiveBufferSample(OKILTV::Player::MpvPlayer &backend, std::optional<double> seconds,
+                         bool idle = false, bool eof = false)
+{
+    auto &telemetry = backend.m_cachedTelemetry;
+    telemetry.playbackBuffer = liveSample(seconds, idle, eof);
+    telemetry.bufferGeneration = backend.m_trackGeneration.load();
+    backend.m_tracksLoadedGeneration.store(telemetry.bufferGeneration);
+    telemetry.bufferSampledAt = std::chrono::steady_clock::now();
+}
 
 QByteArray xmltvPayload(const QString &title)
 {
@@ -247,6 +274,9 @@ struct StartupHarness
 {
     QTemporaryDir tempDir;
     QByteArray previousAppData;
+#ifdef Q_OS_MACOS
+    RuntimeContext previousRuntime = AppDataPaths::runtimeContext();
+#endif
     QString settingsPath;
     QString playlistPath;
 
@@ -270,6 +300,9 @@ struct StartupHarness
 
     ~StartupHarness()
     {
+#ifdef Q_OS_MACOS
+        AppDataPaths::initializeRuntime(previousRuntime);
+#endif
         if (previousAppData.isEmpty()) {
             qunsetenv("APPDATA");
         } else {
@@ -288,6 +321,12 @@ struct StartupHarness
 
         previousAppData = qgetenv("APPDATA");
         qputenv("APPDATA", tempDir.path().toUtf8());
+#ifdef Q_OS_MACOS
+        RuntimeContext context;
+        context.launchMode = LaunchMode::Portable;
+        context.dataRootOverride = tempDir.filePath(QStringLiteral("OKILTV"));
+        AppDataPaths::initializeRuntime(context);
+#endif
 
         playlistPath = tempDir.filePath(QStringLiteral("playlist.m3u"));
         QFile playlist(playlistPath);
@@ -471,6 +510,8 @@ private slots:
     void liveBufferTunerIgnoresPauseSeekAndOutage();
     void liveBufferTunerBoundsAndRelaxesCapacity();
     void mpvLiveRefillPolicyResetsOnRetune();
+    void mpvLiveSlowdownPreservesAudioAndResets();
+    void playerControllerLiveSlowdownOwnership();
     void mpvLiveContinuouslyRefillsBeyondReserve_data();
     void mpvLiveContinuouslyRefillsBeyondReserve();
     void mpvImageSmoothingAppliesWithoutRetune();
@@ -479,6 +520,7 @@ private slots:
     void liveReservePausesOnlyAtDepletionRegardlessOfAdaptation();
     void liveReserveHandlesMissingTelemetryEofAndOutage();
     void liveReservePreservesDeliveryLearning();
+    void liveReserveUsesDisplayedReserveDespiteRawDepletion();
     void playerControllerShowsLoadingIndicatorAfterTuneDelay_data();
     void playerControllerShowsLoadingIndicatorAfterTuneDelay();
     void playerControllerBufferingTracksBackendState();
@@ -554,7 +596,7 @@ private slots:
     void playerControllerCatchupCurrentProgramFollowsPlayback();
     void playerControllerSharedPrimarySignalsAndRetuneStayOnActivePlayer();
     void mpvPlayerDemuxerMaxBytesMapping();
-    void mpvPlayerCacheWindowSecondsMapping();
+    void mpvPlayerCacheBudgetSecondsMapping();
     void mpvPlayerSteadyStateCacheBandMapping();
     void mpvPlayerRenderCallbackUpdatesHeartbeatTimestamp();
     void mpvPlayerInitializationErrorAllowsStateQueries();
@@ -729,6 +771,8 @@ private slots:
     void startupWithoutSavedChannelStaysBlack();
     void startupWithMissingSavedChannelStaysBlack();
     void nowNextModelRefreshIsAsyncAndDeduplicatesUpcoming();
+    void epgPresentationFollowsSystemMinuteWithoutWaitingForReads();
+    void nowNextPublicationResamplesClock();
     void nowNextModelUsesConfiguredLookAhead();
     void nowNextModelArchiveHistory();
     void nowNextModelHistoryDoesNotLeakAcrossChannels();
@@ -1663,7 +1707,8 @@ void AppModelTests::appControllerReturnsToLastPlayedChannel()
     harness.playerController->m_liveBufferActive = true;
     harness.playerController->m_liveBufferAvailableSeconds = 30.0;
     harness.playerController->m_liveBufferPositionSeconds = 18.0;
-    harness.playerController->m_buffering.beginLiveReserve(0.0, false, 8.0, 1000);
+    harness.playerController->m_buffering.beginLiveReserve(liveSample(0.0), 8.0, 500);
+    harness.playerController->m_buffering.beginLiveReserve(liveSample(0.0), 8.0, 1000);
     QVERIFY(harness.playerController->m_buffering.liveReservePending());
     QVERIFY(harness.appController->returnToLive());
     QCOMPARE(activations.size(), 0);
@@ -2839,18 +2884,14 @@ void AppModelTests::liveReservePreservesManualPauseAndStopsCleanly()
     PlayerController controller;
     controller.m_liveDeliveryTimer.stop();
     controller.m_positionTimer.stop();
-    Channel channel;
-    channel.id = 482;
-    channel.streamUrl = QStringLiteral("http://127.0.0.1/live-reserve-test.ts");
-    controller.playChannel(channel);
-    QVERIFY(controller.beginLiveReserve(0.0, false));
-    controller.refreshBufferingState();
+    controller.m_currentChannel = Channel {};
+    QVERIFY(!controller.beginLiveReserve(liveSample(0.0), 0));
+    QVERIFY(controller.beginLiveReserve(liveSample(0.0), 500));
     QVERIFY(controller.isBuffering());
     controller.togglePause();
     QVERIFY(controller.m_userPausedManually);
     QVERIFY(!controller.m_buffering.liveReservePending());
     QVERIFY(!controller.evaluateLiveReserve());
-    QVERIFY(controller.m_userPausedManually);
     controller.stop();
     QVERIFY(!controller.m_buffering.liveReservePending());
     QCOMPARE(controller.m_buffering.liveReserveTarget(), 0.0);
@@ -2860,92 +2901,114 @@ void AppModelTests::liveReservePreservesManualPauseAndStopsCleanly()
 
 void AppModelTests::liveReservePausesOnlyAtDepletionRegardlessOfAdaptation()
 {
-    using State = OKILTV::Player::MpvPlayer::CacheReadState;
     PlayerController controller;
     controller.m_liveDeliveryTimer.stop();
     controller.m_positionTimer.stop();
-    // Match the roughly seven-second provider cadence seen in session logs.
-    for (int tick = 0; tick <= 84; ++tick) {
-        controller.m_buffering.observeDelivery(static_cast<double>(tick) / 4.0,
-                                             static_cast<double>((tick / 28) * 7), false);
-    }
+    for (int tick = 0; tick <= 84; ++tick)
+        controller.m_buffering.observeDelivery(tick / 4.0, (tick / 28) * 7.0, false);
     QCOMPARE(controller.effectiveLiveBufferTargetSeconds(), 8.5);
     const auto wasPlaying = controller.isPlaying();
-    for (const auto cache : { 7.0, 3.0, 1.34, 1.0, 0.5, 0.11 }) {
-        QVERIFY(!controller.beginLiveReserve(cache, false));
+    for (const auto cache : {7.0, 3.0, 1.34, 1.0, 0.5, 0.21}) {
+        QVERIFY(!controller.beginLiveReserve(liveSample(cache), 0));
         QVERIFY(!controller.isBuffering());
     }
-    QVERIFY(!controller.beginLiveReserve(0.0, true)); // Consumer backpressure.
-    QVERIFY(controller.beginLiveReserve(0.1, false));
-    QCOMPARE(controller.isPlaying(), wasPlaying); // Only backend signals own this.
+    QVERIFY(!controller.beginLiveReserve(liveSample(0.0, true), 0));
+    QVERIFY(!controller.beginLiveReserve(liveSample(0.1), 0));
+    QVERIFY(controller.beginLiveReserve(liveSample(0.1), 500));
+    QCOMPARE(controller.isPlaying(), wasPlaying);
     QCOMPARE(controller.m_buffering.liveReserveTarget(), 8.5);
-    for (const auto cache : { 0.1, 0.25, 3.0, 7.0, 8.49 }) {
-        QVERIFY(controller.advanceLiveReserve(cache, State { 28.0, false, false }, 2000));
+    for (const auto cache : {0.1, 0.25, 3.0, 7.0, 8.19}) {
+        QVERIFY(controller.advanceLiveReserve(liveSample(cache), 2000));
         QVERIFY(controller.isBuffering());
     }
-    QVERIFY(!controller.advanceLiveReserve(8.5, State { 35.0, false, false }, 9000));
+    QVERIFY(!controller.advanceLiveReserve(liveSample(8.2), 9000));
     QVERIFY(!controller.isBuffering());
     QVERIFY(!controller.m_buffering.m_liveRetryMs.has_value());
-    QVERIFY(controller.beginLiveReserve(0.0, false));
-    QVERIFY(controller.advanceLiveReserve(7.0, State { 42.0, false, false }, 2000));
-    QVERIFY(!controller.advanceLiveReserve(8.5, State { 49.0, false, false }, 7000));
-    QCOMPARE(controller.effectiveLiveBufferTargetSeconds(), 8.5);
+    // A settings/learned target change does not raise an already active hold.
+    controller.beginLiveReserve(liveSample(0.0), 1000);
+    QVERIFY(controller.beginLiveReserve(liveSample(0.0), 1500));
     controller.player()->configurePlaybackTuning(5.0, true, 30.0);
     QCOMPARE(controller.effectiveLiveBufferTargetSeconds(), 30.0);
-    QVERIFY(!controller.beginLiveReserve(7.0, false));
-    QVERIFY(!controller.beginLiveReserve(1.34, false));
-    QVERIFY(controller.beginLiveReserve(0.0, false));
-    QCOMPARE(controller.m_buffering.liveReserveTarget(), 30.0);
-    QVERIFY(controller.advanceLiveReserve(7.0, State { 56.0, false, false }, 2000));
-    QVERIFY(controller.advanceLiveReserve(29.9, State { 79.0, false, false }, 11000));
-    QVERIFY(!controller.advanceLiveReserve(30.0, State { 79.1, false, false }, 12000));
+    QCOMPARE(controller.m_buffering.liveReserveTarget(), 8.5);
+    QCOMPARE(controller.debugOverlaySnapshot().value(QStringLiteral("minBufferNeededSeconds")).toDouble(), 8.5);
+    QVERIFY(!controller.advanceLiveReserve(liveSample(8.2), 1000));
     controller.stop();
 }
 
 void AppModelTests::liveReserveHandlesMissingTelemetryEofAndOutage()
 {
-    using State = OKILTV::Player::MpvPlayer::CacheReadState;
     PlayerController controller;
     controller.m_liveDeliveryTimer.stop();
     controller.m_positionTimer.stop();
-    QVERIFY(!controller.beginLiveReserve(std::nullopt, false));
-    QVERIFY(!controller.beginLiveReserve(std::numeric_limits<double>::quiet_NaN(), false));
-    QVERIFY(!controller.beginLiveReserve(-1.0, false));
-    QVERIFY(controller.beginLiveReserve(0.05, false)); // Protect even before cadence is learned.
+    for (auto seconds : {std::optional<double> {}, std::optional<double>(std::numeric_limits<double>::quiet_NaN()), std::optional<double>(-1.0)})
+        QVERIFY(!controller.beginLiveReserve(liveSample(seconds), 0));
+    controller.beginLiveReserve(liveSample(0.05), 0);
+    QVERIFY(controller.beginLiveReserve(liveSample(0.05), 500));
     QCOMPARE(controller.m_buffering.liveReserveTarget(), 3.0);
-    QVERIFY(controller.advanceLiveReserve(0.0, State { 1.0, false, false }, 9000));
-    QVERIFY(!controller.advanceLiveReserve(std::nullopt, std::nullopt, 10000));
-    QVERIFY(!controller.beginLiveReserve(0.0, false)); // Allow the reconnect watchdog to work.
+    QVERIFY(controller.advanceLiveReserve(liveSample(0.0), 29999));
+    QVERIFY(!controller.advanceLiveReserve(liveSample(std::nullopt), 30000));
+    QVERIFY(!controller.m_recovery.active()); // Unknown does not mean empty.
+    QVERIFY(!controller.beginLiveReserve(liveSample(0.0), 501));
     controller.resetLiveReserve(false);
-    QVERIFY(controller.beginLiveReserve(0.05, false));
-    QVERIFY(!controller.advanceLiveReserve(2.0, State { 2.0, true, false }, 1000));
-    QVERIFY(!controller.beginLiveReserve(0.05, false)); // Capacity-limited release imposes a retry cooldown.
+    controller.beginLiveReserve(liveSample(0.05), 0);
+    QVERIFY(controller.beginLiveReserve(liveSample(0.05), 500));
+    QVERIFY(!controller.advanceLiveReserve(liveSample(2.0, true), 1000));
     controller.resetLiveReserve(false);
-    QVERIFY(controller.beginLiveReserve(0.05, false));
-    QVERIFY(!controller.advanceLiveReserve(0.05, State { 2.0, false, true }, 250)); // Release EOF tail.
+    controller.beginLiveReserve(liveSample(0.05), 0);
+    QVERIFY(controller.beginLiveReserve(liveSample(0.05), 500));
+    QVERIFY(!controller.advanceLiveReserve(liveSample(0.1, true, true), 250));
+    QVERIFY(!controller.m_recovery.active()); // Play the remaining EOF tail.
     controller.stop();
     QVERIFY(!controller.m_buffering.m_liveRetryMs.has_value());
 }
 
 void AppModelTests::liveReservePreservesDeliveryLearning()
 {
-    using State = OKILTV::Player::MpvPlayer::CacheReadState;
     PlayerController controller;
     controller.m_liveDeliveryTimer.stop();
     controller.m_positionTimer.stop();
     for (int tick = 0; tick <= 84; ++tick) {
-        const auto now = static_cast<double>(tick) / 4.0;
-        controller.m_buffering.observeDelivery(now, static_cast<double>((tick / 28) * 7), false);
-        if (tick == 24 || tick == 52) {
-            QVERIFY(controller.beginLiveReserve(0.05, false));
-        }
-        if (tick == 28 || tick == 56) {
-            QVERIFY(!controller.advanceLiveReserve(7.9, State { now, false, false }, 1000));
-        }
+        const auto now = tick / 4.0;
+        controller.m_buffering.observeDelivery(now, (tick / 28) * 7.0, false);
+        if (tick == 22 || tick == 50) controller.beginLiveReserve(liveSample(0.05), tick * 250);
+        if (tick == 24 || tick == 52) QVERIFY(controller.beginLiveReserve(liveSample(0.05), tick * 250));
+        if (tick == 28 || tick == 56) QVERIFY(!controller.advanceLiveReserve(liveSample(7.9), 1000));
     }
-    // Repeated app-owned holds must not reset the three-burst learning window.
     QCOMPARE(controller.m_buffering.detectedIntervalSeconds(), 7.0);
     QCOMPARE(controller.effectiveLiveBufferTargetSeconds(), 8.5);
+    controller.stop();
+}
+
+void AppModelTests::liveReserveUsesDisplayedReserveDespiteRawDepletion()
+{
+    PlayerController controller;
+    controller.m_liveDeliveryTimer.stop();
+    controller.m_positionTimer.stop();
+    controller.m_currentChannel = Channel {};
+    controller.m_isPlaying = true;
+    controller.m_player.m_cachedTelemetry.pauseState = false;
+    // Regression: one path previously read zero while F3 still showed reserve.
+    controller.m_player.m_cachedTelemetry.demuxerCacheDurationSeconds = 0.0;
+    controller.m_player.m_cachedTelemetry.cacheSpeedBytesPerSecond = 0.0;
+    for (int i = 0; i < 20; ++i) {
+        setLiveBufferSample(controller.m_player, 13.0 - i * 0.5);
+        controller.m_player.m_cachedTelemetry.positionSeconds = i + 1.0;
+        controller.sampleLiveDelivery();
+        controller.updatePosition();
+        QCOMPARE(controller.debugOverlaySnapshot().value(QStringLiteral("bufferDurationSeconds")).toDouble(), 13.0 - i * 0.5);
+        QVERIFY(!controller.m_buffering.liveReservePending());
+        QVERIFY(!controller.m_recovery.active());
+        QVERIFY(!controller.m_player.m_pauseRequested);
+    }
+    // Freshness and load/seek fences also govern pause decisions.
+    setLiveBufferSample(controller.m_player, 0.0);
+    controller.m_player.m_cachedTelemetry.bufferSampledAt -= std::chrono::seconds(2);
+    controller.sampleLiveDelivery();
+    QVERIFY(!controller.m_buffering.liveReservePending());
+    controller.m_player.m_bufferSeeking.store(true);
+    controller.sampleLiveDelivery();
+    QVERIFY(!controller.m_buffering.liveReservePending());
+    controller.m_player.m_bufferSeeking.store(false);
     controller.stop();
 }
 
@@ -3005,6 +3068,184 @@ void AppModelTests::mpvImageSmoothingAppliesWithoutRetune()
     QVERIFY(!defaultPlayer.m_reinitializePending);
 }
 
+void AppModelTests::mpvLiveSlowdownPreservesAudioAndResets()
+{
+    using OKILTV::Player::MpvPlayer;
+    MpvPlayer dormant;
+    QVERIFY(!dormant.beginLiveSlowdown());
+    dormant.resetLiveSlowdown();
+    QVERIFY(!dormant.propertyDouble("speed").has_value());
+
+    const auto previousHeadless = qgetenv("OKILTV_HEADLESS_TEST");
+    const auto restore = qScopeGuard([&]() {
+        if (previousHeadless.isNull()) qunsetenv("OKILTV_HEADLESS_TEST");
+        else qputenv("OKILTV_HEADLESS_TEST", previousHeadless);
+    });
+    qputenv("OKILTV_HEADLESS_TEST", "0");
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    QFile media(directory.filePath(QStringLiteral("slowdown.wav")));
+    QVERIFY(media.open(QIODevice::WriteOnly));
+    constexpr quint32 sampleRate = 48000;
+    constexpr quint32 samples = sampleRate * 20;
+    constexpr quint32 dataBytes = samples * 2;
+    QDataStream wave(&media);
+    wave.setByteOrder(QDataStream::LittleEndian);
+    wave.writeRawData("RIFF", 4);
+    wave << quint32(36 + dataBytes);
+    wave.writeRawData("WAVEfmt ", 8);
+    wave << quint32(16) << quint16(1) << quint16(1) << sampleRate
+         << quint32(sampleRate * 2) << quint16(2) << quint16(16);
+    wave.writeRawData("data", 4);
+    wave << dataBytes;
+    for (quint32 i = 0; i < samples; ++i) wave << qint16(i % 100 < 50 ? 1000 : -1000);
+    QCOMPARE(wave.status(), QDataStream::Ok);
+    media.close();
+
+    MpvPlayer player;
+    player.configureOptions({{QStringLiteral("vo"), QStringLiteral("null")},
+                             {QStringLiteral("ao"), QStringLiteral("null")},
+                             {QStringLiteral("audio-pitch-correction"), QStringLiteral("no")}});
+    if (!player.ensureInitialized()) QSKIP("libmpv unavailable");
+    player.setStartupBufferingStrictMode(false);
+    QSignalSpy loaded(&player, &MpvPlayer::fileLoaded);
+    QSignalSpy errors(&player, &MpvPlayer::errorOccurred);
+    player.play(media.fileName());
+    QTRY_VERIFY_WITH_TIMEOUT(player.propertyDouble("audio-pts").has_value(), 5000);
+    QCOMPARE(player.propertyFlag("audio-pitch-correction"), std::optional<bool>(false));
+    QVERIFY(player.beginLiveSlowdown());
+    QVERIFY(player.setLiveSlowdownSpeed(0.95));
+    QVERIFY(player.setLiveSlowdownSpeed(0.90));
+    QCOMPARE(player.propertyDouble("speed"), std::optional<double>(0.90));
+    QCOMPARE(player.propertyFlag("audio-pitch-correction"), std::optional<bool>(true));
+    const auto audioPosition = player.propertyDouble("audio-pts").value_or(0.0);
+    QTRY_VERIFY_WITH_TIMEOUT(player.propertyDouble("audio-pts").value_or(0.0) > audioPosition + 0.3, 2000);
+    QCOMPARE(loaded.size(), 1); // Speed adaptation does not replace the media.
+    QVERIFY(!player.setLiveSlowdownSpeed(0.5));
+    player.resetLiveSlowdown();
+    QCOMPARE(player.propertyDouble("speed"), std::optional<double>(1.0));
+    QCOMPARE(player.propertyFlag("audio-pitch-correction"), std::optional<bool>(false));
+    QVERIFY(player.beginLiveSlowdown());
+    QVERIFY(player.setLiveSlowdownSpeed(0.90));
+    player.seekAbsoluteExact(2.0);
+    QVERIFY(!player.liveSlowdownActive());
+    QCOMPARE(player.propertyDouble("speed"), std::optional<double>(1.0));
+    QVERIFY(player.beginLiveSlowdown());
+    QVERIFY(player.setLiveSlowdownSpeed(0.90));
+    player.play(media.fileName());
+    QTRY_COMPARE_WITH_TIMEOUT(loaded.size(), 2, 5000);
+    QCOMPARE(player.propertyDouble("speed"), std::optional<double>(1.0));
+    QCOMPARE(player.propertyFlag("audio-pitch-correction"), std::optional<bool>(false));
+    QVERIFY(player.beginLiveSlowdown());
+    QVERIFY(player.setLiveSlowdownSpeed(0.90));
+    player.stop();
+    QVERIFY(!player.liveSlowdownActive());
+    QCOMPARE(player.propertyDouble("speed"), std::optional<double>(1.0));
+    QVERIFY(player.setRuntimeDoubleOption("speed", 1.25));
+    QVERIFY(!player.beginLiveSlowdown());
+    QCOMPARE(player.propertyDouble("speed"), std::optional<double>(1.25));
+    QVERIFY(player.setRuntimeDoubleOption("speed", 1.0));
+    player.configureOptions({{QStringLiteral("vo"), QStringLiteral("null")},
+                             {QStringLiteral("ao"), QStringLiteral("null")},
+                             {QStringLiteral("audio-spdif"), QStringLiteral("ac3,dts")}});
+    player.unload();
+    QVERIFY(player.ensureInitialized());
+    QVERIFY(!player.beginLiveSlowdown());
+    QCOMPARE(player.propertyDouble("speed"), std::optional<double>(1.0));
+    QCOMPARE(errors.size(), 0);
+}
+
+void AppModelTests::playerControllerLiveSlowdownOwnership()
+{
+    PlayerController controller;
+    controller.m_liveDeliveryTimer.stop();
+    controller.m_positionTimer.stop();
+    controller.m_player.configureOptions({{QStringLiteral("vo"), QStringLiteral("null")},
+                                          {QStringLiteral("ao"), QStringLiteral("null")}});
+    if (!controller.m_player.ensureInitialized()) QSKIP("libmpv unavailable");
+    controller.m_currentChannel = Channel{};
+    controller.m_isPlaying = true;
+    controller.m_player.m_cachedTelemetry.pauseState = false;
+    controller.m_player.m_cachedTelemetry.bufferingState = false;
+    controller.m_player.m_cachedTelemetry.positionSeconds = 10.0;
+    const auto primeDelivery = [&]() {
+        auto &tuner = controller.m_buffering.m_tuner;
+        tuner.reset();
+        const auto now = controller.m_liveDeliveryClock.elapsed() / 1000.0;
+        tuner.m_lastSample = now - 0.25;
+        tuner.m_lastEnd = 21.0;
+        tuner.m_waitStarted = now - 2.0;
+        tuner.m_lastBurst = now - 7.0;
+        tuner.m_intervals = {7.0};
+    };
+    primeDelivery();
+    setLiveBufferSample(controller.m_player, 4.0);
+    controller.observeLiveDelivery({28.0, false, false});
+    QVERIFY(controller.m_buffering.liveSlowdownActive());
+    QVERIFY(controller.m_player.liveSlowdownActive());
+    QCOMPARE(controller.debugOverlaySnapshot().value(QStringLiteral("liveSlowdownRemainingSeconds")).toDouble(), 30.0);
+    // Inject elapsed progressing time without waiting 30 seconds or touching
+    // provider streams; execution still writes real libmpv properties.
+    controller.m_buffering.m_liveSlowdownPlayedMs = 2000;
+    controller.updateLiveSlowdown();
+    QCOMPARE(controller.m_player.propertyDouble("speed"), std::optional<double>(0.90));
+    controller.m_userPausedManually = true;
+    controller.updateLiveSlowdown();
+    QCOMPARE(controller.m_buffering.liveSlowdownRemainingSeconds(), 28.0);
+    controller.m_userPausedManually = false;
+    controller.seekRelative(1.0);
+    QVERIFY(!controller.m_buffering.liveSlowdownActive());
+    QCOMPARE(controller.m_player.propertyDouble("speed"), std::optional<double>(1.0));
+    controller.m_player.m_bufferSeeking.store(false); // Inject the seek-completion observation.
+
+    controller.resetAdaptiveSteadyStateBufferingState();
+    primeDelivery();
+    setLiveBufferSample(controller.m_player, 12.0); // Plenty of reserve: capacity raise alone is insufficient.
+    controller.observeLiveDelivery({28.0, false, false});
+    QVERIFY(!controller.m_buffering.liveSlowdownActive());
+    primeDelivery();
+    setLiveBufferSample(controller.m_player, 4.0);
+    controller.m_playbackMode = QStringLiteral("catchup");
+    controller.observeLiveDelivery({28.0, false, false});
+    QVERIFY(!controller.m_buffering.liveSlowdownActive());
+    controller.m_playbackMode = QStringLiteral("live");
+    primeDelivery();
+    controller.observeLiveDelivery({28.0, false, false});
+    QVERIFY(controller.m_buffering.liveSlowdownActive());
+    controller.m_buffering.m_liveSlowdownPlayedMs = 2000;
+    controller.updateLiveSlowdown();
+    QCOMPARE(controller.m_player.propertyDouble("speed"), std::optional<double>(0.90));
+    controller.setLiveSlowdownEnabled(false); // Multiview takes the backend at normal speed.
+    QVERIFY(!controller.m_buffering.liveSlowdownActive());
+    QCOMPARE(controller.m_player.propertyDouble("speed"), std::optional<double>(1.0));
+    primeDelivery();
+    controller.observeLiveDelivery({28.0, false, false});
+    QVERIFY(!controller.m_buffering.liveSlowdownActive());
+    controller.setLiveSlowdownEnabled(true);
+    controller.resetAdaptiveSteadyStateBufferingState();
+    primeDelivery();
+    controller.observeLiveDelivery({28.0, false, false});
+    QVERIFY(controller.m_buffering.liveSlowdownActive());
+    controller.m_buffering.m_liveSlowdownPlayedMs = 2000;
+    controller.updateLiveSlowdown();
+    OKILTV::Player::MpvPlayer shared;
+    controller.setSharedPlaybackPlayer(&shared, false);
+    QVERIFY(!controller.m_buffering.liveSlowdownActive());
+    QCOMPARE(controller.m_player.propertyDouble("speed"), std::optional<double>(1.0));
+    QVERIFY(!shared.liveSlowdownActive());
+    controller.setSharedPlaybackPlayer(nullptr, false);
+    controller.resetAdaptiveSteadyStateBufferingState();
+    primeDelivery();
+    controller.observeLiveDelivery({28.0, false, false});
+    QVERIFY(controller.m_buffering.liveSlowdownActive());
+    controller.m_buffering.m_liveSlowdownPlayedMs = 2000;
+    controller.updateLiveSlowdown();
+    controller.stop();
+    QVERIFY(!controller.m_buffering.liveSlowdownActive());
+    QVERIFY(!controller.m_player.liveSlowdownActive());
+    QCOMPARE(controller.m_player.propertyDouble("speed"), std::optional<double>(1.0));
+}
+
 void AppModelTests::mpvLiveRefillPolicyResetsOnRetune()
 {
     using OKILTV::Player::MpvPlayer;
@@ -3060,7 +3301,7 @@ void AppModelTests::mpvLiveContinuouslyRefillsBeyondReserve()
     QFile media(directory.filePath(QStringLiteral("buffer.wav")));
     QVERIFY(media.open(QIODevice::WriteOnly));
     constexpr quint32 sampleRate = 48000;
-    constexpr quint32 dataBytes = sampleRate * 2 * 60;
+    constexpr quint32 dataBytes = sampleRate * 2 * 180;
     QDataStream wave(&media);
     wave.setByteOrder(QDataStream::LittleEndian);
     wave.writeRawData("RIFF", 4);
@@ -3097,43 +3338,70 @@ void AppModelTests::mpvLiveContinuouslyRefillsBeyondReserve()
     if (!player.ensureInitialized()) {
         QSKIP("libmpv unavailable");
     }
-    QCOMPARE(player.propertyDouble("cache-secs"), std::optional<double>(11.0));
+    const auto unlimited = OKILTV::Player::MpvPlayer::unlimitedReadAheadSeconds();
+    QCOMPARE(player.propertyDouble("cache-secs"), std::optional<double>(unlimited));
+    QCOMPARE(player.propertyDouble("demuxer-readahead-secs"), std::optional<double>(unlimited));
     QCOMPARE(player.propertyDouble("demuxer-hysteresis-secs"), std::optional<double>(0.0));
     // Exercise the runtime policy too: zero must survive normalization and
     // catch-up's positive hysteresis must not leak into a later Live tune.
     QVERIFY(player.setSteadyStateBufferingPolicy({ 90.0, 85.0, 96LL << 20, 32LL << 20, std::nullopt }));
+    QCOMPARE(player.propertyDouble("cache-secs"), std::optional<double>(90.0));
+    QCOMPARE(player.propertyDouble("demuxer-readahead-secs"), std::optional<double>(90.0));
     player.resetSteadyStateBuffering();
-    QCOMPARE(player.propertyDouble("cache-secs"), std::optional<double>(11.0));
+    QCOMPARE(player.propertyDouble("cache-secs"), std::optional<double>(unlimited));
+    QCOMPARE(player.propertyDouble("demuxer-readahead-secs"), std::optional<double>(unlimited));
     QCOMPARE(player.propertyDouble("demuxer-hysteresis-secs"), std::optional<double>(0.0));
+    // Use a small memory budget. WAV must stop reading at this byte limit,
+    // while the much smaller AAC fixture may reach EOF instead.
+    constexpr qint64 byteLimit = 8LL << 20;
+    QVERIFY(player.setSteadyStateBufferingPolicy({ unlimited, 0.0, byteLimit, byteLimit, 0.0 }));
+    QCOMPARE(player.propertyDouble("demuxer-max-bytes"), std::optional<double>(byteLimit));
+    QCOMPARE(player.propertyDouble("demuxer-max-back-bytes"), std::optional<double>(byteLimit));
     player.play(mediaPath);
     const auto cacheFull = [&]() {
         player.refreshCachedTelemetryFast();
         const auto state = player.cacheReadState();
         return state.has_value() && state->idle
-            && player.demuxerCacheDurationSeconds().value_or(0.0) > 10.0;
+            && player.demuxerCacheDurationSeconds().value_or(0.0) > 30.0;
     };
     QTRY_VERIFY_WITH_TIMEOUT(cacheFull(), 5000);
     QTRY_VERIFY_WITH_TIMEOUT(player.playbackBufferSnapshot().seconds.has_value(), 2000);
     const auto reserve = player.playbackBufferSnapshot();
     QVERIFY(reserve.fresh);
     QVERIFY(reserve.endSeconds.has_value());
-    QVERIFY(*reserve.seconds > 10.0);
-    QVERIFY(*reserve.seconds < 15.0);
+    QVERIFY(*reserve.seconds > 30.0);
+    if (!mpegTs) {
+        QVERIFY(!reserve.readerEof.value_or(true));
+        // Constant-rate PCM must fill memory before reaching the 180-second
+        // EOF. Packet overhead can shorten this bound; decoder lead adds <1 s.
+        QVERIFY(*reserve.seconds < static_cast<double>(byteLimit) / (sampleRate * 2) + 1.0);
+    }
     if (mpegTs) QVERIFY(player.propertyDouble("demuxer-start-time").value_or(0.0) > 39000.0);
     QVERIFY(std::abs(*reserve.seconds - (*reserve.endSeconds - player.position())) < 0.25);
     const auto initialEnd = player.propertyDouble("demuxer-cache-time");
     QVERIFY(initialEnd.has_value());
-    // Cached media advances while the reserve is still well above 3 seconds;
-    // waiting for the old 2-second refill floor would fail this deadline.
-    QTRY_VERIFY_WITH_TIMEOUT(player.propertyDouble("demuxer-cache-time").value_or(0.0) > *initialEnd + 1.0, 4000);
-    QVERIFY(player.propertyDouble("demuxer-cache-duration").value_or(0.0) > 8.0);
-    QVERIFY(player.propertyDouble("demuxer-cache-duration").value_or(60.0) < 14.0);
+    // Byte-limited reads resume as capacity opens without a time refill floor.
+    if (!mpegTs) {
+        QTRY_VERIFY_WITH_TIMEOUT(player.propertyDouble("demuxer-cache-time").value_or(0.0) > *initialEnd + 1.0, 4000);
+    }
+    QVERIFY(player.propertyDouble("demuxer-cache-duration").value_or(0.0) > 30.0);
     const auto seekPosition = !rebase ? player.propertyDouble("demuxer-start-time").value_or(0.0) + 5.0 : 5.0;
     player.seekAbsoluteExact(seekPosition);
     QTRY_VERIFY_WITH_TIMEOUT(player.position() >= seekPosition - 0.1, 3000);
     QTRY_VERIFY_WITH_TIMEOUT(player.playbackBufferSnapshot().seconds.has_value(), 3000);
     player.stop();
     QVERIFY(!player.playbackBufferSnapshot().seconds);
+
+    // Typed VOD retains its finite time window on the same backend after Live.
+    QSignalSpy vodLoaded(&player, &OKILTV::Player::MpvPlayer::mediaLoaded);
+    OKILTV::Player::PlaybackRequest request;
+    request.mediaUri = QUrl::fromLocalFile(mediaPath);
+    request.startPaused = true;
+    QVERIFY(player.play(request, QUuid::createUuid()));
+    QTRY_COMPARE_WITH_TIMEOUT(vodLoaded.count(), 1, 5000);
+    QCOMPARE(player.propertyDouble("cache-secs"), std::optional<double>(11.0));
+    QCOMPARE(player.propertyDouble("demuxer-readahead-secs"), std::optional<double>(11.0));
+    player.stop();
 }
 
 void AppModelTests::playerControllerLiveTuneUsesFastStartupPolicy()
@@ -4256,6 +4524,9 @@ void AppModelTests::playerControllerDebugBufferRejectsStaleLoadsAndSeeks()
     telemetry.playbackBuffer.seconds = 11.352;
     telemetry.playbackBuffer.estimated = false;
     telemetry.bufferSampledAt = std::chrono::steady_clock::now();
+    const auto snapshot = controller.debugOverlaySnapshot();
+    QVERIFY(!snapshot.value(QStringLiteral("liveForwardTargetSeconds")).isValid());
+    QCOMPARE(snapshot.value(QStringLiteral("liveForwardTargetText")).toString(), QStringLiteral("Memory limited"));
     QCOMPARE(controller.debugOverlaySnapshot().value(QStringLiteral("bufferDurationText")).toString(), QStringLiteral("11.4 s"));
     telemetry.playbackBuffer.estimated = true;
     QCOMPARE(controller.debugOverlaySnapshot().value(QStringLiteral("bufferDurationText")).toString(), QStringLiteral("≈11.4 s"));
@@ -6799,18 +7070,17 @@ void AppModelTests::mpvPlayerInitializationErrorAllowsStateQueries()
     QTRY_VERIFY(received);
 }
 
-void AppModelTests::mpvPlayerCacheWindowSecondsMapping()
+void AppModelTests::mpvPlayerCacheBudgetSecondsMapping()
 {
-    QCOMPARE(OKILTV::Player::MpvPlayer::cacheWindowSecondsForBufferTarget(2.0), 10.0);
-    QCOMPARE(OKILTV::Player::MpvPlayer::cacheWindowSecondsForBufferTarget(10.0), 30.0);
-    QCOMPARE(OKILTV::Player::MpvPlayer::cacheWindowSecondsForBufferTarget(60.0), 120.0);
+    QCOMPARE(OKILTV::Player::MpvPlayer::cacheBudgetSecondsForBufferTarget(2.0), 10.0);
+    QCOMPARE(OKILTV::Player::MpvPlayer::cacheBudgetSecondsForBufferTarget(10.0), 30.0);
+    QCOMPARE(OKILTV::Player::MpvPlayer::cacheBudgetSecondsForBufferTarget(60.0), 120.0);
 }
 
 void AppModelTests::mpvPlayerSteadyStateCacheBandMapping()
 {
     QCOMPARE(OKILTV::Player::MpvPlayer::steadyStateBackBufferSeconds(), 30.0);
-    QCOMPARE(OKILTV::Player::MpvPlayer::steadyStateCacheLimitSecondsForBufferTarget(2.0), 10.0);
-    QCOMPARE(OKILTV::Player::MpvPlayer::steadyStateCacheLimitSecondsForBufferTarget(10.0), 30.0);
+    QCOMPARE(OKILTV::Player::MpvPlayer::unlimitedReadAheadSeconds(), std::numeric_limits<double>::max());
     QCOMPARE(OKILTV::Player::MpvPlayer::steadyStateCacheHysteresisSecondsForBufferTarget(2.0), 0.0);
     QCOMPARE(OKILTV::Player::MpvPlayer::steadyStateCacheHysteresisSecondsForBufferTarget(10.0), 0.0);
 }
@@ -6826,7 +7096,7 @@ void AppModelTests::playerControllerStartupBufferFallbackTimeoutMapping()
 void AppModelTests::playerControllerAdaptiveSteadyStateMaxBytesMapping()
 {
     QCOMPARE(
-        PlayerController::adaptiveSteadyStateCacheLimitSeconds(3.0),
+        PlayerController::adaptiveLiveCacheBudgetSeconds(3.0),
         11.0);
     QCOMPARE(
         PlayerController::adaptiveSteadyStateCacheHysteresisSeconds(3.0),
@@ -6900,13 +7170,14 @@ void AppModelTests::playerControllerReconnectRebuildsReserveOnSameConnection()
     c.m_recovery.loaded(c.m_liveDeliveryClock.elapsed());
     c.m_recovery.m_phase = OKILTV::App::Playback::PlaybackRecovery::Phase::RebuildingReserve;
     c.m_recovery.m_reserveTarget = 7.5;
-    c.m_recovery.m_reserveProgressMs = c.m_liveDeliveryClock.elapsed();
+    c.m_recovery.m_reserveStartedMs = c.m_liveDeliveryClock.elapsed();
     c.m_recovery.m_totalStartedMs = c.m_liveDeliveryClock.elapsed();
     auto &t = c.m_player.m_cachedTelemetry;
     t.pauseState = true;
     t.cacheSpeedBytesPerSecond = 4198.0;
     for (const double cache : {0.0, 1.6, 0.608, 0.0, 0.0, 0.0, 6.72}) {
-        t.demuxerCacheDurationSeconds = cache;
+        t.demuxerCacheDurationSeconds = 0.0;
+        setLiveBufferSample(c.m_player, cache);
         c.updatePosition();
         c.handleReconnectAttemptTick();
         QVERIFY(c.m_recovery.reservePending());
@@ -6914,14 +7185,17 @@ void AppModelTests::playerControllerReconnectRebuildsReserveOnSameConnection()
         QCOMPARE(c.m_recovery.attempts(), 1);
         QVERIFY(c.m_recovery.attemptInFlight());
     }
-    t.demuxerCacheDurationSeconds = 7.6;
+    setLiveBufferSample(c.m_player, 7.6);
     QVERIFY(!c.advanceReconnectReserve());
     QVERIFY(!c.m_recovery.reservePending());
     QVERIFY(!c.m_player.m_pauseRequested);
     // Another gap rebuilds the reserve without replacing the transport.
     c.m_recovery.m_phase = OKILTV::App::Playback::PlaybackRecovery::Phase::Stabilizing;
     c.m_recovery.m_reconnectRecoveryUnhealthyTickCount = 2;
-    t.demuxerCacheDurationSeconds = 0.7;
+    setLiveBufferSample(c.m_player, 0.1);
+    QVERIFY(!c.advanceReconnectReserve());
+    QTest::qWait(550);
+    setLiveBufferSample(c.m_player, 0.1);
     QVERIFY(c.advanceReconnectReserve());
     QVERIFY(c.m_player.m_pauseRequested);
     QVERIFY(!c.m_recovery.stabilizing());
@@ -6930,7 +7204,7 @@ void AppModelTests::playerControllerReconnectRebuildsReserveOnSameConnection()
         c.handleReconnectAttemptTick();
     }
     QCOMPARE(c.m_recovery.attempts(), 1);
-    t.demuxerCacheDurationSeconds = 8.0;
+    setLiveBufferSample(c.m_player, 8.0);
     QVERIFY(!c.advanceReconnectReserve());
     QCOMPARE(c.m_recovery.m_reconnectRecoveryUnhealthyTickCount, 0);
 }
@@ -6947,19 +7221,18 @@ void AppModelTests::playerControllerReconnectReserveHonorsStopAndFailure()
         c.m_recovery.loaded(c.m_liveDeliveryClock.elapsed());
         c.m_recovery.m_phase = OKILTV::App::Playback::PlaybackRecovery::Phase::RebuildingReserve;
         c.m_recovery.m_reserveTarget = 7.5;
-        c.m_recovery.m_reserveProgressMs = c.m_liveDeliveryClock.elapsed();
-        c.m_player.m_cachedTelemetry.demuxerCacheDurationSeconds = 2.0;
+        c.m_recovery.m_reserveStartedMs = c.m_liveDeliveryClock.elapsed();
+        setLiveBufferSample(c.m_player, 2.0);
         if (manualPause) {
             c.togglePause();
             QVERIFY(!c.m_recovery.active());
             QVERIFY(c.m_userPausedManually);
             QVERIFY(c.m_player.m_pauseRequested);
         } else {
-            OKILTV::Player::MpvPlayer::CacheReadState state;
-            state.eof = true;
-            c.m_player.m_cachedTelemetry.cacheReadState = state;
-            QVERIFY(c.advanceReconnectReserve());
-            QVERIFY(!c.m_recovery.attemptInFlight());
+            setLiveBufferSample(c.m_player, 2.0, true, true);
+            QVERIFY(!c.advanceReconnectReserve());
+            QVERIFY(c.m_recovery.attemptInFlight());
+            QVERIFY(!c.m_player.m_pauseRequested);
         }
         QVERIFY(!c.m_recovery.reservePending());
     }
@@ -6977,10 +7250,11 @@ void AppModelTests::playerControllerReconnectReserveTimesOutWithoutProgress()
     c.m_recovery.m_phase = OKILTV::App::Playback::PlaybackRecovery::Phase::RebuildingReserve;
     c.m_recovery.m_reserveTarget = 3.0;
     c.m_waitForDataStreamSeconds = 0.1;
-    c.m_recovery.m_reserveProgressMs = c.m_liveDeliveryClock.elapsed();
+    c.m_recovery.m_reserveStartedMs = c.m_liveDeliveryClock.elapsed();
     c.m_player.m_cachedTelemetry.demuxerCacheDurationSeconds = 0.0;
     c.m_player.m_cachedTelemetry.cacheSpeedBytesPerSecond = 4198.0;
-    QTest::qWait(10100);
+    c.m_recovery.m_reserveStartedMs -= 30000;
+    setLiveBufferSample(c.m_player, 0.0);
     QVERIFY(c.advanceReconnectReserve());
     QVERIFY(!c.m_recovery.attemptInFlight());
     QVERIFY(!c.m_recovery.reservePending());
@@ -7050,6 +7324,7 @@ void AppModelTests::playerControllerLiveWatchdogRespectsTuneGrace()
     telemetry.displayedVideoFramePtsSeconds = 0.0;
     telemetry.demuxerCacheDurationSeconds = 0.0;
     telemetry.cacheSpeedBytesPerSecond = 0.0;
+    setLiveBufferSample(controller.m_player, 0.0);
     for (int i = 0; i < 5; ++i) {
         controller.updatePosition();
         QVERIFY(!controller.m_recovery.active());
@@ -13958,6 +14233,119 @@ void AppModelTests::startupWithMissingSavedChannelStaysBlack()
     QVERIFY(harness.playerController->currentChannel().isEmpty());
 }
 
+void AppModelTests::epgPresentationFollowsSystemMinuteWithoutWaitingForReads()
+{
+    StartupHarness harness;
+    QVERIFY(harness.initialize(std::nullopt));
+    const auto base = QDateTime::fromMSecsSinceEpoch(
+        (QDateTime::currentMSecsSinceEpoch() / 60000) * 60000, QTimeZone::UTC);
+    Channel channel;
+    channel.id = 12;
+    channel.profileId = harness.activeProfileId();
+    channel.tvgId = QStringLiteral("channel.one");
+    channel.catchupSupported = true;
+    channel.catchupWindowHours = 24;
+    const QList<EpgEntry> entries {
+        {channel.tvgId, QStringLiteral("First"), QStringLiteral("first details"), {}, base.addSecs(-60), base.addSecs(60)},
+        {channel.tvgId, QStringLiteral("Second"), QStringLiteral("second details"), {}, base.addSecs(60), base.addSecs(120)},
+        {channel.tvgId, QStringLiteral("Third"), {}, {}, base.addSecs(180), base.addSecs(240)}
+    };
+    harness.epgService->loadFromEntries(entries);
+    harness.nowNextModel->setChannel(channel);
+    harness.playbackNowNextModel->setChannel(channel);
+    harness.guideStateModel->setChannels({channel});
+    harness.guideStateModel->selectChannel(channel.id);
+    QTRY_VERIFY(!harness.nowNextModel->loading() && !harness.playbackNowNextModel->loading());
+    QTRY_VERIFY(!harness.guideStateModel->channelPrograms().isEmpty());
+    harness.guideStateModel->selectProgram(toVariantMap(entries.first()));
+    auto &grid = *harness.epgGridModel;
+    grid.rebuild({channel}, 6, 24);
+    grid.setSelectedChannelId(channel.id);
+    grid.setSelectedProgramStart(entries.first().start.toString(Qt::ISODateWithMs));
+    grid.setRenderViewport(0, 600);
+    grid.setVisibleRowRange(0, 0);
+    QVERIFY(!grid.data(grid.index(0), EpgGridModel::ProgramsRole).toList().isEmpty());
+
+    // Occupy both production read workers. Minute presentation must still change
+    // synchronously, without showing a loading placeholder or resetting rows.
+    QSemaphore started, release;
+    auto first = QtConcurrent::run(EpgService::readPool(), [&] { started.release(); release.acquire(); });
+    auto second = QtConcurrent::run(EpgService::readPool(), [&] { started.release(); release.acquire(); });
+    const auto unblock = qScopeGuard([&] {
+        release.release(2);
+        first.waitForFinished();
+        second.waitForFinished();
+    });
+    QVERIFY(started.tryAcquire(2, 5000));
+    auto &app = *harness.appController;
+    app.refreshEpgTime(base.addSecs(59));
+    QSignalSpy clockSpy(&grid, &EpgGridModel::currentTimeChanged);
+    QSignalSpy resetSpy(&grid, &QAbstractItemModel::modelReset);
+    const auto generation = harness.nowNextModel->m_refreshGeneration;
+    app.refreshEpgTime(base.addMSecs(59999));
+    QCOMPARE(clockSpy.count(), 0);
+    QCOMPARE(harness.nowNextModel->m_refreshGeneration, generation);
+
+    app.refreshEpgTime(base.addSecs(60)); // One second after startup at :59.
+    QCOMPARE(clockSpy.count(), 1);
+    QCOMPARE(harness.nowNextModel->m_refreshGeneration, generation + 1);
+    QCOMPARE(harness.nowNextModel->currentProgram().value("title").toString(), QStringLiteral("Second"));
+    QCOMPARE(harness.playbackNowNextModel->currentProgram(), harness.nowNextModel->currentProgram());
+    QCOMPARE(harness.nowNextModel->currentProgram().value("progressPercent").toDouble(), 0.0);
+    QCOMPARE(harness.nowNextModel->pastPrograms().last().toMap().value("title").toString(), QStringLiteral("First"));
+    QVERIFY(!harness.nowNextModel->loading());
+    QVERIFY(!harness.playbackNowNextModel->loading());
+    QCOMPARE(grid.currentTimeOffsetMinutes(),
+        static_cast<double>(base.addSecs(60).toMSecsSinceEpoch() - grid.windowStartEpochMs()) / 60000.0);
+    const auto tiles = grid.data(grid.index(0), EpgGridModel::ProgramsRole).toList();
+    QCOMPARE(tiles.at(1).toMap().value("isNow").toBool(), true);
+    QCOMPARE(tiles.first().toMap().value("isNow").toBool(), false);
+    QCOMPARE(harness.guideStateModel->selectedProgram().value("title").toString(), QStringLiteral("First"));
+    QVERIFY(!harness.guideStateModel->selectedProgram().value("isNow").toBool());
+    QCOMPARE(grid.selectedProgramStart(), entries.first().start.toString(Qt::ISODateWithMs));
+
+    app.refreshEpgTime(base.addSecs(120)); // Exact stop boundary and a schedule gap.
+    QVERIFY(harness.nowNextModel->currentProgram().isEmpty());
+    QCOMPARE(harness.nowNextModel->nextProgram().value("title").toString(), QStringLiteral("Third"));
+    app.refreshEpgTime(base.addSecs(3600)); // Wake/forward clock jump: a single update.
+    QCOMPARE(clockSpy.count(), 3);
+    QVERIFY(harness.nowNextModel->currentProgram().isEmpty());
+    app.refreshEpgTime(base.addSecs(60)); // Backward clock correction restores cached identity.
+    QCOMPARE(clockSpy.count(), 4);
+    QCOMPARE(harness.nowNextModel->currentProgram().value("title").toString(), QStringLiteral("Second"));
+    QCOMPARE(resetSpy.count(), 0);
+    app.refreshEpgTime({});
+    QCOMPARE(clockSpy.count(), 4);
+}
+
+void AppModelTests::nowNextPublicationResamplesClock()
+{
+    QTemporaryDir directory;
+    SettingsManager settings(directory.filePath(QStringLiteral("settings.json")));
+    EpgService epg;
+    NowNextModel model(&epg, &settings);
+    Channel channel;
+    channel.tvgId = QStringLiteral("channel.one");
+    model.m_channel = channel;
+    const auto now = QDateTime::currentDateTimeUtc();
+    EpgEntry entry {channel.tvgId, QStringLiteral("Current"), QStringLiteral("details"), {},
+        now.addSecs(-120), now.addSecs(120)};
+    auto stale = toVariantMap(entry);
+    stale.insert(QStringLiteral("isNow"), false);
+    stale.insert(QStringLiteral("progressPercent"), 0.0);
+    NowNextModel::RefreshResult result;
+    result.programs = {stale};
+    model.applyRefreshResult(model.m_refreshGeneration, std::move(result));
+    QCOMPARE(model.currentProgram().value("title").toString(), entry.title);
+    QVERIFY(model.currentProgram().value("isNow").toBool());
+    QVERIFY(std::abs(model.currentProgram().value("progressPercent").toDouble() - 50.0) < 1.0);
+    QCOMPARE(model.currentProgram().value("description").toString(), entry.description);
+    model.clear();
+    model.refreshTime(now);
+    QVERIFY(model.currentProgram().isEmpty());
+    QVERIFY(model.pastPrograms().isEmpty());
+}
+
 void AppModelTests::nowNextModelRefreshIsAsyncAndDeduplicatesUpcoming()
 {
     EpgService epg;
@@ -14716,6 +15104,24 @@ void AppModelTests::epgDiskModelsLoadDetailsAsync()
     QTRY_VERIFY(!nowNext.loading());
     QCOMPARE(nowNext.currentProgram().value(QStringLiteral("description")).toString(), QStringLiteral("current description"));
     QVERIFY(nowNext.pastPrograms().first().toMap().value(QStringLiteral("detailsPending")).toBool());
+    // A presentation tick retains disk-backed tiles and hydrated details.
+    grid.setSelectedChannelId(channel.id);
+    grid.setSelectedProgramStart(entries.at(1).start.toString(Qt::ISODateWithMs));
+    QSignalSpy reset(&grid, &QAbstractItemModel::modelReset);
+    grid.refreshTime(now.addSecs(600));
+    const auto updatedTiles = grid.data(grid.index(0), EpgGridModel::ProgramsRole).toList();
+    QCOMPARE(updatedTiles.size(), entries.size());
+    QVERIFY(updatedTiles.at(1).toMap().value("isNow").toBool());
+    QVERIFY(std::abs(updatedTiles.at(1).toMap().value("progressPercent").toDouble() - 200.0 / 3.0) < 0.001);
+    QCOMPARE(grid.selectedProgram().value("description").toString(), QStringLiteral("current description"));
+    QCOMPARE(reset.count(), 0);
+    // A later detail/navigation reply must use the latest Guide minute sample.
+    grid.requestProgram(channel.id, now.toString(Qt::ISODateWithMs));
+    QTRY_COMPARE(resolved.count(), 2);
+    QVERIFY(std::abs(grid.selectedProgram().value("progressPercent").toDouble() - 200.0 / 3.0) < 0.001);
+    nowNext.refreshTime(now.addSecs(1800));
+    QCOMPARE(nowNext.currentProgram().value("title").toString(), QStringLiteral("Next"));
+    QCOMPARE(nowNext.currentProgram().value("description").toString(), QStringLiteral("next description"));
     QSignalSpy details(harness.appController.get(), &AppController::epgDetailsReady);
     const auto request = harness.appController->requestEpgDetails(toVariantMap(channel), summary);
     QTRY_COMPARE(details.count(), 1);
@@ -15454,6 +15860,25 @@ void AppModelTests::epgSearchPendingCatchupRejectsChangedContext()
 #include "vod/vodseriestests.inc"
 #include "vod/vodsourcegrouptests.inc"
 
+#ifdef Q_OS_MACOS
+int main(int argc, char **argv)
+{
+    QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
+    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+    QSurfaceFormat format;
+    format.setRenderableType(QSurfaceFormat::OpenGL);
+    format.setVersion(3, 2);
+    format.setProfile(QSurfaceFormat::CoreProfile);
+    format.setSwapInterval(1);
+    QSurfaceFormat::setDefaultFormat(format);
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+    QApplication application(argc, argv);
+    QStandardPaths::setTestModeEnabled(true);
+    AppModelTests tests;
+    return QTest::qExec(&tests, argc, argv);
+}
+#else
 QTEST_MAIN(AppModelTests)
+#endif
 
 #include "tst_app_models.moc"

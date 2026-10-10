@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(OKILTVQt VERSION 0.6.1 LANGUAGES CXX)
+project(OKILTVQt VERSION 0.6.2 LANGUAGES CXX)
 
 # Keep runtime identification independent of packaging metadata.  Core code also
 # uses this in tests, where QCoreApplication may not have an application version.
@@ -49,12 +49,29 @@ if (UNIX AND NOT APPLE)
     find_package(Qt6 REQUIRED COMPONENTS DBus)
 endif()
 
-# System-account protection: DPAPI on Windows, keyring-backed AES-GCM elsewhere.
+# System-account protection: DPAPI, Keychain or Secret Service.
 if (WIN32)
     set(OKILTV_SECRET_LIB crypt32)
 else ()
     find_package(OpenSSL REQUIRED COMPONENTS Crypto)
     set(OKILTV_SECRET_LIB OpenSSL::Crypto)
+endif ()
+
+if (APPLE)
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 20)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+    find_library(OKILTV_SECURITY_FRAMEWORK Security REQUIRED)
+    find_library(OKILTV_COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+    find_library(OKILTV_IOKIT_FRAMEWORK IOKit REQUIRED)
+    find_library(OKILTV_LOCALAUTH_FRAMEWORK LocalAuthentication REQUIRED)
+    find_library(OKILTV_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+    add_library(OKILTVMacosKeychain STATIC src/core/macoskeychain.cpp src/core/macosauthentication.mm)
+    set_source_files_properties(src/core/macosauthentication.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(OKILTVMacosKeychain PUBLIC Qt6::Core OpenSSL::Crypto
+        ${OKILTV_SECURITY_FRAMEWORK} ${OKILTV_COREFOUNDATION_FRAMEWORK}
+        ${OKILTV_LOCALAUTH_FRAMEWORK} ${OKILTV_FOUNDATION_FRAMEWORK})
+    list(APPEND OKILTV_SECRET_LIB OKILTVMacosKeychain)
 endif ()
 
 qt_standard_project_setup()
@@ -103,12 +120,14 @@ qt_add_executable(OKILTVQt
     src/app/multiviewcontroller.h
     src/app/nownextmodel.cpp
     src/app/nownextmodel.h
+    src/app/epgpresentationtime.h
     src/app/portableruntimecontroller.cpp
     src/app/portableruntimecontroller.h
     src/app/profilesmodel.cpp
     src/app/profilesmodel.h
     src/app/playback/playbackbuffering.cpp
     src/app/playback/playbackbuffering.h
+    src/app/playback/livebufferpolicy.h
     src/app/playback/playbackrecovery.cpp
     src/app/playback/playbackrecovery.h
     src/app/playback/catchupplaybacksession.cpp
@@ -245,6 +264,18 @@ set_target_properties(OKILTVQt PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/app
     WIN32_EXECUTABLE TRUE
 )
+
+if (APPLE)
+    set_target_properties(OKILTVQt PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resources/macos/Info.plist.in"
+        BUILD_RPATH "@executable_path/../Frameworks"
+        INSTALL_RPATH "@executable_path/../Frameworks")
+    target_sources(OKILTVQt PRIVATE resources/macos/OKILTV.icns)
+    set_source_files_properties(resources/macos/OKILTV.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    target_link_libraries(OKILTVQt PRIVATE ${OKILTV_IOKIT_FRAMEWORK} ${OKILTV_COREFOUNDATION_FRAMEWORK})
+    install(TARGETS OKILTVQt BUNDLE DESTINATION .)
+endif ()
 
 target_include_directories(OKILTVQt PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src

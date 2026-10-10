@@ -163,10 +163,18 @@ MultiViewController::MultiViewController(
     m_retiredPlayerCleanupTimer.setSingleShot(true);
     connect(&m_retiredPlayerCleanupTimer, &QTimer::timeout, this, &MultiViewController::flushRetiredPlayers);
     connectPlaybackSession(m_playerController);
+    const auto updateLiveSlowdown = [this]() {
+        m_originalController->setLiveSlowdownEnabled(!isActive() && m_playerController == m_originalController);
+        if (m_pipController)
+            m_pipController->setLiveSlowdownEnabled(!isActive() && m_playerController == m_pipController.get());
+    };
+    connect(this, &MultiViewController::layoutModeChanged, this, updateLiveSlowdown);
+    connect(this, &MultiViewController::primaryPlaybackChanged, this, updateLiveSlowdown);
 }
 
 MultiViewController::~MultiViewController()
 {
+    m_originalController->setLiveSlowdownEnabled(true);
     m_decodePressureTimer.stop();
     m_audioOwnershipRefreshTimer.stop();
     m_retiredPlayerCleanupTimer.stop();
@@ -346,6 +354,7 @@ void MultiViewController::enablePipSessions()
     }
     if (!m_pipController) {
         m_pipController = std::make_unique<PlayerController>();
+        m_pipController->setLiveSlowdownEnabled(false);
         m_pipController->setTrackPreferenceSettings(m_settings);
         connectPlaybackSession(m_pipController.get());
         const auto &settings = m_settings->current();
@@ -2017,6 +2026,7 @@ void MultiViewController::syncFocusedController()
         } else {
             if (!slot.controls) {
                 slot.controls = std::make_unique<PlayerController>();
+                slot.controls->setLiveSlowdownEnabled(false);
                 slot.controls->setTrackPreferenceSettings(m_settings);
                 const auto &settings = m_settings->current();
                 slot.controls->applySettings(settings.mpvDllPath, settings.mpvOptions,

@@ -37,6 +37,18 @@ using namespace Core;
 namespace {
 
 
+void logLiveReserveTransition(const QString &reason, const Player::MpvPlayer::PlaybackBufferSnapshot &sample,
+                              std::optional<double> rawCache, double target, qint64 elapsedMs = 0)
+{
+    const auto value = [](std::optional<double> seconds) {
+        return seconds ? QString::number(*seconds, 'f', 3) : QStringLiteral("N/A");
+    };
+    Core::DebugLogger::instance().log(QStringLiteral("player"),
+        QStringLiteral("Live reserve transition: reason=%1 forward=%2s raw-cache=%3s target=%4s fresh=%5 idle=%6 eof=%7 elapsed-ms=%8.")
+            .arg(reason, value(sample.seconds), value(rawCache), value(target))
+            .arg(sample.fresh).arg(sample.readerIdle.value_or(false)).arg(sample.readerEof.value_or(false)).arg(elapsedMs));
+}
+
 bool playerTraceEnabled()
 {
     static const bool enabled = qEnvironmentVariableIsSet("OKILTV_TRACE_PLAYER");
@@ -1066,8 +1078,12 @@ QVariantMap PlayerController::debugOverlaySnapshot()
         ? QStringLiteral("TS to live edge")
         : (useCatchupEffectiveCache ? QStringLiteral("Catch-up cache") : QStringLiteral("mpv cache"));
 
-    const auto minBufferNeeded = inCatchupMode() || timeshiftActiveNow
+    auto minBufferNeeded = inCatchupMode() || timeshiftActiveNow
         ? activePlayer->bufferTargetSeconds() : effectiveLiveBufferTargetSeconds();
+    if (!inCatchupMode() && !timeshiftActiveNow) {
+        if (m_buffering.liveReservePending()) minBufferNeeded = m_buffering.liveReserveTarget();
+        else if (m_recovery.reservePending()) minBufferNeeded = m_recovery.reserveTarget();
+    }
     const auto minBufferNeededSeconds = std::isfinite(minBufferNeeded) && minBufferNeeded > 0.0 ? minBufferNeeded : 0.0;
 
     const auto averageBitrateBitsPerSecond = m_buffering.averageBitrate().has_value()
@@ -1077,7 +1093,6 @@ QVariantMap PlayerController::debugOverlaySnapshot()
         ? formatDebugBitrate(averageBitrateBitsPerSecond.value())
         : QStringLiteral("N/A");
     const auto liveReserveTargetSeconds = inCatchupMode() ? activePlayer->bufferTargetSeconds() : effectiveLiveBufferTargetSeconds();
-    const auto liveForwardTargetSeconds = adaptiveSteadyStateCacheLimitSeconds(liveReserveTargetSeconds);
     const auto liveBackTargetSeconds = Player::MpvPlayer::steadyStateBackBufferSeconds();
     const auto liveMaxBytes = adaptiveSteadyStateMaxBytes(liveReserveTargetSeconds, averageBitrateBitsPerSecond);
     const auto liveMaxBackBytes = adaptiveSteadyStateMaxBackBytes(averageBitrateBitsPerSecond);
@@ -1133,10 +1148,16 @@ QVariantMap PlayerController::debugOverlaySnapshot()
         { QStringLiteral("bitrateText"), bitrateText },
         { QStringLiteral("bitrateValueKbps"),
             averageBitrateBitsPerSecond.has_value() ? averageBitrateBitsPerSecond.value() / 1000.0 : -1.0 },
-        { QStringLiteral("liveForwardTargetSeconds"), liveForwardTargetSeconds },
+        { QStringLiteral("liveForwardTargetSeconds"), QVariant {} },
         { QStringLiteral("liveConfiguredTargetSeconds"), activePlayer->bufferTargetSeconds() },
         { QStringLiteral("liveDeliveryIntervalSeconds"), m_buffering.detectedIntervalSeconds() },
-        { QStringLiteral("liveForwardTargetText"), formatDebugBufferDuration(liveForwardTargetSeconds) },
+        { QStringLiteral("liveSlowdownSpeed"), activePlayer->liveSlowdownSpeed() },
+        { QStringLiteral("liveSlowdownRemainingSeconds"), m_buffering.liveSlowdownRemainingSeconds() },
+        { QStringLiteral("liveSlowdownText"), activePlayer->liveSlowdownActive()
+            ? QStringLiteral("×%1 · %2 s remaining").arg(activePlayer->liveSlowdownSpeed(), 0, 'f', 2)
+                .arg(m_buffering.liveSlowdownRemainingSeconds(), 0, 'f', 1)
+            : QStringLiteral("Inactive") },
+        { QStringLiteral("liveForwardTargetText"), QStringLiteral("Memory limited") },
         { QStringLiteral("liveBackTargetSeconds"), liveBackTargetSeconds },
         { QStringLiteral("liveBackTargetText"), formatDebugBufferDuration(liveBackTargetSeconds) },
         { QStringLiteral("liveMaxBytes"), liveMaxBytes },
@@ -1316,9 +1337,9 @@ QString PlayerController::formatDebugBitrate(const double bitsPerSecond)
     return QStringLiteral("%1 Kbps").arg(kilobitsPerSecond, 0, 'f', 0);
 }
 
-double PlayerController::adaptiveSteadyStateCacheLimitSeconds(const double bufferTargetSeconds)
+double PlayerController::adaptiveLiveCacheBudgetSeconds(const double bufferTargetSeconds)
 {
-    return Playback::PlaybackBuffering::adaptiveSteadyStateCacheLimitSeconds(bufferTargetSeconds);
+    return Playback::PlaybackBuffering::adaptiveLiveCacheBudgetSeconds(bufferTargetSeconds);
 }
 
 double PlayerController::adaptiveSteadyStateCacheHysteresisSeconds(const double bufferTargetSeconds)
@@ -1408,6 +1429,8 @@ void PlayerController::startReconnectLoop(const QString &reason)
         return;
     }
 
+    resetLiveSlowdown();
+    resetLiveReserve(false, true);
     m_recovery.start();
 
     const auto attemptTimeoutMs = static_cast<int>(std::lround(
@@ -1442,11 +1465,12 @@ void PlayerController::stopReconnectLoop(const QString &reason)
     auto *activePlayer = playbackPlayer();
     m_recovery.stop(!inCatchupMode() && activePlayer != nullptr, m_liveDeliveryClock.elapsed());
     if (wasActive && activePlayer != nullptr && !inCatchupMode()) {
-        activePlayer->setStartupBufferingStrictMode(true);
+        const auto strict = startupPolicyForPlaybackRequest(activePlayer) != StartupPolicy::FastLive;
+        activePlayer->setStartupBufferingStrictMode(strict);
         Core::DebugLogger::instance().log(
             QStringLiteral("player"),
             QStringLiteral(
-                "Reconnect loop restored strict startup buffering and started watchdog cooldown (%1 ms).")
+                "Reconnect loop restored playback buffering policy and started watchdog cooldown (%1 ms).")
                 .arg(kSoftReconnectWatchdogCooldownMs));
     }
     if (wasActive) {
@@ -1591,16 +1615,17 @@ bool PlayerController::advanceReconnectReserve()
 {
     if (inCatchupMode() || m_sharedPlaybackPlayer) return false;
     auto *player = playbackPlayer();
-    const auto state = player->cacheReadState();
-    const auto decision = m_recovery.reserve(player->demuxerCacheDurationSeconds(),
-        state.has_value() && state->idle, state.has_value() && state->eof, m_backendBuffering,
-        m_waitForDataStreamSeconds, m_liveDeliveryClock.elapsed());
+    const auto sample = player->playbackBufferSnapshot();
+    const auto decision = m_recovery.reserve(sample, m_liveDeliveryClock.elapsed());
+    if (decision.action != Playback::PlaybackRecovery::ReserveResult::Action::None)
+        logLiveReserveTransition(decision.reason, sample, player->demuxerCacheDurationSeconds(), m_recovery.reserveTarget(),
+            m_recovery.reserveElapsed(m_liveDeliveryClock.elapsed()));
     using Action = Playback::PlaybackRecovery::ReserveResult::Action;
     switch (decision.action) {
     case Action::Pause: player->setPaused(true); break;
     case Action::Resume:
         clearPlaybackStallTracking();
-        player->setStartupBufferingStrictMode(true);
+        player->setStartupBufferingStrictMode(false);
         if (!m_userPausedManually) player->setPaused(false);
         break;
     case Action::Stop: player->stop(); break;
@@ -1630,6 +1655,7 @@ void PlayerController::resetBitrateAverageWindow()
 
 void PlayerController::resetAdaptiveSteadyStateBufferingState()
 {
+    resetLiveSlowdown();
     resetLiveReserve(false);
     m_buffering.resetAdaptation();
 }
@@ -1662,41 +1688,41 @@ bool PlayerController::evaluateLiveReserve()
         resetLiveReserve(false);
         return false;
     }
-    const auto state = playbackPlayer()->cacheReadState();
-    if (state.has_value() && !state->eof) {
+    const auto sample = playbackPlayer()->playbackBufferSnapshot();
+    if (sample.fresh && sample.endSeconds && !sample.readerEof.value_or(false)) {
         // App-owned refill pauses still consume provider deliveries. Keep
         // measuring unmet demuxer demand; manual pauses are excluded above.
-        observeLiveDelivery(*state);
+        observeLiveDelivery({*sample.endSeconds, sample.readerIdle.value_or(false), false});
     }
-    m_buffering.raiseLiveTarget(playbackPlayer()->bufferTargetSeconds());
-    const auto cache = playbackPlayer()->demuxerCacheDurationSeconds();
+    const auto cache = sample.seconds;
     // Retry throttled capacity changes while the normal position ticker is
     // suspended by this hold; otherwise a newly learned target could be capped.
     maybeRetuneSteadyStateBuffering(cache, playbackPlayer()->bufferTargetSeconds());
-    return advanceLiveReserve(cache, state, m_buffering.liveReserveElapsed(m_liveDeliveryClock.elapsed()));
+    return advanceLiveReserve(sample, m_buffering.liveReserveElapsed(m_liveDeliveryClock.elapsed()));
 }
 
-bool PlayerController::advanceLiveReserve(const std::optional<double> cacheSeconds,
-                                        const std::optional<Player::MpvPlayer::CacheReadState> &readState,
+bool PlayerController::advanceLiveReserve(const Player::MpvPlayer::PlaybackBufferSnapshot &sample,
                                         const qint64 elapsedMs)
 {
     const auto wasPending = m_buffering.liveReservePending();
-    const auto decision = m_buffering.advanceLiveReserve(cacheSeconds,
-        readState.has_value() && readState->idle, readState.has_value() && readState->eof,
-        elapsedMs, m_liveDeliveryClock.elapsed());
-    if (decision.pause == Playback::PauseCommand::Resume && !m_userPausedManually) playbackPlayer()->setPaused(false);
+    const auto target = m_buffering.liveReserveTarget();
+    const auto decision = m_buffering.advanceLiveReserve(sample, elapsedMs, m_liveDeliveryClock.elapsed());
     if (wasPending && !decision.pending) {
+        logLiveReserveTransition(decision.reason, sample, playbackPlayer()->demuxerCacheDurationSeconds(), target, elapsedMs);
+        if (decision.pause == Playback::PauseCommand::Resume && !m_userPausedManually) playbackPlayer()->setPaused(false);
         clearPlaybackStallTracking();
         refreshBufferingState();
+        if (decision.reconnect) startReconnectLoop(QStringLiteral("live-reserve-empty"));
     }
     return decision.pending;
 }
 
-bool PlayerController::beginLiveReserve(const std::optional<double> cacheSeconds, const bool readerIdle)
+bool PlayerController::beginLiveReserve(const Player::MpvPlayer::PlaybackBufferSnapshot &sample, qint64 nowMs)
 {
-    const auto decision = m_buffering.beginLiveReserve(cacheSeconds, readerIdle,
-        playbackPlayer()->bufferTargetSeconds(), m_liveDeliveryClock.elapsed());
+    const auto decision = m_buffering.beginLiveReserve(sample, playbackPlayer()->bufferTargetSeconds(), nowMs);
     if (decision.pause != Playback::PauseCommand::Pause) return false;
+    logLiveReserveTransition(decision.reason, sample, playbackPlayer()->demuxerCacheDurationSeconds(), m_buffering.liveReserveTarget());
+    resetLiveSlowdown();
     playbackPlayer()->setPaused(true);
     refreshBufferingState();
     return true;
@@ -1709,6 +1735,7 @@ double PlayerController::effectiveLiveBufferTargetSeconds() const
 
 void PlayerController::sampleLiveDelivery()
 {
+    updateLiveSlowdown();
     if (m_buffering.liveReservePending()) {
         evaluateLiveReserve();
         // Pause telemetry can still reflect the hold until mpv acknowledges
@@ -1721,16 +1748,63 @@ void PlayerController::sampleLiveDelivery()
         || m_recovery.active() || m_buffering.startupPending() || m_channelLoadFailed || m_isLoading
         || m_userPausedManually || activePlayer->pauseState().value_or(true)) {
         m_buffering.interruptDelivery();
+        m_buffering.resetLiveDepletion();
         return;
     }
-    const auto state = activePlayer->cacheReadState();
-    if (!state.has_value() || state->eof) {
+    const auto sample = activePlayer->playbackBufferSnapshot();
+    if (!sample.fresh || sample.readerEof.value_or(false)) {
         m_buffering.interruptDelivery();
+        m_buffering.resetLiveDepletion();
         return;
     }
-    const auto cache = activePlayer->demuxerCacheDurationSeconds();
-    observeLiveDelivery(*state);
-    beginLiveReserve(cache, state->idle);
+    if (sample.endSeconds) observeLiveDelivery({*sample.endSeconds, sample.readerIdle.value_or(false), false});
+    beginLiveReserve(sample, m_liveDeliveryClock.elapsed());
+}
+
+bool PlayerController::liveSlowdownEligible() const
+{
+    return m_liveSlowdownEnabled && m_currentChannel.has_value() && !inCatchupMode() && !m_sharedPlaybackPlayer
+        && !(m_timeshiftController && (m_timeshiftController->isActive() || m_timeshiftController->isPreparing()))
+        && !m_recovery.active() && !m_buffering.startupPending() && !m_buffering.liveReservePending()
+        && !m_channelLoadFailed && !m_isLoading;
+}
+
+void PlayerController::setLiveSlowdownEnabled(const bool enabled)
+{
+    m_liveSlowdownEnabled = enabled;
+    if (!enabled) resetLiveSlowdown();
+}
+
+void PlayerController::resetLiveSlowdown()
+{
+    if (m_buffering.liveSlowdownActive()) {
+        Core::DebugLogger::instance().log(QStringLiteral("player"),
+            QStringLiteral("Live slowdown ended: remaining=%1s; restoring normal speed.")
+                .arg(m_buffering.liveSlowdownRemainingSeconds(), 0, 'f', 1));
+    }
+    m_buffering.cancelLiveSlowdown(m_liveDeliveryClock.elapsed());
+    playbackPlayer()->resetLiveSlowdown();
+}
+
+void PlayerController::updateLiveSlowdown()
+{
+    if (!m_buffering.liveSlowdownActive()) return;
+    auto *backend = playbackPlayer();
+    if (!liveSlowdownEligible() || !backend->liveSlowdownActive()) {
+        resetLiveSlowdown();
+        return;
+    }
+    const auto sample = backend->playbackBufferSnapshot();
+    const auto playing = sample.fresh && !m_userPausedManually && m_isPlaying
+        && !backend->pauseState().value_or(true) && !backend->bufferingState().value_or(false);
+    const auto speed = m_buffering.advanceLiveSlowdown(m_liveDeliveryClock.elapsed(), backend->position(), playing);
+    if (!m_buffering.liveSlowdownActive()) {
+        Core::DebugLogger::instance().log(QStringLiteral("player"),
+            QStringLiteral("Live slowdown completed: 30s of progressing playback; restoring normal speed."));
+        backend->resetLiveSlowdown();
+    } else if (!backend->setLiveSlowdownSpeed(speed)) {
+        resetLiveSlowdown();
+    }
 }
 
 void PlayerController::observeLiveDelivery(const Player::MpvPlayer::CacheReadState &readState)
@@ -1747,6 +1821,20 @@ void PlayerController::observeLiveDelivery(const Player::MpvPlayer::CacheReadSta
                 .arg(activePlayer->bufferTargetSeconds(), 0, 'f', 1)
                 .arg(target, 0, 'f', 1));
         maybeRetuneSteadyStateBuffering(activePlayer->demuxerCacheDurationSeconds(), activePlayer->bufferTargetSeconds());
+        const auto nowMs = m_liveDeliveryClock.elapsed();
+        const auto sample = activePlayer->playbackBufferSnapshot();
+        if (liveSlowdownEligible() && m_isPlaying && !m_userPausedManually
+            && !activePlayer->pauseState().value_or(true) && !activePlayer->bufferingState().value_or(false)
+            && m_buffering.beginLiveSlowdown(sample, previous, target, nowMs)) {
+            if (activePlayer->beginLiveSlowdown()) {
+                m_buffering.advanceLiveSlowdown(nowMs, activePlayer->position(), true);
+                Core::DebugLogger::instance().log(QStringLiteral("player"),
+                    QStringLiteral("Live slowdown started: forward=%1s target=%2s speed=0.90 duration=30s ramps=2s.")
+                        .arg(sample.seconds.value_or(0.0), 0, 'f', 1).arg(target, 0, 'f', 1));
+            } else {
+                resetLiveSlowdown();
+            }
+        }
     }
 }
 
@@ -1862,6 +1950,7 @@ const Player::MpvPlayer *PlayerController::playbackPlayer() const
 void PlayerController::setSharedPlaybackPlayer(Player::MpvPlayer *player, const bool protectedSession)
 {
     auto *previousPlayer = playbackPlayer();
+    if (previousPlayer != (player != nullptr ? player : &m_player)) resetLiveSlowdown();
     m_sharedPlaybackPlayer = (player != nullptr && player != &m_player) ? player : nullptr;
     m_sharedPlaybackProtected = m_sharedPlaybackPlayer ? protectedSession : false;
     auto *nextPlayer = playbackPlayer();
@@ -3661,6 +3750,7 @@ void PlayerController::syncLiveBufferState()
 
 bool PlayerController::seekLiveBufferToPosition(const double targetSeconds)
 {
+    resetLiveSlowdown();
     resetLiveReserve(true);
     if (!m_liveBufferActive || playbackPlayer() == nullptr) {
         return false;
@@ -4320,6 +4410,7 @@ void PlayerController::toggleMute()
 
 void PlayerController::seekRelative(const double seconds)
 {
+    resetLiveSlowdown();
     resetLiveReserve(true);
     if (m_sharedPlaybackPlayer && m_sharedPlaybackProtected) {
         return;
@@ -4862,7 +4953,7 @@ void PlayerController::updatePosition()
         updateBitrateAverageBitsPerSecond(instantaneousBitrateBitsPerSecond(activePlayer));
     }
     syncLiveBufferState();
-    const auto sampleStreamHealth = [activePlayer]() -> Playback::StreamHealth {
+    const auto sampleStreamHealth = [this, activePlayer]() -> Playback::StreamHealth {
         Playback::StreamHealth health;
         if (const auto cacheSpeed = activePlayer->cacheSpeedBytesPerSecond();
             cacheSpeed.has_value() && std::isfinite(cacheSpeed.value()) && cacheSpeed.value() >= 0.0) {
@@ -4870,6 +4961,14 @@ void PlayerController::updatePosition()
         }
         health.cacheDurationSeconds = activePlayer->demuxerCacheDurationSeconds();
         health.bufferTargetSeconds = activePlayer->bufferTargetSeconds();
+        if (!inCatchupMode()) {
+            const auto buffer = activePlayer->playbackBufferSnapshot();
+            health.cacheDurationSeconds = buffer.seconds;
+            health.cacheEndSeconds = buffer.endSeconds;
+            health.cacheSpeedBytesPerSecond = buffer.inputBytesPerSecond;
+            health.sampleFresh = buffer.fresh;
+            health.bufferTargetSeconds = effectiveLiveBufferTargetSeconds();
+        }
         return health;
     };
 
@@ -4904,17 +5003,8 @@ void PlayerController::updatePosition()
         recover(m_recovery.videoFreeze(health, recoveryContext(), advanced, frame, m_liveDeliveryClock.elapsed()), false);
     };
     const auto updateReconnectRecoveryWindow = [&](const Playback::StreamHealth &health, bool advanced, std::optional<bool> frame) {
-        auto recoveryHealth = health;
-        if (!inCatchupMode()) {
-            const auto buffer = activePlayer->playbackBufferSnapshot();
-            recoveryHealth.cacheDurationSeconds = buffer.seconds;
-            recoveryHealth.cacheEndSeconds = buffer.endSeconds;
-            recoveryHealth.cacheSpeedBytesPerSecond = buffer.inputBytesPerSecond;
-            recoveryHealth.sampleFresh = buffer.fresh;
-            recoveryHealth.bufferTargetSeconds = effectiveLiveBufferTargetSeconds();
-        }
-        if (m_recovery.observeRecovery(recoveryHealth, recoveryContext(), advanced, frame, m_liveDeliveryClock.elapsed()))
-            activePlayer->setStartupBufferingStrictMode(true);
+        if (m_recovery.observeRecovery(health, recoveryContext(), advanced, frame, m_liveDeliveryClock.elapsed()))
+            activePlayer->setStartupBufferingStrictMode(inCatchupMode() ? false : m_sharedPlaybackPlayer != nullptr);
     };
 
     if (!m_isPlaying) {

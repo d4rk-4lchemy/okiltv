@@ -44,6 +44,7 @@ ApplicationWindow {
     title: "OKILTV"
     color: Theme.window
     property bool allowWindowClose: false
+    property bool nativeQuitApproved: false
     property string pendingCloseSource: ""
     readonly property bool topBarVisible: windowChromeBar.visible
     readonly property int topBarReservedHeight: window.visibility === Window.FullScreen
@@ -209,8 +210,15 @@ ApplicationWindow {
     function finishExit() {
         window.pendingCloseSource = ""
         window.allowWindowClose = true
+        window.nativeQuitApproved = true
         close()
         Qt.callLater(function() { Qt.quit() })
+    }
+
+    Shortcut {
+        sequence: StandardKey.Quit
+        enabled: Qt.platform.os === "osx" && !window.nativeQuitApproved
+        onActivated: window.requestAppClose("tray")
     }
 
     function toggleAlwaysOnTop() {

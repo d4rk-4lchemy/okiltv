@@ -141,6 +141,31 @@ Display date/time changes reformat retained timestamps without changing provider
 time, programme identity or playback. Use the shared formatting helpers described
 in [UI and interaction](ui-and-interaction.md).
 
+### EPG presentation clock
+
+`AppController` samples the system UTC clock every second and compares the epoch
+minute with the last observed minute. A changed minute publishes one shared sample
+to both NowNext models, GuideStateModel and EpgGridModel before scheduling their
+background refreshes. Presentation is therefore aligned to system minute changes,
+normally within one second, independently of application startup. Forward/backward
+clock corrections and wake after sleep update once to the observed minute without
+replaying missed ticks. Event-loop delays can still delay observing a change.
+
+NowNext retains the queried programme summaries and reclassifies known entries
+as past/current/next/upcoming in memory, with inclusive starts and exclusive stops.
+Periodic reads keep readable cached programmes visible without a loading placeholder.
+Guide time updates preserve the selected programme, loaded rows and pending reads;
+they recompute cached `isNow`/`progressPercent` and notify the current-time line
+without waiting for SQLite or resetting the channel model. Missing data and details
+still load asynchronously. Worker results recompute time presentation at publication
+instead of publishing an old worker sample. The Guide line has its own
+`currentTimeChanged` notification, also emitted when its window changes.
+
+This clock controls local EPG presentation and minute maintenance. Provider/XMLTV
+refresh retains its separate saved schedule; EPG search retains its existing
+30-second status clock. Live archive playback continues to show its actual media
+position and publication safety margin independently of the EPG presentation clock.
+
 ## Live EPG search
 
 `Ctrl+F` in the Live context opens the exclusive `epg-search` overlay. Search

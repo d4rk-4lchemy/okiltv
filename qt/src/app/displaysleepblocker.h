@@ -2,6 +2,9 @@
 
 #include <QObject>
 #include <QTimer>
+#if defined(Q_OS_MACOS)
+#include <IOKit/pwr_mgt/IOPMLib.h>
+#endif
 
 namespace OKILTV::App {
 
@@ -18,6 +21,10 @@ public slots:
 
 private:
     bool m_blocked { false };
+#if defined(Q_OS_MACOS)
+    IOPMAssertionID m_displayAssertion { kIOPMNullAssertionID };
+    IOPMAssertionID m_systemAssertion { kIOPMNullAssertionID };
+#endif
 
 #if defined(Q_OS_WIN)
     QTimer m_windowsRefreshTimer;

@@ -3,6 +3,7 @@
 #include "core/trackpreferences.h"
 #include <QFile>
 #include <QGuiApplication>
+#include <QSurfaceFormat>
 #include <QOpenGLFramebufferObject>
 #include <QQuickOpenGLUtils>
 #include <QQuickFramebufferObject>
@@ -587,5 +588,23 @@ private slots:
         engine.stop(EndReason::UserStop);
     }
 };
+#ifdef Q_OS_MACOS
+int main(int argc, char **argv)
+{
+    QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
+    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+    QSurfaceFormat format;
+    format.setRenderableType(QSurfaceFormat::OpenGL);
+    format.setVersion(3, 2);
+    format.setProfile(QSurfaceFormat::CoreProfile);
+    format.setSwapInterval(1);
+    QSurfaceFormat::setDefaultFormat(format);
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+    QGuiApplication application(argc, argv);
+    VodMpvTests tests;
+    return QTest::qExec(&tests, argc, argv);
+}
+#else
 QTEST_MAIN(VodMpvTests)
+#endif
 #include "tst_vod_mpv.moc"

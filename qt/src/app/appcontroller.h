@@ -126,6 +126,7 @@ signals:
     void epgDetailsReady(quint64 requestId, const QVariantMap &program, const QString &error);
 
 private:
+    void refreshEpgTime(const QDateTime &nowUtc);
     void resolveEpgDetails(const QVariantMap &channel, const QVariantMap &program,
         const std::function<void(QVariantMap, QString)> &completed);
     quint64 m_epgDetailsRequest = 0;
@@ -202,6 +203,7 @@ private:
     QString m_statusText { QStringLiteral("Ready") };
     bool m_isBusy { false };
     QTimer m_epgUiTimer;
+    std::optional<qint64> m_epgClockMinute;
     QTimer m_refreshTimer;
     QTimer m_guideRebuildTimer;
     QTimer m_watchStatsFlushTimer;

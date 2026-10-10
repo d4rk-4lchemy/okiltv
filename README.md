@@ -6,7 +6,7 @@
 
 <p align="center">
   A desktop <strong>IPTV player</strong> built with Qt and libmpv.<br/>
-  Current version: <strong>0.6.1</strong>
+  Current version: <strong>0.6.2</strong>
 </p>
 
 
@@ -26,7 +26,7 @@
 - **PiP + Multiview** - Keep multiple live sessions and switch/swap quickly.
 - **Keyboard-First Controls** - Full shortcut workflow for playback and navigation.
 
-## Screenshots (as of version 0.6.1)
+## Screenshots
 
 ![Live TV main screen](docs/screenshots/01-live-tv-main.jpg)
 
@@ -61,6 +61,7 @@ Default version comes from `qt/CMakeLists.txt` (currently `0.5.4`). Override by 
 |----------|-------|
 | Windows | Prebuilt artifacts are packaged via repo scripts. |
 | Linux | Build from source (native Linux flow below). |
+| macOS Apple Silicon | Release CI produces an explicitly named **beta**, macOS 15.0+; ad-hoc signed, without Developer ID/notarization, full runtime acceptance pending. See [macOS build](docs/macos-build.md). |
 
 ## Quick Start
 

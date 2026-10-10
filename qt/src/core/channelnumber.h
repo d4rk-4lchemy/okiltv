@@ -66,7 +66,7 @@ inline QString channelNumberFromJson(const QJsonValue &value)
 
 inline QString effectiveChannelNumber(const Channel &channel, int sortedIndex = 0)
 {
-    const auto explicitNumber = normalizeChannelNumber(channel.channelNumber);
+    auto explicitNumber = normalizeChannelNumber(channel.channelNumber);
     if (!explicitNumber.isEmpty()) return explicitNumber;
     if (channel.source == ChannelSource::M3U) return QString::number(std::max(1, channel.sortOrder));
     return QString::number(channel.sortOrder > 0 ? channel.sortOrder : sortedIndex + 1);
