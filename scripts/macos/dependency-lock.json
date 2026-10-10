@@ -1,0 +1,439 @@
+{
+  "bottle_tag": "arm64_sequoia",
+  "packages": {
+    "mpv": {
+      "version": "0.41.0",
+      "revision": 10,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "a0313cae157832a61b4cd2428f5907cba22f43d2a7d133982c4ec11406a5b89d",
+      "source": "https://ghcr.io/v2/homebrew/core/mpv/blobs/sha256:a0313cae157832a61b4cd2428f5907cba22f43d2a7d133982c4ec11406a5b89d"
+    },
+    "ffmpeg": {
+      "version": "9.0.2",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "c8006779a2919e921e66bbdbf2aa5c989acc5f3626884ec725e58e161f5e843f",
+      "source": "https://ghcr.io/v2/homebrew/core/ffmpeg/blobs/sha256:c8006779a2919e921e66bbdbf2aa5c989acc5f3626884ec725e58e161f5e843f"
+    },
+    "openssl@3": {
+      "version": "3.6.5",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "0994a8029175af4578c3b93b3020e58dffa638ca21dc22d862c6bc02fea7e73b",
+      "source": "https://ghcr.io/v2/homebrew/core/openssl/3/blobs/sha256:0994a8029175af4578c3b93b3020e58dffa638ca21dc22d862c6bc02fea7e73b"
+    },
+    "dav1d": {
+      "version": "1.5.4",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "5f573db161c0685ba7e8d27bd3b6a494e6952e47c7c99355a0d090b253b566af",
+      "source": "https://ghcr.io/v2/homebrew/core/dav1d/blobs/sha256:5f573db161c0685ba7e8d27bd3b6a494e6952e47c7c99355a0d090b253b566af"
+    },
+    "jpeg-turbo": {
+      "version": "3.2.0",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "6dc55edcd33c693e474299ed2bba3c472ac1331cbe300066ec8ef99b88fab17c",
+      "source": "https://ghcr.io/v2/homebrew/core/jpeg-turbo/blobs/sha256:6dc55edcd33c693e474299ed2bba3c472ac1331cbe300066ec8ef99b88fab17c"
+    },
+    "lame": {
+      "version": "4.0",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "552d24d56ff0d3255e9a3519a368d0ce45de86b5b2967b338209c1a22cd12969",
+      "source": "https://ghcr.io/v2/homebrew/core/lame/blobs/sha256:552d24d56ff0d3255e9a3519a368d0ce45de86b5b2967b338209c1a22cd12969"
+    },
+    "libarchive": {
+      "version": "3.8.9",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "0b478eea5f3310c1e3ec4a498e1d57417a59aaa5858e4a878dd0b78fd851aea6",
+      "source": "https://ghcr.io/v2/homebrew/core/libarchive/blobs/sha256:0b478eea5f3310c1e3ec4a498e1d57417a59aaa5858e4a878dd0b78fd851aea6"
+    },
+    "libass": {
+      "version": "0.17.5",
+      "revision": 1,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "b893a0f114554c1b9ea3e046d8102d59c6cf98106936da144835310cab2878f3",
+      "source": "https://ghcr.io/v2/homebrew/core/libass/blobs/sha256:b893a0f114554c1b9ea3e046d8102d59c6cf98106936da144835310cab2878f3"
+    },
+    "libbluray": {
+      "version": "1.5.0",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "90d5839c5058c8fc7a1b5504a75c350bdd4ee65617a47c02c80d992fd3bba70c",
+      "source": "https://ghcr.io/v2/homebrew/core/libbluray/blobs/sha256:90d5839c5058c8fc7a1b5504a75c350bdd4ee65617a47c02c80d992fd3bba70c"
+    },
+    "libplacebo": {
+      "version": "7.360.1",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "1fd6531a9de50d0121d1ff4ec67163dfb1dcb8c682d96c6587b960f04be0fe34",
+      "source": "https://ghcr.io/v2/homebrew/core/libplacebo/blobs/sha256:1fd6531a9de50d0121d1ff4ec67163dfb1dcb8c682d96c6587b960f04be0fe34"
+    },
+    "libvmaf": {
+      "version": "3.2.1",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "d3cf35724639ceb6d9d92ee25a7fa4953f7ff952dc4be90aa83eb006910248b4",
+      "source": "https://ghcr.io/v2/homebrew/core/libvmaf/blobs/sha256:d3cf35724639ceb6d9d92ee25a7fa4953f7ff952dc4be90aa83eb006910248b4"
+    },
+    "libvpx": {
+      "version": "1.17.0",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "dd7924c0a05fa5f840f17ab9f5fac72d8672d75b2a7d44dbbf811274f70d17d6",
+      "source": "https://ghcr.io/v2/homebrew/core/libvpx/blobs/sha256:dd7924c0a05fa5f840f17ab9f5fac72d8672d75b2a7d44dbbf811274f70d17d6"
+    },
+    "little-cms2": {
+      "version": "2.19.1",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "f68c3c93b9ee63891388f6485b27c5bc2605638df36b4806bdc52f0636e8254b",
+      "source": "https://ghcr.io/v2/homebrew/core/little-cms2/blobs/sha256:f68c3c93b9ee63891388f6485b27c5bc2605638df36b4806bdc52f0636e8254b"
+    },
+    "luajit": {
+      "version": "2.1.1788856981",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "8b5af0d20361304d6941eecb50077a900607e908183ebda255bb0e917c797628",
+      "source": "https://ghcr.io/v2/homebrew/core/luajit/blobs/sha256:8b5af0d20361304d6941eecb50077a900607e908183ebda255bb0e917c797628"
+    },
+    "mujs": {
+      "version": "1.3.10",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "94b16a3d68483ee7257762d0ca37b30ba8c4437322047388b03840fe74dba305",
+      "source": "https://ghcr.io/v2/homebrew/core/mujs/blobs/sha256:94b16a3d68483ee7257762d0ca37b30ba8c4437322047388b03840fe74dba305"
+    },
+    "opus": {
+      "version": "1.6.1",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "85d6f1e885117016478e468f92033f648d9bab05210708fe195cacefe5be8266",
+      "source": "https://ghcr.io/v2/homebrew/core/opus/blobs/sha256:85d6f1e885117016478e468f92033f648d9bab05210708fe195cacefe5be8266"
+    },
+    "rubberband": {
+      "version": "4.0.0",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "5ac29718f68b181de61e81dd42bc85cc74cb1fc4ed5fdca541a94224bc43feaa",
+      "source": "https://ghcr.io/v2/homebrew/core/rubberband/blobs/sha256:5ac29718f68b181de61e81dd42bc85cc74cb1fc4ed5fdca541a94224bc43feaa"
+    },
+    "sdl2-compat": {
+      "version": "2.32.74",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "0051ded084f7a73374bffe09df4cd6a0e70ccee6b3337a5843c152111bc01c28",
+      "source": "https://ghcr.io/v2/homebrew/core/sdl2-compat/blobs/sha256:0051ded084f7a73374bffe09df4cd6a0e70ccee6b3337a5843c152111bc01c28"
+    },
+    "svt-av1": {
+      "version": "4.2.0",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "2e6f7cbf3ff42f59ca251f3c84d4ad5a3ecfd518340237a6f70a54a428de1676",
+      "source": "https://ghcr.io/v2/homebrew/core/svt-av1/blobs/sha256:2e6f7cbf3ff42f59ca251f3c84d4ad5a3ecfd518340237a6f70a54a428de1676"
+    },
+    "uchardet": {
+      "version": "0.0.8",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "171e31b14ade23db98fd45f32cebdd1c278ce5b5d629d4e3be7c81a56bee03a7",
+      "source": "https://ghcr.io/v2/homebrew/core/uchardet/blobs/sha256:171e31b14ade23db98fd45f32cebdd1c278ce5b5d629d4e3be7c81a56bee03a7"
+    },
+    "vulkan-loader": {
+      "version": "1.4.363.0",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "4b99cecb4fe7115a6faf770cfa9e8f14426c24baa6e4566e2473fe5beedad5af",
+      "source": "https://ghcr.io/v2/homebrew/core/vulkan-loader/blobs/sha256:4b99cecb4fe7115a6faf770cfa9e8f14426c24baa6e4566e2473fe5beedad5af"
+    },
+    "x264": {
+      "version": "r3222",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "a613d44ead5d3999270970f41283eadfad8001061faf063945def6b8fb5145f4",
+      "source": "https://ghcr.io/v2/homebrew/core/x264/blobs/sha256:a613d44ead5d3999270970f41283eadfad8001061faf063945def6b8fb5145f4"
+    },
+    "x265": {
+      "version": "4.3",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "18e89a5822e2f4f91f919c5bf2fbac31433a561c48174fc15e13b4911a1232ac",
+      "source": "https://ghcr.io/v2/homebrew/core/x265/blobs/sha256:18e89a5822e2f4f91f919c5bf2fbac31433a561c48174fc15e13b4911a1232ac"
+    },
+    "xz": {
+      "version": "5.8.4",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "c2724c0db0398134694b8366d30d14f4de376115fb54c559c331d5fd0474af76",
+      "source": "https://ghcr.io/v2/homebrew/core/xz/blobs/sha256:c2724c0db0398134694b8366d30d14f4de376115fb54c559c331d5fd0474af76"
+    },
+    "zimg": {
+      "version": "3.0.6",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "ee8314ce01c48102e3f977540d6095a444ceb8bce71f1868199c47cad4ce12e4",
+      "source": "https://ghcr.io/v2/homebrew/core/zimg/blobs/sha256:ee8314ce01c48102e3f977540d6095a444ceb8bce71f1868199c47cad4ce12e4"
+    },
+    "fontconfig": {
+      "version": "2.18.3",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "a5f5df5f8d02e8a5b2587cac464c7bd45128447da06b7ab39938a9645982ef49",
+      "source": "https://ghcr.io/v2/homebrew/core/fontconfig/blobs/sha256:a5f5df5f8d02e8a5b2587cac464c7bd45128447da06b7ab39938a9645982ef49"
+    },
+    "freetype": {
+      "version": "2.14.3",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "6453db5c6dba77200b4a1a653912bc63d251bdf2c8649c69ce19c336cfb3494a",
+      "source": "https://ghcr.io/v2/homebrew/core/freetype/blobs/sha256:6453db5c6dba77200b4a1a653912bc63d251bdf2c8649c69ce19c336cfb3494a"
+    },
+    "fribidi": {
+      "version": "1.0.17",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "c1e62df532f06bf13ebb31df04d7e78645271a00e4261b17594248d16cf7e5b8",
+      "source": "https://ghcr.io/v2/homebrew/core/fribidi/blobs/sha256:c1e62df532f06bf13ebb31df04d7e78645271a00e4261b17594248d16cf7e5b8"
+    },
+    "harfbuzz": {
+      "version": "14.6.0",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "cc62ba7fd7ee2b04d81bd5e032cb49af70613039fefe09063c7c47c055da4607",
+      "source": "https://ghcr.io/v2/homebrew/core/harfbuzz/blobs/sha256:cc62ba7fd7ee2b04d81bd5e032cb49af70613039fefe09063c7c47c055da4607"
+    },
+    "libb2": {
+      "version": "0.98.1",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "cc4304b760722128b914944f85788795f1f02de3072d1fd8e921b836b508776f",
+      "source": "https://ghcr.io/v2/homebrew/core/libb2/blobs/sha256:cc4304b760722128b914944f85788795f1f02de3072d1fd8e921b836b508776f"
+    },
+    "libsamplerate": {
+      "version": "0.2.2",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "d51907988e3ab62f6e49ddd1253a723fd5964b78a0361453e8d9b75a2106b4e7",
+      "source": "https://ghcr.io/v2/homebrew/core/libsamplerate/blobs/sha256:d51907988e3ab62f6e49ddd1253a723fd5964b78a0361453e8d9b75a2106b4e7"
+    },
+    "libsndfile": {
+      "version": "1.2.2",
+      "revision": 1,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "2d6a8173ef41359c3da4c78a5d5eb402846e480c509b868f671b80a17726f9c4",
+      "source": "https://ghcr.io/v2/homebrew/core/libsndfile/blobs/sha256:2d6a8173ef41359c3da4c78a5d5eb402846e480c509b868f671b80a17726f9c4"
+    },
+    "libtiff": {
+      "version": "4.7.2",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "e971adc15ce3387a9c68a10ff1cf431755faf0e86b9d3a6daf668efc2f6f31d8",
+      "source": "https://ghcr.io/v2/homebrew/core/libtiff/blobs/sha256:e971adc15ce3387a9c68a10ff1cf431755faf0e86b9d3a6daf668efc2f6f31d8"
+    },
+    "libudfread": {
+      "version": "1.2.0",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "a563689c17ca21d204a228773ec9380b5b0880bd3b0ab322170f8596be7f844a",
+      "source": "https://ghcr.io/v2/homebrew/core/libudfread/blobs/sha256:a563689c17ca21d204a228773ec9380b5b0880bd3b0ab322170f8596be7f844a"
+    },
+    "libunibreak": {
+      "version": "8.0",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "fdd04ab1291384622b07b5409786fd297ddb2ceec4715074f9f35c807649ff50",
+      "source": "https://ghcr.io/v2/homebrew/core/libunibreak/blobs/sha256:fdd04ab1291384622b07b5409786fd297ddb2ceec4715074f9f35c807649ff50"
+    },
+    "lz4": {
+      "version": "1.10.0",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "91674f1c7407b1f7b73d5bd1d85ed1abaaca93be3b68607af4ef3df632540ac0",
+      "source": "https://ghcr.io/v2/homebrew/core/lz4/blobs/sha256:91674f1c7407b1f7b73d5bd1d85ed1abaaca93be3b68607af4ef3df632540ac0"
+    },
+    "mpg123": {
+      "version": "1.33.7",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "80869bcfed43252f222be16fd652b8e691cb4a144778681853ed76e1d45a7143",
+      "source": "https://ghcr.io/v2/homebrew/core/mpg123/blobs/sha256:80869bcfed43252f222be16fd652b8e691cb4a144778681853ed76e1d45a7143"
+    },
+    "shaderc": {
+      "version": "2026.4",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "1313ffbae9ac1559f7160cc89657ecd5fc324895ff46e15a4bd198ec3bbebec0",
+      "source": "https://ghcr.io/v2/homebrew/core/shaderc/blobs/sha256:1313ffbae9ac1559f7160cc89657ecd5fc324895ff46e15a4bd198ec3bbebec0"
+    },
+    "zstd": {
+      "version": "1.5.7",
+      "revision": 1,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "d72adf48460a8384b256f88061cd7b9df4977df7fa2e0794051d427db754a565",
+      "source": "https://ghcr.io/v2/homebrew/core/zstd/blobs/sha256:d72adf48460a8384b256f88061cd7b9df4977df7fa2e0794051d427db754a565"
+    },
+    "brotli": {
+      "version": "1.2.0",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "b8e388c96be5a63a46e0335c390fecb20dda7adb1368a2ba0209b38cae17c708",
+      "source": "https://ghcr.io/v2/homebrew/core/brotli/blobs/sha256:b8e388c96be5a63a46e0335c390fecb20dda7adb1368a2ba0209b38cae17c708"
+    },
+    "cairo": {
+      "version": "1.18.6",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "2eb1ea8f47088a4bddf68c052eef3ef5e52a5bc1369118d432db6bea2e363853",
+      "source": "https://ghcr.io/v2/homebrew/core/cairo/blobs/sha256:2eb1ea8f47088a4bddf68c052eef3ef5e52a5bc1369118d432db6bea2e363853"
+    },
+    "flac": {
+      "version": "1.5.0",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "c9698bcebe8e99ab84adf49a347cad5a9f122c45b80622a9fe2acbaeab902545",
+      "source": "https://ghcr.io/v2/homebrew/core/flac/blobs/sha256:c9698bcebe8e99ab84adf49a347cad5a9f122c45b80622a9fe2acbaeab902545"
+    },
+    "gettext": {
+      "version": "1.0",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "98a116d35792ccd730360ffc8c0d8fc5799b2282b96bb7696192c573f064a331",
+      "source": "https://ghcr.io/v2/homebrew/core/gettext/blobs/sha256:98a116d35792ccd730360ffc8c0d8fc5799b2282b96bb7696192c573f064a331"
+    },
+    "glib": {
+      "version": "2.90.1",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "2c6049f0cc0592ea0967143a0256914dfe11f240b7aee2a5cd8b801dd1f3173f",
+      "source": "https://ghcr.io/v2/homebrew/core/glib/blobs/sha256:2c6049f0cc0592ea0967143a0256914dfe11f240b7aee2a5cd8b801dd1f3173f"
+    },
+    "graphite2": {
+      "version": "1.3.15",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "bcbf8282acc59c6ed6a0c9a7cf076935735c21de1495bb4e22c3d6bf32f31ee0",
+      "source": "https://ghcr.io/v2/homebrew/core/graphite2/blobs/sha256:bcbf8282acc59c6ed6a0c9a7cf076935735c21de1495bb4e22c3d6bf32f31ee0"
+    },
+    "icu4c@78": {
+      "version": "78.3",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "d1206febbce23e5014f51b631afd7129b2a247ee18a9f97226cd5889e66c1686",
+      "source": "https://ghcr.io/v2/homebrew/core/icu4c/78/blobs/sha256:d1206febbce23e5014f51b631afd7129b2a247ee18a9f97226cd5889e66c1686"
+    },
+    "libogg": {
+      "version": "1.3.6",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "2423ff6b931f0393cd314052a7328a61fdd6f1d8519b65c4dff5ab560f82c52d",
+      "source": "https://ghcr.io/v2/homebrew/core/libogg/blobs/sha256:2423ff6b931f0393cd314052a7328a61fdd6f1d8519b65c4dff5ab560f82c52d"
+    },
+    "libpng": {
+      "version": "1.6.59",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "6461c4dde6a693b559c531357b32126bd649ab67f53db5a5b70c25a5c12de4f1",
+      "source": "https://ghcr.io/v2/homebrew/core/libpng/blobs/sha256:6461c4dde6a693b559c531357b32126bd649ab67f53db5a5b70c25a5c12de4f1"
+    },
+    "libvorbis": {
+      "version": "1.3.7",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "c28d1e0b461a4cf6f5aee72e664ac6f5f6f3efaab44f15b91924f08474cfafe1",
+      "source": "https://ghcr.io/v2/homebrew/core/libvorbis/blobs/sha256:c28d1e0b461a4cf6f5aee72e664ac6f5f6f3efaab44f15b91924f08474cfafe1"
+    },
+    "webp": {
+      "version": "1.6.0",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "3f5c1ccc592312b2170bc1ea673f902aa65fc479aa9a4c308ff0b1b1a35315fe",
+      "source": "https://ghcr.io/v2/homebrew/core/webp/blobs/sha256:3f5c1ccc592312b2170bc1ea673f902aa65fc479aa9a4c308ff0b1b1a35315fe"
+    },
+    "giflib": {
+      "version": "6.1.3",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "cfd0ce71b021f10c57fe01270b77703a82c56032afd078a48d7ad48c603ae0de",
+      "source": "https://ghcr.io/v2/homebrew/core/giflib/blobs/sha256:cfd0ce71b021f10c57fe01270b77703a82c56032afd078a48d7ad48c603ae0de"
+    },
+    "json-c": {
+      "version": "0.19",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "5624048dbb067f1a6d3784081029c3d738edeefd57188ce6724bb93d01aa53aa",
+      "source": "https://ghcr.io/v2/homebrew/core/json-c/blobs/sha256:5624048dbb067f1a6d3784081029c3d738edeefd57188ce6724bb93d01aa53aa"
+    },
+    "libunistring": {
+      "version": "1.4.2",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "513bf2378982459bf3daf286cec9d50d3f491686f8caa8749604de3be4e6db77",
+      "source": "https://ghcr.io/v2/homebrew/core/libunistring/blobs/sha256:513bf2378982459bf3daf286cec9d50d3f491686f8caa8749604de3be4e6db77"
+    },
+    "libx11": {
+      "version": "1.8.13",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "af553e32325d1817b6526682e3ca5d73e354145df362790eb9fc9f231e6d8a35",
+      "source": "https://ghcr.io/v2/homebrew/core/libx11/blobs/sha256:af553e32325d1817b6526682e3ca5d73e354145df362790eb9fc9f231e6d8a35"
+    },
+    "libxcb": {
+      "version": "1.17.0",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "cce8d9e12c3f0b2fdbffbb3f7ba02f7e25cf3fa495b3e759d34a6264599543b3",
+      "source": "https://ghcr.io/v2/homebrew/core/libxcb/blobs/sha256:cce8d9e12c3f0b2fdbffbb3f7ba02f7e25cf3fa495b3e759d34a6264599543b3"
+    },
+    "libxext": {
+      "version": "1.3.7",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "71225436c92940977248a28433951e8e26732d3a9eed954ce1999a770f93f98e",
+      "source": "https://ghcr.io/v2/homebrew/core/libxext/blobs/sha256:71225436c92940977248a28433951e8e26732d3a9eed954ce1999a770f93f98e"
+    },
+    "libxrender": {
+      "version": "0.9.12",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "edcb8884f9d33219d276051be3b5ad64f390cdf3abe9794d9a0050c02895c3a7",
+      "source": "https://ghcr.io/v2/homebrew/core/libxrender/blobs/sha256:edcb8884f9d33219d276051be3b5ad64f390cdf3abe9794d9a0050c02895c3a7"
+    },
+    "lzo": {
+      "version": "2.10",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "6bb0401c41a18fd37071ec9591fe053a808f07552ff7ea22542faa470eb8e589",
+      "source": "https://ghcr.io/v2/homebrew/core/lzo/blobs/sha256:6bb0401c41a18fd37071ec9591fe053a808f07552ff7ea22542faa470eb8e589"
+    },
+    "pcre2": {
+      "version": "10.49",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "0ec47d18c50f5770db2b3f07b5b85644284cc6ee8e07e23b11d2727e95932b77",
+      "source": "https://ghcr.io/v2/homebrew/core/pcre2/blobs/sha256:0ec47d18c50f5770db2b3f07b5b85644284cc6ee8e07e23b11d2727e95932b77"
+    },
+    "pixman": {
+      "version": "0.46.4",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "86f5fc013d2b22bbe41c1c14661287bf8e8e4c3ac95cd05b08b886d24918fe34",
+      "source": "https://ghcr.io/v2/homebrew/core/pixman/blobs/sha256:86f5fc013d2b22bbe41c1c14661287bf8e8e4c3ac95cd05b08b886d24918fe34"
+    },
+    "libxau": {
+      "version": "1.0.12",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "e8a5fedbd9e5c49f10006171decc5b1e56c48fbd4267e7668f813e47c0da984f",
+      "source": "https://ghcr.io/v2/homebrew/core/libxau/blobs/sha256:e8a5fedbd9e5c49f10006171decc5b1e56c48fbd4267e7668f813e47c0da984f"
+    },
+    "libxdmcp": {
+      "version": "1.1.5",
+      "revision": 0,
+      "bottle_tag": "arm64_sequoia",
+      "sha256": "b09a915dae5b45371a86f20a4ccce13c16c7a8eadc843b665e91bc5b2d2143ce",
+      "source": "https://ghcr.io/v2/homebrew/core/libxdmcp/blobs/sha256:b09a915dae5b45371a86f20a4ccce13c16c7a8eadc843b665e91bc5b2d2143ce"
+    }
+  }
+}

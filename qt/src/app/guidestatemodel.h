@@ -36,6 +36,7 @@ public:
     bool detailsExpanded() const;
 
     void setChannels(const QList<Core::Channel> &channels);
+    void refreshTime(const QDateTime &nowUtc);
 
     Q_INVOKABLE void selectChannel(int channelId);
     Q_INVOKABLE void selectProgram(const QVariantMap &program);

@@ -18,6 +18,9 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #endif
+#ifdef Q_OS_MACOS
+#include "macoskeychain.h"
+#endif
 
 namespace OKILTV::Core {
 namespace {
@@ -42,6 +45,10 @@ QByteArray systemKey(bool create)
     if (!QDir().mkpath(lockDirectory)) unavailable();
     QLockFile keyLock(lockDirectory + QStringLiteral("/secret-key.lock"));
     if (!keyLock.tryLock(5000)) unavailable();
+#ifdef Q_OS_MACOS
+    cachedKey = macosKeychainKey(create, QStringLiteral("encryption-key-v1"));
+    return cachedKey;
+#else
     // Resolve the public libsecret/glib ABI at runtime so absence is a controlled
     // storage error rather than a loader failure. Only the AES key enters keyring.
     QLibrary secret(QStringLiteral("secret-1"), 0);
@@ -92,6 +99,7 @@ QByteArray systemKey(bool create)
     if (!verified) unavailable();
     cachedKey = key;
     return cachedKey;
+#endif
 }
 #endif
 } // namespace
@@ -128,7 +136,11 @@ QString protectSecret(const QString &plaintext)
     encrypted.resize(count + tail);
     QByteArray tag(16, Qt::Uninitialized);
     if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, 16, tag.data()) != 1) unavailable();
+#ifdef Q_OS_MACOS
+    return prefix + QStringLiteral("keychain:") + QString::fromLatin1((nonce + tag + encrypted).toBase64());
+#else
     return prefix + QStringLiteral("keyring:") + QString::fromLatin1((nonce + tag + encrypted).toBase64());
+#endif
 #endif
 }
 
@@ -137,6 +149,8 @@ QString unprotectSecret(const QString &stored)
     if (!isProtectedSecret(stored)) return stored; // Legacy plaintext, rewritten by migration.
 #ifdef Q_OS_WIN
     const auto header = prefix + QStringLiteral("dpapi:");
+#elif defined(Q_OS_MACOS)
+    const auto header = prefix + QStringLiteral("keychain:");
 #else
     const auto header = prefix + QStringLiteral("keyring:");
 #endif

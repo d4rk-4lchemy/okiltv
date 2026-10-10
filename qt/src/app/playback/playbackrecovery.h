@@ -3,6 +3,7 @@
 #include <QTimer>
 #include <QtTypes>
 #include <optional>
+#include "livebufferpolicy.h"
 
 namespace OKILTV::App::Playback {
 struct StreamHealth {
@@ -59,13 +60,14 @@ public:
     void beginLoad(bool reserve, double target, qint64 nowMs);
     bool totalExpired(int waitMs, qint64 nowMs) const;
     QString attemptTimeout(int waitMs, int sampleIntervalMs, qint64 nowMs);
-    ReserveResult reserve(std::optional<double> cache, bool idle, bool eof, bool buffering,
-                          double waitSeconds, qint64 nowMs);
+    ReserveResult reserve(const Player::MpvPlayer::PlaybackBufferSnapshot &, qint64 nowMs);
     bool active() const { return m_phase != Phase::Idle; }
     bool attemptInFlight() const;
     bool waitingStop() const { return m_phase == Phase::WaitingStop; }
     bool stabilizing() const { return m_phase == Phase::Stabilizing; }
     bool reservePending() const { return m_phase == Phase::LoadingReserve || m_phase == Phase::RebuildingReserve; }
+    double reserveTarget() const { return m_reserveTarget; }
+    qint64 reserveElapsed(qint64 nowMs) const { return nowMs - m_reserveStartedMs; }
     bool fileLoaded() const { return m_reconnectFileLoaded; }
     int attempts() const { return m_reconnectAttemptCount; }
     bool recovered() const;
@@ -88,8 +90,8 @@ private:
     bool m_reconnectFileLoaded { false };
     bool m_reconnectReserveReady { false };
     double m_reserveTarget { 0.0 };
-    double m_reserveHighWater { 0.0 };
-    qint64 m_reserveProgressMs { 0 };
+    qint64 m_reserveStartedMs { 0 };
+    LiveDepletion m_reserveDepletion;
     qint64 m_totalStartedMs { 0 };
     qint64 m_attemptStartedMs { 0 };
     qint64 m_stopIssuedMs { 0 };

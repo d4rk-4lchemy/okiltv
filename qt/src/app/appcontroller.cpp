@@ -94,6 +94,8 @@ QString graphicsApiName(const QSGRendererInterface::GraphicsApi api)
         return QStringLiteral("OpenGL");
     case QSGRendererInterface::Direct3D11:
         return QStringLiteral("Direct3D11");
+    case QSGRendererInterface::Direct3D12:
+        return QStringLiteral("Direct3D12");
     case QSGRendererInterface::Vulkan:
         return QStringLiteral("Vulkan");
     case QSGRendererInterface::Metal:
@@ -463,14 +465,9 @@ AppController::AppController(
 
     connect(m_profilesModel, &ProfilesModel::profileSelectionRequested, this, &AppController::loadProfile);
     connect(m_channelListModel, &ChannelListModel::channelActivated, this, &AppController::activateChannel);
-    connect(&m_epgUiTimer, &QTimer::timeout, m_nowNextModel, &NowNextModel::refresh);
-    connect(&m_epgUiTimer, &QTimer::timeout, m_playbackNowNextModel, &NowNextModel::refresh);
-    connect(&m_epgUiTimer, &QTimer::timeout, m_guideStateModel, &GuideStateModel::refresh);
     connect(&m_epgUiTimer, &QTimer::timeout, this, [this]() {
-        rebuildGuideGridAsync();
+        refreshEpgTime(QDateTime::currentDateTimeUtc());
     });
-    connect(&m_epgUiTimer, &QTimer::timeout, this, &AppController::updateChannelProgrammeMetadata);
-    connect(&m_epgUiTimer, &QTimer::timeout, this, &AppController::triggerScheduledSourceAutoRefresh);
     connect(m_channelListModel, &ChannelListModel::selectedChannelIdChanged, this, [this]() {
         const auto selectedId = m_channelListModel->selectedChannelId();
         if (selectedId >= 0) {
@@ -545,7 +542,6 @@ AppController::AppController(
         activatePrimaryChannel(channel.value());
     });
     connect(&m_catchupProgressFlushTimer, &QTimer::timeout, this, &AppController::flushCatchupProgress);
-    connect(&m_epgUiTimer, &QTimer::timeout, this, &AppController::pruneCatchupProgress);
     connect(m_settingsController, &SettingsController::saved, this, &AppController::pruneCatchupProgress);
     try {
         const auto savedProgress = m_database->loadCatchupProgress();
@@ -582,7 +578,8 @@ AppController::AppController(
     });
     connect(&m_watchStatsFlushTimer, &QTimer::timeout, this, &AppController::flushTrackedWatchSeconds);
 
-    m_epgUiTimer.setInterval(60 * 1000);
+    m_epgUiTimer.setInterval(1000);
+    m_epgUiTimer.setTimerType(Qt::PreciseTimer);
     m_refreshTimer.setSingleShot(true);
     m_guideRebuildTimer.setSingleShot(true);
     m_guideRebuildTimer.setInterval(16);
@@ -734,6 +731,7 @@ void AppController::initialize()
             .arg(QSysInfo::prettyProductName(), QString::fromUtf8(qVersion()), QGuiApplication::platformName(), graphicsApiName(QQuickWindow::graphicsApi())));
     updateRefreshTimer();
     if (!m_epgUiTimer.isActive()) {
+        refreshEpgTime(QDateTime::currentDateTimeUtc());
         m_epgUiTimer.start();
     }
 
@@ -1567,6 +1565,34 @@ void AppController::flushTrackedWatchSeconds()
         }
         profile = m_pendingWatchSeconds.erase(profile);
     }
+}
+
+void AppController::refreshEpgTime(const QDateTime &nowUtc)
+{
+    if (!nowUtc.isValid()) return;
+    const auto minute = nowUtc.toMSecsSinceEpoch() / 60000;
+    if (m_epgClockMinute == minute) return;
+    const bool firstSample = !m_epgClockMinute.has_value();
+    m_epgClockMinute = minute;
+
+    // Publish one shared wall-clock sample before starting any background reads.
+    // A jump in either direction (including wake after sleep) needs one update,
+    // never a replay of every missed minute.
+    m_nowNextModel->refreshTime(nowUtc);
+    m_playbackNowNextModel->refreshTime(nowUtc);
+    m_guideStateModel->refreshTime(nowUtc);
+    m_epgGridModel->refreshTime(nowUtc);
+
+    // Startup already loads source/model data through its existing lifecycle.
+    if (firstSample) return;
+
+    m_nowNextModel->refreshForClock();
+    m_playbackNowNextModel->refreshForClock();
+    m_guideStateModel->refresh();
+    rebuildGuideGridAsync();
+    updateChannelProgrammeMetadata();
+    triggerScheduledSourceAutoRefresh();
+    pruneCatchupProgress();
 }
 
 void AppController::rebuildGuideGrid()

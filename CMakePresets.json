@@ -67,6 +67,47 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
+    },
+    {
+      "name": "qt-macos-arm64-cross-base",
+      "hidden": true,
+      "inherits": "qt-base",
+      "toolchainFile": "${sourceDir}/build/toolchains/osxcross-arm64.cmake",
+      "cacheVariables": {
+        "OKILTV_BUILD_TESTS": "OFF",
+        "OKILTV_BUILD_UI_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "qt-macos-arm64-cross-debug",
+      "inherits": "qt-macos-arm64-cross-base",
+      "displayName": "Qt macOS arm64 Cross Debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "qt-macos-arm64-cross-release",
+      "inherits": "qt-macos-arm64-cross-base",
+      "displayName": "Qt macOS arm64 Cross Release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "qt-macos-arm64-native-release",
+      "inherits": "qt-base",
+      "displayName": "Qt macOS arm64 Native Beta Release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "$env{MACOS_MIN_VERSION}",
+        "CMAKE_OSX_SYSROOT": "$env{MACOS_SDK_ROOT}",
+        "CMAKE_PREFIX_PATH": "$env{QT_MACOS_SDK_ROOT}",
+        "OPENSSL_ROOT_DIR": "$env{MACOS_DEPS_ROOT}/opt/openssl@3",
+        "CMAKE_EXE_LINKER_FLAGS": "-Wl,-headerpad_max_install_names",
+        "OKILTV_BUILD_TESTS": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -85,6 +126,18 @@
     {
       "name": "qt-win64-release",
       "configurePreset": "qt-win64-release"
+    },
+    {
+      "name": "qt-macos-arm64-cross-debug",
+      "configurePreset": "qt-macos-arm64-cross-debug"
+    },
+    {
+      "name": "qt-macos-arm64-cross-release",
+      "configurePreset": "qt-macos-arm64-cross-release"
+    },
+    {
+      "name": "qt-macos-arm64-native-release",
+      "configurePreset": "qt-macos-arm64-native-release"
     }
   ],
   "testPresets": [

@@ -46,6 +46,10 @@
 #include <QSqlDatabase>
 #include <QSurfaceFormat>
 #include <QTimer>
+#ifdef Q_OS_MACOS
+#include <QEvent>
+#include <QPointer>
+#endif
 
 #include <clocale>
 #include <QLocale>
@@ -54,6 +58,32 @@
 #include <memory>
 #include <thread>
 #include <vector>
+
+#ifdef Q_OS_MACOS
+// Cocoa menu/Dock quit requests must use the same confirmations and asynchronous
+// helper/VOD shutdown as the window close button.
+class MacosLifecycleFilter final : public QObject
+{
+public:
+    explicit MacosLifecycleFilter(QObject *window) : m_window(window) {}
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (m_window && event->type() == QEvent::Quit
+            && !m_window->property("nativeQuitApproved").toBool()) {
+            QMetaObject::invokeMethod(m_window, "requestAppClose", Qt::QueuedConnection,
+                Q_ARG(QVariant, QVariant(QStringLiteral("tray"))));
+            return true;
+        }
+        if (m_window && event->type() == QEvent::ApplicationActivate && !m_window->property("visible").toBool()) {
+            QMetaObject::invokeMethod(m_window, "restoreFromTray", Qt::QueuedConnection);
+        }
+        return QObject::eventFilter(watched, event);
+    }
+private:
+    QPointer<QObject> m_window;
+};
+#endif
 
 #if defined(Q_OS_WINDOWS)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -247,6 +277,7 @@ CoreServices constructCoreServices(const StartupLogFn &startupStep)
 
     // The historical import copied files and left the old installation's data
     // behind. Protect that retained copy as well; never delete it as a shortcut.
+#ifndef Q_OS_MACOS
     const auto appData = qEnvironmentVariable("APPDATA");
     if (!appData.isEmpty()) {
         const auto legacyRoot = QDir(appData).filePath(QStringLiteral("IptvPlayer"));
@@ -262,6 +293,7 @@ CoreServices constructCoreServices(const StartupLogFn &startupStep)
             const auto legacy = loadStartupDatabase(legacyDatabase);
         }
     }
+#endif
 
     startupStep(QStringLiteral("Creating network access layer."));
     services.network = OKILTV::Core::makeDefaultNetworkAccess();
@@ -463,6 +495,9 @@ void registerQmlContextProperties(
 
 } // namespace
 
+// Early bootstrap allocation failures intentionally use the terminate handler;
+// application startup and event-loop failures are caught below.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 int main(int argc, char *argv[])
 {
     std::set_terminate([]() {
@@ -506,6 +541,10 @@ int main(int argc, char *argv[])
     defaultFormat.setRenderableType(QSurfaceFormat::OpenGL);
     defaultFormat.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
     defaultFormat.setSwapInterval(1);
+#ifdef Q_OS_MACOS
+    defaultFormat.setVersion(3, 2);
+    defaultFormat.setProfile(QSurfaceFormat::CoreProfile);
+#endif
     QSurfaceFormat::setDefaultFormat(defaultFormat);
 
     QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
@@ -532,6 +571,9 @@ int main(int argc, char *argv[])
     startupStep(QStringLiteral("QGuiApplication initialized. Platform=%1").arg(QGuiApplication::platformName()));
 
     try {
+#ifdef Q_OS_MACOS
+        startupStep(QStringLiteral("macOS application data: %1").arg(OKILTV::Core::AppDataPaths::dataDirectory()));
+#endif
         registerMetaTypes(startupStep);
         auto coreServices = constructCoreServices(startupStep);
         auto appServices = constructAppServices(
@@ -736,6 +778,10 @@ int main(int argc, char *argv[])
         appServices.uiTestCaptureController->setWindow(engine.rootObjects().constFirst());
         appServices.uiTestBridge->setWindow(engine.rootObjects().constFirst());
         startupStep(QStringLiteral("Main QML loaded successfully."));
+#ifdef Q_OS_MACOS
+        MacosLifecycleFilter macosLifecycle(engine.rootObjects().constFirst());
+        application.installEventFilter(&macosLifecycle);
+#endif
 
         auto shutdownHandled = false;
         QObject::connect(&application, &QCoreApplication::aboutToQuit, &application, [&]() {

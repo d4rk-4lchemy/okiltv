@@ -29,7 +29,11 @@ jobs:
             targets: OKILTVQtPlaybackTests OKILTVQtCatchupTests OKILTVQtVodMpvTests OKILTVQtVodRangeTests
           - group: qml
             targets: OKILTVQtEpgSearchQmlTests
-          - group: ui
+          - group: ui-live
+            targets: OKILTVQt
+          - group: ui-movies
+            targets: OKILTVQt
+          - group: ui-playback
             targets: OKILTVQt
     defaults:
       run:
@@ -47,6 +51,17 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
+      - name: Read SDK versions
+        run: |
+          source scripts/ci/dependencies.env
+          echo "QT_VERSION=$QT_VERSION" >> "$GITHUB_ENV"
+          echo "AQT_VERSION=$AQT_VERSION" >> "$GITHUB_ENV"
+      - name: Cache Linux Qt SDK
+        id: qt-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/Qt
+          key: qt-sdk-${{ runner.os }}-${{ runner.arch }}-${{ env.QT_VERSION }}-qtshadertools-qtimageformats-aqt${{ env.AQT_VERSION }}
       - name: Install Linux test dependencies
         run: |
           sudo apt-get update
@@ -57,10 +72,14 @@ jobs:
             libxcb-image0 libxcb-render-util0 libdbus-1-dev zlib1g-dev libssl-dev \
             libmpv2 libsecret-1-0 ffmpeg imagemagick xvfb xauth openbox xdotool x11-utils \
             dbus-x11 gnome-keyring
-          source scripts/ci/dependencies.env
+      - name: Install Linux Qt SDK
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        run: |
           python -m pip install "aqtinstall==$AQT_VERSION"
           python -m aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 \
             --outputdir "$RUNNER_TEMP/Qt" --modules qtshadertools qtimageformats
+      - name: Set up Linux SDK and check media tools
+        run: |
           echo "$RUNNER_TEMP/Qt/$QT_VERSION/gcc_64/bin" >> "$GITHUB_PATH"
           echo "CMAKE_PREFIX_PATH=$RUNNER_TEMP/Qt/$QT_VERSION/gcc_64" >> "$GITHUB_ENV"
           # Fail early rather than silently skipping real-backend test cases.
@@ -77,7 +96,11 @@ jobs:
       - name: Run ${{ matrix.group }} tests
         run: |
           mkdir -p reports
-          ctest --preset qt-linux-debug -L "^$TEST_GROUP$" --no-tests=error \
+          # Desktop scenarios share an X display reservation within one runner.
+          # Other suites use isolated fixtures and can overlap the download waits.
+          parallel=2
+          if [[ "$TEST_GROUP" == ui-* ]]; then parallel=1; fi
+          ctest --preset qt-linux-debug -L "^$TEST_GROUP$" --no-tests=error -j"$parallel" \
             --verbose --output-on-failure --output-junit "$PWD/reports/$TEST_GROUP.xml"
       - name: Save test reports and UI diagnostics
         if: always()
@@ -110,7 +133,19 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
+      - name: Read SDK versions
+        run: |
+          $versions = ConvertFrom-StringData (Get-Content scripts/ci/dependencies.env -Raw)
+          "QT_VERSION=$($versions.QT_VERSION)" >> $env:GITHUB_ENV
+          "AQT_VERSION=$($versions.AQT_VERSION)" >> $env:GITHUB_ENV
+      - name: Cache Windows Qt and MinGW SDK
+        id: qt-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/Qt
+          key: qt-sdk-${{ runner.os }}-${{ runner.arch }}-${{ env.QT_VERSION }}-mingw1310-aqt${{ env.AQT_VERSION }}
       - name: Install Qt and MinGW
+        if: steps.qt-cache.outputs.cache-hit != 'true'
         run: |
           $versions = ConvertFrom-StringData (Get-Content scripts/ci/dependencies.env -Raw)
           python -m pip install "aqtinstall==$($versions.AQT_VERSION)"
@@ -119,9 +154,11 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python -m aqt install-tool windows desktop tools_mingw1310 qt.tools.win64_mingw1310 --outputdir "$env:RUNNER_TEMP/Qt"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          "$env:RUNNER_TEMP/Qt/$($versions.QT_VERSION)/mingw_64/bin" >> $env:GITHUB_PATH
+      - name: Set up Windows SDK
+        run: |
+          "$env:RUNNER_TEMP/Qt/$env:QT_VERSION/mingw_64/bin" >> $env:GITHUB_PATH
           "$env:RUNNER_TEMP/Qt/Tools/mingw1310_64/bin" >> $env:GITHUB_PATH
-          "CMAKE_PREFIX_PATH=$env:RUNNER_TEMP/Qt/$($versions.QT_VERSION)/mingw_64" >> $env:GITHUB_ENV
+          "CMAKE_PREFIX_PATH=$env:RUNNER_TEMP/Qt/$env:QT_VERSION/mingw_64" >> $env:GITHUB_ENV
       - name: Build Windows process and DVR tests
         run: |
           cmake -S . -B qt/out/build/windows-tests -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=g++ -DCMAKE_CXX_STANDARD=20 -DCMAKE_CXX_STANDARD_REQUIRED=ON -DOKILTV_BUILD_TESTS=ON

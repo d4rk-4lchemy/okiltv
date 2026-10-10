@@ -4444,6 +4444,15 @@ Item {
                         elide: Text.ElideRight
                         visible: root.player.playbackMode !== "catchup"
                     }
+
+                    Text {
+                        text: "Live slowdown: " + root.debugFieldValue("liveSlowdownText")
+                        color: Theme.textSecondary
+                        font.pixelSize: 12
+                        width: parent.width
+                        elide: Text.ElideRight
+                        visible: root.player.playbackMode === "live" && !root.vodActive
+                    }
                 }
             }
 

@@ -1,4 +1,5 @@
 #include "guidestatemodel.h"
+#include "epgpresentationtime.h"
 
 #include <QtConcurrent>
 
@@ -189,6 +190,15 @@ void GuideStateModel::refresh()
     updatePrograms();
 }
 
+void GuideStateModel::refreshTime(const QDateTime &nowUtc)
+{
+    if (!nowUtc.isValid()) return;
+    updateEpgProgramTime(m_selectedProgramVariant, nowUtc);
+    updateEpgProgramTimes(m_channelProgramsVariant, nowUtc);
+    emit selectedProgramChanged();
+    emit channelProgramsChanged();
+}
+
 void GuideStateModel::clear()
 {
     ++m_updateGeneration;
@@ -329,8 +339,7 @@ void GuideStateModel::applyProgramsUpdate(const quint64 generation, ProgramsUpda
     m_channelPrograms = std::move(result.channelPrograms);
     m_selectedProgramVariant = std::move(result.selectedProgramVariant);
     m_channelProgramsVariant = std::move(result.channelProgramsVariant);
-    emit selectedProgramChanged();
-    emit channelProgramsChanged();
+    refreshTime(QDateTime::currentDateTimeUtc());
 }
 
 } // namespace OKILTV::App

@@ -1,4 +1,5 @@
 #include "epggridmodel.h"
+#include "epgpresentationtime.h"
 #include "../core/debuglogger.h"
 
 #include <QtConcurrent>
@@ -294,7 +295,24 @@ QVariantMap EpgGridModel::selectedProgram() const
 
 double EpgGridModel::currentTimeOffsetMinutes() const
 {
-    return secondsToMinutes(m_windowStart.secsTo(QDateTime::currentDateTimeUtc()));
+    return static_cast<double>(m_windowStart.msecsTo(m_clockUtc)) / 60000.0;
+}
+
+void EpgGridModel::refreshTime(const QDateTime &nowUtc)
+{
+    if (!nowUtc.isValid()) return;
+    m_clockUtc = nowUtc.toUTC();
+    // Keep loaded rows and pending reads. Updating clock presentation must never
+    // evict the data or wait for the SQLite worker pool.
+    for (auto &tiles : m_programTilesCacheByRow) updateEpgProgramTimes(tiles, m_clockUtc);
+    updateEpgProgramTime(m_resolvedProgram, m_clockUtc);
+    m_timeSlots = computeTimeSlots();
+    m_visibleTimeSlots = computeVisibleTimeSlots();
+    emit currentTimeChanged();
+    emit timeSlotsChanged();
+    emit visibleTimeSlotsChanged();
+    emitProgramsChangedForVisibleRows();
+    emit selectedProgramChanged();
 }
 
 int EpgGridModel::guidePastHours() const
@@ -805,6 +823,7 @@ void EpgGridModel::applyRows(
     emit visibleTimeSlotsChanged();
     emit windowChanged();
     emit selectedProgramChanged();
+    emit currentTimeChanged();
     scheduleOffscreenRowWarmup();
     m_rebuildPending = false;
     emit rebuildPendingChanged();
@@ -935,7 +954,7 @@ QVariantList EpgGridModel::buildPrograms(const int rowIndex, const Row &row) con
 
     QVariantList tiles;
     tiles.reserve(programs.size());
-    const auto nowUtc = QDateTime::currentDateTimeUtc();
+    const auto nowUtc = m_clockUtc;
     const auto fullWindowEnd = windowEnd();
     const auto selectedStartIso = m_selectedProgramStart.trimmed();
     for (auto index = 0; index < programs.size(); ++index) {
@@ -1043,7 +1062,8 @@ void EpgGridModel::requestProgram(int channelId, const QString &timestampIso, in
                 if (generation != m_navigationGeneration || snapshot != m_epg->snapshot()) return;
                 m_navigationPending = false; m_navigationDelta = 0;
                 m_resolvedProgram = result;
-                emit programResolved(channel.id, result, adjacent);
+                updateEpgProgramTime(m_resolvedProgram, m_clockUtc);
+                emit programResolved(channel.id, m_resolvedProgram, adjacent);
                 emit selectedProgramChanged();
             }, Qt::QueuedConnection);
         }));
@@ -1083,7 +1103,7 @@ QVariantMap EpgGridModel::findSelectedProgram() const
     if (selectedStart.isEmpty()) {
         return {};
     }
-    const auto nowUtc = QDateTime::currentDateTimeUtc();
+    const auto nowUtc = m_clockUtc;
     const auto fullWindowEnd = windowEnd();
 
     if (!selectedStart.isEmpty() && m_selectedChannelId >= 0) {

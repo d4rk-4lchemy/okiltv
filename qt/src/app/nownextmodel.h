@@ -37,6 +37,8 @@ public:
     QVariantList upcomingPrograms() const;
 
     void setChannel(const std::optional<Core::Channel> &channel);
+    void refreshTime(const QDateTime &nowUtc);
+    void refreshForClock();
 
 public slots:
     void refresh();
@@ -49,13 +51,7 @@ signals:
 private:
     struct RefreshResult
     {
-        std::optional<Core::EpgEntry> currentProgram;
-        std::optional<Core::EpgEntry> nextProgram;
-        QList<Core::EpgEntry> upcomingPrograms;
-        QVariantMap currentProgramVariant;
-        QVariantMap nextProgramVariant;
-        QVariantList upcomingProgramsVariant;
-        QVariantList pastProgramsVariant;
+        QVariantList programs;
     };
 
     void startRefreshJob(quint64 generation, const Core::Channel &channel, int lookAheadHours);
@@ -64,9 +60,7 @@ private:
     Core::EpgService *m_epg;
     Core::SettingsManager *m_settings;
     std::optional<Core::Channel> m_channel;
-    std::optional<Core::EpgEntry> m_currentProgram;
-    std::optional<Core::EpgEntry> m_nextProgram;
-    QList<Core::EpgEntry> m_upcomingPrograms;
+    QVariantList m_cachedPrograms;
     QVariantMap m_currentProgramVariant;
     QVariantMap m_nextProgramVariant;
     QVariantList m_upcomingProgramsVariant;

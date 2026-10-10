@@ -3,6 +3,7 @@
 #include "../../player/livebuffertuner.h"
 #include "../../player/mpvplayer.h"
 #include "../../player/catchupstreamsession.h"
+#include "livebufferpolicy.h"
 #include <deque>
 #include <QTimer>
 #include <optional>
@@ -15,6 +16,8 @@ enum class ReservePhase { Idle, Filling };
 struct ReserveDecision {
     PauseCommand pause { PauseCommand::None };
     bool pending { false };
+    bool reconnect { false };
+    QString reason;
 };
 
 class PlaybackBuffering final
@@ -37,7 +40,7 @@ public:
     enum class StartupPolicy { StrictBuffered, FastLive, BestEffort };
     static StartupPolicy startupPolicy(bool catchup, bool ownedPrimary, bool shared,
                                        bool reconnect, bool softwareFallback, bool timeshift);
-    static double adaptiveSteadyStateCacheLimitSeconds(const double bufferTargetSeconds);
+    static double adaptiveLiveCacheBudgetSeconds(const double bufferTargetSeconds);
     static double adaptiveSteadyStateCacheHysteresisSeconds(const double bufferTargetSeconds);
     static qint64 adaptiveSteadyStateMaxBytes(
     const double bufferTargetSeconds,
@@ -55,13 +58,19 @@ public:
     void observeDelivery(double nowSeconds, double endSeconds, bool idle);
     double targetSeconds(double configured) const { return m_tuner.targetSeconds(configured); }
     double detectedIntervalSeconds() const { return m_tuner.detectedIntervalSeconds(); }
+    bool beginLiveSlowdown(const Player::MpvPlayer::PlaybackBufferSnapshot &, double previousTarget,
+                           double target, qint64 nowMs);
+    double advanceLiveSlowdown(qint64 nowMs, std::optional<double> position, bool playing);
+    void cancelLiveSlowdown(qint64 nowMs);
+    bool liveSlowdownActive() const { return m_liveSlowdownActive; }
+    double liveSlowdownRemainingSeconds() const;
     std::optional<Player::MpvPlayer::SteadyStateBufferingPolicy> retune(
         bool catchup, double configured, std::optional<double> cache, bool fastLive, qint64 nowMs);
     Player::MpvPlayer::SteadyStateBufferingPolicy activeCatchupPolicy(qint64 nowMs);
-    ReserveDecision beginLiveReserve(std::optional<double> cache, bool readerIdle, double configured, qint64 nowMs);
-    ReserveDecision advanceLiveReserve(std::optional<double> cache, bool readerIdle, bool eof, qint64 elapsedMs, qint64 nowMs);
+    ReserveDecision beginLiveReserve(const Player::MpvPlayer::PlaybackBufferSnapshot &, double configured, qint64 nowMs);
+    ReserveDecision advanceLiveReserve(const Player::MpvPlayer::PlaybackBufferSnapshot &, qint64 elapsedMs, qint64 nowMs);
     ReserveDecision resetLiveReserve(bool resume, bool manuallyPaused, bool preserveDelivery = false);
-    void raiseLiveTarget(double configured);
+    void resetLiveDepletion() { m_liveDepletion.reset(); }
     bool liveReservePending() const { return m_livePhase == ReservePhase::Filling; }
     double liveReserveTarget() const { return m_liveTarget; }
     qint64 liveReserveElapsed(qint64 nowMs) const { return nowMs - m_liveStartedMs; }
@@ -76,6 +85,11 @@ private:
     QTimer m_startupFallbackTimer;
     QTimer m_startupProbeTimer;
     Player::LiveBufferTuner m_tuner;
+    bool m_liveSlowdownActive { false };
+    qint64 m_liveSlowdownPlayedMs { 0 };
+    std::optional<qint64> m_liveSlowdownSampleMs;
+    std::optional<double> m_liveSlowdownPosition;
+    std::optional<qint64> m_liveSlowdownCooldownUntilMs;
     std::deque<std::pair<qint64, double>> m_samples;
     std::optional<double> m_average;
     std::optional<Player::MpvPlayer::SteadyStateBufferingPolicy> m_lastPolicy;
@@ -84,6 +98,7 @@ private:
     double m_liveTarget { 0.0 };
     qint64 m_liveStartedMs { 0 };
     std::optional<qint64> m_liveRetryMs;
+    LiveDepletion m_liveDepletion;
     ReservePhase m_catchupPhase { ReservePhase::Idle };
     qint64 m_catchupStartedMs { 0 };
 };

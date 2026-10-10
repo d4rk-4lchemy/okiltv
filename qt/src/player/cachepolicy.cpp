@@ -2,6 +2,7 @@
 #include "../core/models.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 namespace OKILTV::Player {
 namespace {
 constexpr qint64 kMiB = 1024LL * 1024LL;
@@ -17,7 +18,7 @@ qint64 MpvPlayer::demuxerMaxBytesForBufferSeconds(const double bufferSeconds)
     return std::clamp(rawBytes, kDemuxerMaxBytesFloor, kDemuxerMaxBytesCeil);
 }
 
-double MpvPlayer::cacheWindowSecondsForBufferTarget(const double bufferTargetSeconds)
+double MpvPlayer::cacheBudgetSecondsForBufferTarget(const double bufferTargetSeconds)
 {
     const auto normalizedTarget = Core::normalizePlayerBufferSeconds(bufferTargetSeconds);
     return std::clamp(std::max(normalizedTarget * 3.0, normalizedTarget + 8.0), 10.0, 120.0);
@@ -28,11 +29,11 @@ double MpvPlayer::steadyStateBackBufferSeconds()
     return kSteadyStateBackBufferSeconds;
 }
 
-double MpvPlayer::steadyStateCacheLimitSecondsForBufferTarget(const double bufferTargetSeconds)
+double MpvPlayer::unlimitedReadAheadSeconds()
 {
-    // The playback reserve is not a download ceiling. Accept provider bursts
-    // beyond it, while keeping read-ahead bounded by time and byte budgets.
-    return cacheWindowSecondsForBufferTarget(bufferTargetSeconds);
+    // mpv rejects infinity for these options. Its largest accepted finite double
+    // removes the time ceiling; demuxer-max-bytes still bounds read-ahead.
+    return std::numeric_limits<double>::max();
 }
 
 double MpvPlayer::steadyStateCacheHysteresisSecondsForBufferTarget(const double /*bufferTargetSeconds*/)
@@ -45,6 +46,8 @@ MpvPlayer::PlaybackBufferSnapshot MpvPlayer::playbackBufferForCacheState(
     const double positionSeconds, const QVariantMap &state)
 {
     PlaybackBufferSnapshot result;
+    if (state.contains(QStringLiteral("idle"))) result.readerIdle = state.value(QStringLiteral("idle")).toBool();
+    if (state.contains(QStringLiteral("eof"))) result.readerEof = state.value(QStringLiteral("eof")).toBool();
     const auto number = [](const QVariantMap &map, const QString &key) -> std::optional<double> {
         bool ok = false;
         const auto value = map.value(key).toDouble(&ok);

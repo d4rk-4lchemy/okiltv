@@ -3,6 +3,7 @@
 import http.server
 import importlib.util
 import json
+import os
 import pathlib
 import subprocess
 import threading
@@ -37,6 +38,10 @@ class LocalRunner(module.Runner):
              "autoRefreshIntervalHours": 0}],
             "vodEnabled": False, "autoRefreshEpg": False, "minimizeToTrayOnMinimize": False,
             "mpvOptions": {"ao": "null", "hwdec": "no"}}
+        # Keep QML on the runner's normal Mesa driver. Only simplify mpv's
+        # software video renderer, which can stall on resume in mpv 0.37.
+        if os.environ.get("LIBGL_ALWAYS_SOFTWARE") == "1":
+            settings["mpvOptions"]["gpu-dumb-mode"] = "yes"
         for path in self.settings_path_candidates:
             path.write_text(json.dumps(settings))
 

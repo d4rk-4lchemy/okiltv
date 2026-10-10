@@ -16,6 +16,7 @@ its boundaries and where to make changes; they are not a release history.
 | Change QML, focus, shortcuts, overlays or appearance | [UI and interaction](ui-and-interaction.md) |
 | Change settings, persistence, migrations or protected data | [Settings and storage](settings-and-storage.md) |
 | Build, validate, diagnose CI or package the application | [Build and testing](build-and-testing.md) |
+| Build/package macOS locally or in release CI, or validate the Apple Silicon beta bundle | [macOS build](macos-build.md), [Mac tester checklist](macos-tester-checklist.md) |
 
 For a cross-cutting change, read each affected page. For example, a new playback
 setting involves settings/storage, playback, UI and validation.

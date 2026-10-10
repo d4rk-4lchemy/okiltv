@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <limits>
 #include "app/playback/playbackbuffering.h"
 #include "app/playback/playbackrecovery.h"
 #include "app/playback/catchupplaybacksession.h"
@@ -7,14 +8,32 @@
 
 using namespace OKILTV::App::Playback;
 
+namespace {
+using BufferSample = OKILTV::Player::MpvPlayer::PlaybackBufferSnapshot;
+BufferSample liveSample(std::optional<double> seconds, bool idle = false, bool eof = false)
+{
+    BufferSample sample;
+    sample.seconds = seconds;
+    sample.fresh = true;
+    sample.readerIdle = idle;
+    sample.readerEof = eof;
+    return sample;
+}
+}
+
 class PlaybackTests final : public QObject {
     Q_OBJECT
 private slots:
     void reserveCommandsAndCancellation();
     void refillPreservesPauseAndEof();
     void liveCapacityTimeoutAndMissingTelemetry();
+    void liveDepletionRequiresDistinctFreshSamples();
+    void liveRefillFreezesTargetAndDrainsTails();
+    void liveWatchdogsPreserveUsableReserve();
     void bitrateWindowAndRetune();
     void startupPolicies();
+    void liveSlowdownRequiresRaisedTargetAndFreshReserve();
+    void liveSlowdownRampsCountsPlaybackAndCannotExtend();
     void reconnectStopLoadLimitsAndCancellation();
     void reconnectReserveAndStabilization();
     void playbackBufferUsesPlaybackClockAndContinuousMedia();
@@ -32,24 +51,95 @@ private slots:
     void startupCancellationAndFallback();
 };
 
+void PlaybackTests::liveSlowdownRequiresRaisedTargetAndFreshReserve()
+{
+    PlaybackBuffering buffer;
+    auto sample = liveSample(4.0);
+    QVERIFY(!buffer.beginLiveSlowdown(sample, 8.0, 8.0, 0));
+    QVERIFY(!buffer.beginLiveSlowdown(sample, 8.0, 7.0, 0));
+    QVERIFY(!buffer.beginLiveSlowdown(liveSample(8.5), 3.0, 8.5, 0));
+    QVERIFY(!buffer.beginLiveSlowdown(liveSample(std::nullopt), 3.0, 8.5, 0));
+    QVERIFY(!buffer.beginLiveSlowdown(liveSample(-1.0), 3.0, 8.5, 0));
+    QVERIFY(!buffer.beginLiveSlowdown(liveSample(std::numeric_limits<double>::quiet_NaN()), 3.0, 8.5, 0));
+    sample.fresh = false;
+    QVERIFY(!buffer.beginLiveSlowdown(sample, 3.0, 8.5, 0));
+    sample.fresh = true;
+    sample.readerEof = true;
+    QVERIFY(!buffer.beginLiveSlowdown(sample, 3.0, 8.5, 0));
+    sample.readerEof = false;
+    buffer.beginLiveReserve(liveSample(0.0), 3.0, 0);
+    QVERIFY(buffer.beginLiveReserve(liveSample(0.0), 3.0, 500).pending);
+    QVERIFY(!buffer.beginLiveSlowdown(sample, 3.0, 8.5, 500));
+    buffer.resetAdaptation();
+    QVERIFY(buffer.beginLiveSlowdown(sample, 3.0, 8.5, 1000));
+    buffer.cancelLiveSlowdown(1000);
+    QVERIFY(!buffer.beginLiveSlowdown(sample, 8.5, 10.0, 30999));
+    QVERIFY(buffer.beginLiveSlowdown(sample, 8.5, 10.0, 31000));
+    buffer.resetAdaptation();
+    QVERIFY(!buffer.liveSlowdownActive());
+    QVERIFY(buffer.beginLiveSlowdown(sample, 3.0, 8.5, 31001));
+}
+
+void PlaybackTests::liveSlowdownRampsCountsPlaybackAndCannotExtend()
+{
+    PlaybackBuffering buffer;
+    QVERIFY(buffer.beginLiveSlowdown(liveSample(4.0), 3.0, 8.5, 0));
+    QCOMPARE(buffer.advanceLiveSlowdown(0, 10.0, true), 1.0);
+    double position = 10.0;
+    for (int tick = 1; tick <= 8; ++tick) {
+        position += 0.225;
+        const auto speed = buffer.advanceLiveSlowdown(tick * 250, position, true);
+        QVERIFY(std::abs(speed - (1.0 - tick * 0.0125)) < 0.00001);
+    }
+    QCOMPARE(buffer.liveSlowdownRemainingSeconds(), 28.0);
+    // Manual/backend pauses, frozen clocks, stale clocks and long sampling gaps
+    // must not consume the budget or reset its deadline on another target raise.
+    QCOMPARE(buffer.advanceLiveSlowdown(2250, position, false), 0.90);
+    buffer.advanceLiveSlowdown(102250, position, false);
+    buffer.advanceLiveSlowdown(102500, position, true);
+    buffer.advanceLiveSlowdown(102750, position, true);
+    buffer.advanceLiveSlowdown(103000, std::nullopt, true);
+    buffer.advanceLiveSlowdown(103250, position, true);
+    position += 10.0;
+    buffer.advanceLiveSlowdown(113250, position, true);
+    QCOMPARE(buffer.liveSlowdownRemainingSeconds(), 28.0);
+    QVERIFY(!buffer.beginLiveSlowdown(liveSample(1.0), 8.5, 15.0, 113250));
+    qint64 nowMs = 113250;
+    double savedSeconds = 0.0;
+    double previousSpeed = 0.90;
+    for (int tick = 1; tick <= 112; ++tick) {
+        nowMs += 250;
+        position += 0.225;
+        const auto speed = buffer.advanceLiveSlowdown(nowMs, position, true);
+        savedSeconds += (1.0 - (previousSpeed + speed) / 2.0) * 0.25;
+        previousSpeed = speed;
+        if (tick == 104) QCOMPARE(speed, 0.90); // Return ramp begins at 28 played seconds.
+        if (tick == 108) QVERIFY(std::abs(speed - 0.95) < 0.00001);
+    }
+    QVERIFY(!buffer.liveSlowdownActive());
+    QCOMPARE(previousSpeed, 1.0);
+    QCOMPARE(buffer.liveSlowdownRemainingSeconds(), 0.0);
+    QVERIFY(std::abs(savedSeconds - 2.7) < 0.00001); // Plus 0.1 s from the entry ramp = 2.8 s.
+    QVERIFY(!buffer.beginLiveSlowdown(liveSample(1.0), 8.5, 15.0, nowMs + 29999));
+    QVERIFY(buffer.beginLiveSlowdown(liveSample(1.0), 8.5, 15.0, nowMs + 30000));
+    PlaybackBuffering independent;
+    QCOMPARE(independent.advanceLiveSlowdown(nowMs, 20.0, true), 1.0);
+    QVERIFY(!independent.liveSlowdownActive());
+}
+
 void PlaybackTests::reserveCommandsAndCancellation()
 {
     PlaybackBuffering buffer;
-    QList<PauseCommand> commands;
-    const auto record = [&](ReserveDecision decision) {
-        if (decision.pause != PauseCommand::None) commands << decision.pause;
-        return decision.pending;
-    };
-    QVERIFY(!record(buffer.beginLiveReserve(0.11, false, 3.0, 100)));
-    QVERIFY(record(buffer.beginLiveReserve(0.1, false, 3.0, 101)));
-    QVERIFY(record(buffer.advanceLiveReserve(2.9, false, false, 1000, 1101)));
-    QVERIFY(!record(buffer.advanceLiveReserve(3.0, false, false, 1001, 1102)));
-    QCOMPARE(commands, (QList<PauseCommand>{PauseCommand::Pause, PauseCommand::Resume}));
-    QVERIFY(record(buffer.beginLiveReserve(0.0, false, 3.0, 1103)));
-    QVERIFY(!record(buffer.resetLiveReserve(true, true)));
-    QCOMPARE(commands.last(), PauseCommand::Pause);
-    QVERIFY(!record(buffer.advanceLiveReserve(50.0, false, false, 30000, 31103)));
-    QCOMPARE(commands.size(), 3);
+    QVERIFY(!buffer.beginLiveReserve(liveSample(0.21), 3.0, 0).pending);
+    QVERIFY(!buffer.beginLiveReserve(liveSample(0.1), 3.0, 100).pending);
+    QVERIFY(!buffer.beginLiveReserve(liveSample(0.1), 3.0, 350).pending);
+    QCOMPARE(buffer.beginLiveReserve(liveSample(0.1), 3.0, 600).pause, PauseCommand::Pause);
+    QVERIFY(buffer.advanceLiveReserve(liveSample(2.6), 1000, 1600).pending);
+    QCOMPARE(buffer.advanceLiveReserve(liveSample(2.7), 1001, 1601).pause, PauseCommand::Resume);
+    QVERIFY(!buffer.beginLiveReserve(liveSample(0.0), 3.0, 1700).pending);
+    QVERIFY(buffer.beginLiveReserve(liveSample(0.0), 3.0, 2200).pending);
+    QCOMPARE(buffer.resetLiveReserve(true, true).pause, PauseCommand::None);
+    QVERIFY(!buffer.advanceLiveReserve(liveSample(50.0), 30000, 32200).pending);
 }
 
 void PlaybackTests::refillPreservesPauseAndEof()
@@ -68,16 +158,107 @@ void PlaybackTests::refillPreservesPauseAndEof()
 void PlaybackTests::liveCapacityTimeoutAndMissingTelemetry()
 {
     PlaybackBuffering buffer;
-    QVERIFY(!buffer.beginLiveReserve(std::nullopt, false, 3.0, 0).pending);
-    QVERIFY(buffer.beginLiveReserve(0.0, false, 8.0, 1).pending);
-    QVERIFY(buffer.advanceLiveReserve(2.0, true, false, 999, 1000).pending);
-    QVERIFY(!buffer.advanceLiveReserve(2.0, true, false, 1000, 1001).pending);
-    QVERIFY(!buffer.beginLiveReserve(0.0, false, 8.0, 11000).pending);
-    QVERIFY(buffer.beginLiveReserve(0.0, false, 8.0, 11001).pending);
-    QVERIFY(!buffer.advanceLiveReserve(std::nullopt, false, false, 18000, 29001).pending);
+    QVERIFY(!buffer.beginLiveReserve(liveSample(std::nullopt), 3.0, 0).pending);
+    QVERIFY(!buffer.beginLiveReserve(liveSample(0.0), 8.0, 1).pending);
+    QVERIFY(buffer.beginLiveReserve(liveSample(0.0), 8.0, 501).pending);
+    QVERIFY(buffer.advanceLiveReserve(liveSample(2.0, true), 999, 1500).pending);
+    QCOMPARE(buffer.advanceLiveReserve(liveSample(2.0, true), 1000, 1501).pause, PauseCommand::Resume);
+    QVERIFY(!buffer.beginLiveReserve(liveSample(0.0), 8.0, 11500).pending);
+    QVERIFY(!buffer.beginLiveReserve(liveSample(0.0), 8.0, 11501).pending);
+    QVERIFY(buffer.beginLiveReserve(liveSample(0.0), 8.0, 12001).pending);
+    QVERIFY(buffer.advanceLiveReserve(liveSample(std::nullopt), 29999, 42000).pending);
+    const auto unknown = buffer.advanceLiveReserve(liveSample(std::nullopt), 30000, 42001);
+    QCOMPARE(unknown.pause, PauseCommand::Resume);
+    QVERIFY(!unknown.reconnect);
     buffer.resetAdaptation();
-    QVERIFY(buffer.beginLiveReserve(0.0, false, 3.0, 30000).pending);
-    QVERIFY(!buffer.advanceLiveReserve(0.2, false, true, 1, 30001).pending);
+    buffer.beginLiveReserve(liveSample(0.0), 3.0, 43000);
+    QVERIFY(buffer.beginLiveReserve(liveSample(0.0), 3.0, 43500).pending);
+    const auto empty = buffer.advanceLiveReserve(liveSample(0.0), 30000, 73500);
+    QVERIFY(empty.reconnect);
+    QVERIFY(!empty.pending);
+}
+
+void PlaybackTests::liveDepletionRequiresDistinctFreshSamples()
+{
+    PlaybackBuffering buffer;
+    for (int i = 0; i <= 20; ++i)
+        QVERIFY(!buffer.beginLiveReserve(liveSample(13.0 - i * 0.6), 13.0, i * 250).pending);
+    auto low = liveSample(0.0);
+    low.sampledAtMs = 1;
+    QVERIFY(!buffer.beginLiveReserve(low, 13.0, 6000).pending);
+    QVERIFY(!buffer.beginLiveReserve(low, 13.0, 6500).pending);
+    low.sampledAtMs = 2;
+    low.fresh = false;
+    QVERIFY(!buffer.beginLiveReserve(low, 13.0, 6750).pending);
+    low.fresh = true;
+    low.sampledAtMs = 3;
+    QVERIFY(!buffer.beginLiveReserve(low, 13.0, 7000).pending);
+    low.sampledAtMs = 4;
+    QVERIFY(!buffer.beginLiveReserve(low, 13.0, 7250).pending);
+    // A fresh healthy observation cancels an apparent sudden zero.
+    QVERIFY(!buffer.beginLiveReserve(liveSample(12.0), 13.0, 7500).pending);
+    low.sampledAtMs = 5;
+    QVERIFY(!buffer.beginLiveReserve(low, 13.0, 7750).pending);
+    low.sampledAtMs = 6;
+    QVERIFY(buffer.beginLiveReserve(low, 13.0, 8250).pending);
+}
+
+void PlaybackTests::liveRefillFreezesTargetAndDrainsTails()
+{
+    PlaybackBuffering buffer;
+    buffer.beginLiveReserve(liveSample(0.0), 13.0, 0);
+    QVERIFY(buffer.beginLiveReserve(liveSample(0.0), 13.0, 500).pending);
+    // Learning a larger target while paused must not move this hold's goal.
+    for (int i = 0; i <= 180; ++i) buffer.observeDelivery(i / 4.0, (i / 60) * 15.0, false);
+    QVERIFY(buffer.targetSeconds(13.0) > 13.0);
+    QCOMPARE(buffer.liveReserveTarget(), 13.0);
+    QCOMPARE(buffer.advanceLiveReserve(liveSample(12.7), 1000, 1500).pause, PauseCommand::Resume);
+    buffer.resetAdaptation();
+    buffer.beginLiveReserve(liveSample(0.0), 13.0, 2000);
+    buffer.beginLiveReserve(liveSample(0.0), 13.0, 2500);
+    const auto eof = buffer.advanceLiveReserve(liveSample(2.0, true, true), 100, 2600);
+    QCOMPARE(eof.pause, PauseCommand::Resume);
+    QVERIFY(!eof.reconnect);
+    buffer.resetAdaptation();
+    buffer.beginLiveReserve(liveSample(0.0), 13.0, 3000);
+    buffer.beginLiveReserve(liveSample(0.0), 13.0, 3500);
+    const auto timeout = buffer.advanceLiveReserve(liveSample(2.0), 30000, 33500);
+    QCOMPARE(timeout.pause, PauseCommand::Resume);
+    QVERIFY(!timeout.reconnect);
+}
+
+void PlaybackTests::liveWatchdogsPreserveUsableReserve()
+{
+    PlaybackRecovery recovery;
+    RecoveryContext context;
+    context.hasChannel = true;
+    context.buffering = true;
+    context.stalled = true;
+    for (int i = 0; i < 20; ++i) {
+        StreamHealth health {13.0 - i * 0.6, 0.0, 13.0};
+        QVERIFY(recovery.noRefill(health, context, true, true, i * 1000).isEmpty());
+    }
+    StreamHealth empty {0.0, 0.0, 13.0};
+    empty.sampleFresh = false;
+    for (int i = 0; i < 10; ++i) {
+        QVERIFY(recovery.noRefill(empty, context, false, false, 20000 + i * 1000).isEmpty());
+        QVERIFY(recovery.videoFreeze(empty, context, false, false, 20000 + i * 1000).isEmpty());
+    }
+    // Positive incoming bytes without usable media do not prove refill.
+    empty.sampleFresh = true;
+    empty.cacheSpeedBytesPerSecond = 1000000.0;
+    // Actual continuing playback is not a delivery failure, even at zero queue.
+    context.buffering = false;
+    context.stalled = false;
+    for (int i = 0; i < 6; ++i) QVERIFY(recovery.noRefill(empty, context, true, true, 24000 + i * 1000).isEmpty());
+    for (int i = 0; i < 2; ++i) QVERIFY(recovery.noRefill(empty, context, false, false, 30000 + i * 1000).isEmpty());
+    QCOMPARE(recovery.noRefill(empty, context, false, false, 32000), QStringLiteral("no-refill-watchdog"));
+    // An audio-only decoder that stops advancing with real reserve is separate.
+    StreamHealth full {13.0, 0.0, 13.0};
+    context.buffering = false;
+    context.stalled = false;
+    for (int i = 0; i < 5; ++i) QVERIFY(recovery.videoFreeze(full, context, false, std::nullopt, 33000 + i * 1000).isEmpty());
+    QCOMPARE(recovery.videoFreeze(full, context, false, std::nullopt, 38000), QStringLiteral("decoder-stall-watchdog"));
 }
 
 void PlaybackTests::bitrateWindowAndRetune()
@@ -89,11 +270,15 @@ void PlaybackTests::bitrateWindowAndRetune()
     QVERIFY(!buffer.observeBitrate(std::nullopt, 5002));
     const auto initial = buffer.retune(false, 3.0, 20.0, true, 6000);
     QVERIFY(initial);
+    QCOMPARE(initial->cacheLimitSeconds, OKILTV::Player::MpvPlayer::unlimitedReadAheadSeconds());
+    QCOMPARE(initial->hysteresisSeconds, 0.0);
     QCOMPARE(initial->refillSeconds.value(), 0.0);
     QVERIFY(!buffer.retune(false, 30.0, 20.0, true, 7999));
     QVERIFY(buffer.retune(false, 30.0, 20.0, true, 8000));
     buffer.observeBitrate(1e30, 8001);
     const auto archive = buffer.activeCatchupPolicy(8001);
+    QCOMPARE(archive.cacheLimitSeconds, 90.0);
+    QCOMPARE(archive.hysteresisSeconds, 85.0);
     QCOMPARE(archive.maxBytes, 96LL * 1024 * 1024);
     QCOMPARE(archive.maxBackBytes, 32LL * 1024 * 1024);
 }
@@ -142,10 +327,10 @@ void PlaybackTests::reconnectReserveAndStabilization()
     recovery.loaded(100);
     using Action = PlaybackRecovery::ReserveResult::Action;
     for (int i = 1; i <= 7; ++i) {
-        QVERIFY(recovery.reserve(static_cast<double>(i), false, false, false, 5.0, i * 1000).holdSample);
+        QVERIFY(recovery.reserve(liveSample(static_cast<double>(i)), i * 1000).holdSample);
         QCOMPARE(recovery.attempts(), 1);
     }
-    QCOMPARE(recovery.reserve(7.5, false, false, false, 5.0, 8000).action, Action::Resume);
+    QCOMPARE(recovery.reserve(liveSample(7.5), 8000).action, Action::Resume);
     RecoveryContext context;
     context.hasChannel = true;
     StreamHealth health{7.5, 5000.0, 3.0};
@@ -157,9 +342,18 @@ void PlaybackTests::reconnectReserveAndStabilization()
         recovery.observeRecovery(health, context, true, true, 8001 + i * 1000);
     }
     QVERIFY(recovery.recovered());
-    QCOMPARE(recovery.reserve(0.5, false, false, true, 5.0, 22000).action, Action::Pause);
+    QCOMPARE(recovery.reserve(liveSample(0.5), 21000).action, Action::None);
+    QCOMPARE(recovery.reserve(liveSample(0.1), 22000).action, Action::None);
+    QCOMPARE(recovery.reserve(liveSample(0.1), 22500).action, Action::Pause);
     QVERIFY(!recovery.stabilizing());
-    QCOMPARE(recovery.reserve(0.5, false, true, true, 5.0, 22001).action, Action::Stop);
+    QCOMPARE(recovery.reserve(liveSample(2.0, true, true), 22501).action, Action::Resume);
+    QVERIFY(recovery.attemptInFlight());
+    recovery.beginLoad(true, 13.0, 23000);
+    recovery.loaded(23000);
+    QCOMPARE(recovery.reserve(liveSample(2.0), 53000).action, Action::Resume);
+    recovery.beginLoad(true, 13.0, 54000);
+    recovery.loaded(54000);
+    QCOMPARE(recovery.reserve(liveSample(0.0, true, true), 54001).action, Action::Stop);
     QVERIFY(!recovery.attemptInFlight());
 }
 
@@ -356,7 +550,7 @@ void PlaybackTests::watchdogsRespectContext()
     QVERIFY(recovery.noRefill(health, context, false, false, 14000).isEmpty());
     context.catchup = false;
     health.cacheDurationSeconds = 10.0;
-    for (int i = 0; i < 10; ++i) QVERIFY(recovery.videoFreeze(health, context, false, std::nullopt, 15000 + i).isEmpty());
+    for (int i = 0; i < 10; ++i) QVERIFY(recovery.videoFreeze(health, context, true, std::nullopt, 15000 + i).isEmpty());
 }
 
 void PlaybackTests::catchupTimelineAndProgress()
@@ -461,7 +655,9 @@ void PlaybackTests::standbyRetryAndCancellation()
 void PlaybackTests::independentPlayers()
 {
     PlaybackBuffering primary, pip;
-    primary.beginLiveReserve(0.0, false, 3.0, 0);
+    primary.beginLiveReserve(liveSample(0.0), 3.0, 0);
+    primary.beginLiveReserve(liveSample(0.0), 3.0, 500);
+    QVERIFY(primary.liveReservePending());
     QVERIFY(!pip.liveReservePending());
     PlaybackRecovery first, second;
     first.start();

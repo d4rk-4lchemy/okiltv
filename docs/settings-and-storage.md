@@ -106,7 +106,18 @@ source/group write fails.
 Windows and AES-256-GCM with a random key stored in Secret Service through libsecret
 on Linux. There is no plaintext fallback and no key file beside application data.
 Linux requires OpenSSL Crypto, `libsecret-1.so.0` and an unlocked Secret Service.
-macOS Keychain support is not implemented.
+macOS uses the same AES-256-GCM payload with a Keychain generic-password key:
+service `org.okiltv.storage`, account `encryption-key-v1`. Envelopes use
+`okiltv-secret:v1:keychain:`; Linux `keyring:` and Windows `dpapi:` remain separate
+backends and are never silently reinterpreted. Lookup/create uses thread and
+interprocess synchronization, handles duplicate creation and verifies durable
+storage before permitting protected writes. Decryption never creates a missing
+key; malformed, denied or locked items fail without replacing data. Background
+requests forbid authentication UI. Unlock/authorize the original login Keychain
+then retry; account transfer and signature/upgrade continuity require Mac testing.
+Ordinary macOS paths use QStandardPaths and ignore Windows `APPDATA`/legacy
+imports; startup logs the actual data root outside the app bundle. Explicit
+portable overrides remain available and protection stays account-bound.
 
 Protect full source profiles, sensitive DVR/player settings, channel `stream_url`,
 `icon_url` and `catchup_source_template`, and invalid-settings backup bytes.
@@ -162,3 +173,6 @@ tampering, failed writes, locked/unavailable protection and restart tests. The
 an environment switch that bypasses the secret store. UI integration uses a
 disposable unlocked keyring. Account transfer, Windows DPAPI and desktop keyring
 behavior need target-platform checks in addition to unit tests.
+The [native macOS platform test](../qt/tests/tst_macos_platform.cpp) exercises real
+Keychain with disposable accounts, separately from isolated encryption tests.
+Its cross compilation does not count as a runtime pass; see [macOS acceptance](macos-tester-checklist.md).

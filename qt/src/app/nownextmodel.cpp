@@ -1,4 +1,5 @@
 #include "nownextmodel.h"
+#include "epgpresentationtime.h"
 
 #include <QtConcurrent>
 #include <QSet>
@@ -15,14 +16,6 @@ QString cacheKeyFor(const Channel &channel, int lookAheadHours)
         .arg(guidToString(channel.profileId)).arg(channel.id)
         .arg(channel.tvgId.trimmed().toLower()).arg(lookAheadHours)
         .arg(channel.catchupSupported).arg(channel.catchupWindowHours);
-}
-
-bool sameEntry(const EpgEntry &left, const EpgEntry &right)
-{
-    return left.channelId == right.channelId
-        && left.start == right.start
-        && left.stop == right.stop
-        && left.title == right.title;
 }
 
 } // namespace
@@ -121,6 +114,47 @@ void NowNextModel::refresh()
     startRefreshJob(generation, channel.value(), lookAheadHours);
 }
 
+void NowNextModel::refreshForClock()
+{
+    // Retain readable cached programmes while the periodic query runs.
+    m_skipNextLoadingState = !m_cachedPrograms.isEmpty();
+    refresh();
+}
+
+void NowNextModel::refreshTime(const QDateTime &nowUtc)
+{
+    if (!nowUtc.isValid()) return;
+    updateEpgProgramTimes(m_cachedPrograms, nowUtc);
+    m_currentProgramVariant.clear();
+    m_nextProgramVariant.clear();
+    m_pastProgramsVariant.clear();
+    m_upcomingProgramsVariant.clear();
+    const bool hasHistory = m_channel.has_value() && m_channel->catchupSupported && m_channel->catchupWindowHours > 0;
+    const auto historyStart = hasHistory
+        ? nowUtc.addSecs(-static_cast<qint64>(m_channel->catchupWindowHours) * 3600) : nowUtc;
+    for (const auto &value : m_cachedPrograms) {
+        const auto program = value.toMap();
+        const auto start = QDateTime::fromString(program.value(QStringLiteral("start")).toString(), Qt::ISODateWithMs);
+        const auto stop = QDateTime::fromString(program.value(QStringLiteral("stop")).toString(), Qt::ISODateWithMs);
+        if (hasHistory && stop <= nowUtc && start >= historyStart) m_pastProgramsVariant.push_back(program);
+        if (m_currentProgramVariant.isEmpty() && program.value(QStringLiteral("isNow")).toBool())
+            m_currentProgramVariant = program;
+    }
+    const auto nextFrom = m_currentProgramVariant.isEmpty() ? nowUtc
+        : QDateTime::fromString(m_currentProgramVariant.value(QStringLiteral("stop")).toString(), Qt::ISODateWithMs);
+    for (const auto &value : m_cachedPrograms) {
+        const auto program = value.toMap();
+        const auto start = QDateTime::fromString(program.value(QStringLiteral("start")).toString(), Qt::ISODateWithMs);
+        if (start < nowUtc) continue;
+        if (m_nextProgramVariant.isEmpty() && start >= nextFrom) {
+            m_nextProgramVariant = program;
+        } else if (program.value(QStringLiteral("start")) != m_currentProgramVariant.value(QStringLiteral("start"))) {
+            m_upcomingProgramsVariant.push_back(program);
+        }
+    }
+    emit dataChanged();
+}
+
 void NowNextModel::startRefreshJob(const quint64 generation, const Channel &channel, const int lookAheadHours)
 {
     m_refreshInFlight = true;
@@ -144,55 +178,29 @@ void NowNextModel::startRefreshJob(const quint64 generation, const Channel &chan
             entries.push_back(entry);
         }
 
+        // Hydrate current/next in the worker. Clock ticks can project all retained
+        // summaries immediately, including an upcoming programme becoming current.
+        std::optional<EpgEntry> current;
+        for (const auto &entry : entries) {
+            if (entry.start <= now && now < entry.stop) { current = entry; break; }
+        }
+        const auto nextFrom = current.has_value() ? current->stop : now;
+        std::optional<EpgEntry> next;
+        for (const auto &entry : entries) {
+            if (entry.start >= nextFrom) { next = entry; break; }
+        }
         RefreshResult result;
+        result.programs.reserve(entries.size());
         for (const auto &entry : entries) {
-            if (entry.stop <= now && entry.start >= historyStart) {
-                result.pastProgramsVariant.push_back(toVariantMap(entry));
+            auto program = toVariantMap(entry);
+            if (snapshot->store) program.insert(QStringLiteral("detailsPending"), true);
+            if ((current.has_value() && entry.start == current->start)
+                || (next.has_value() && entry.start == next->start)) {
+                for (const auto &full : reader.programsInRange(channel.tvgId, entry.start, entry.start.addMSecs(1))) {
+                    if (full.start == entry.start) { program = toVariantMap(full); break; }
+                }
             }
-        }
-        for (const auto &entry : entries) {
-            if (entry.start <= now && now < entry.stop) {
-                result.currentProgram = entry;
-                break;
-            }
-        }
-
-        const auto nextFrom = result.currentProgram.has_value() ? result.currentProgram->stop : now;
-        for (const auto &entry : entries) {
-            if (entry.start >= nextFrom) {
-                result.nextProgram = entry;
-                break;
-            }
-        }
-
-        for (const auto &entry : entries) {
-            if (entry.start < now) {
-                continue;
-            }
-
-            const auto isCurrent = result.currentProgram.has_value() && sameEntry(entry, result.currentProgram.value());
-            const auto isNext = result.nextProgram.has_value() && sameEntry(entry, result.nextProgram.value());
-            if (!isCurrent && !isNext) {
-                result.upcomingPrograms.push_back(entry);
-            }
-        }
-
-        for (auto *selected : {&result.currentProgram, &result.nextProgram}) {
-            if (!selected->has_value()) continue;
-            const auto start = selected->value().start;
-            for (const auto &entry : reader.programsInRange(channel.tvgId, start, start.addMSecs(1)))
-                if (entry.start == start) { *selected = entry; break; }
-        }
-        if (result.currentProgram.has_value()) {
-            result.currentProgramVariant = toVariantMap(result.currentProgram.value());
-        }
-        if (result.nextProgram.has_value()) {
-            result.nextProgramVariant = toVariantMap(result.nextProgram.value());
-        }
-        result.upcomingProgramsVariant = toVariantList(result.upcomingPrograms);
-        if (snapshot->store) {
-            for (auto *list : {&result.pastProgramsVariant, &result.upcomingProgramsVariant})
-                for (auto &value : *list) { auto map = value.toMap(); map.insert(QStringLiteral("detailsPending"), true); value = map; }
+            result.programs.push_back(program);
         }
 
         QMetaObject::invokeMethod(
@@ -212,9 +220,7 @@ void NowNextModel::clear()
     m_queuedChannel = std::nullopt;
     m_queuedLookAheadHours = 24;
     m_loading = false;
-    m_currentProgram = std::nullopt;
-    m_nextProgram = std::nullopt;
-    m_upcomingPrograms.clear();
+    m_cachedPrograms.clear();
     m_currentProgramVariant.clear();
     m_nextProgramVariant.clear();
     m_upcomingProgramsVariant.clear();
@@ -251,14 +257,10 @@ void NowNextModel::applyRefreshResult(const quint64 generation, RefreshResult re
     }
 
     m_loading = false;
-    m_currentProgram = std::move(result.currentProgram);
-    m_nextProgram = std::move(result.nextProgram);
-    m_upcomingPrograms = std::move(result.upcomingPrograms);
-    m_currentProgramVariant = std::move(result.currentProgramVariant);
-    m_nextProgramVariant = std::move(result.nextProgramVariant);
-    m_upcomingProgramsVariant = std::move(result.upcomingProgramsVariant);
-    m_pastProgramsVariant = std::move(result.pastProgramsVariant);
-    emit dataChanged();
+    m_cachedPrograms = std::move(result.programs);
+    // Publication may occur after a minute boundary or a wall-clock correction.
+    // Never publish the worker's earlier classification/progress sample.
+    refreshTime(QDateTime::currentDateTimeUtc());
 }
 
 } // namespace OKILTV::App

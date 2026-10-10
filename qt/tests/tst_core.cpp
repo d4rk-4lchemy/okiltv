@@ -23,6 +23,9 @@
 #include <QJsonObject>
 #include <QMutex>
 #include <QTemporaryDir>
+#ifdef Q_OS_MACOS
+#include <QStandardPaths>
+#endif
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QScopeGuard>
@@ -50,10 +53,20 @@ public:
         : m_previous(qgetenv("APPDATA"))
     {
         qputenv("APPDATA", path.toUtf8());
+#ifdef Q_OS_MACOS
+        m_previousRuntime = AppDataPaths::runtimeContext();
+        RuntimeContext context;
+        context.launchMode = LaunchMode::Portable;
+        context.dataRootOverride = QDir(path).filePath(QStringLiteral("OKILTV"));
+        AppDataPaths::initializeRuntime(context);
+#endif
     }
 
     ~ScopedAppDataEnv()
     {
+#ifdef Q_OS_MACOS
+        AppDataPaths::initializeRuntime(m_previousRuntime);
+#endif
         if (m_previous.isEmpty()) {
             qunsetenv("APPDATA");
         } else {
@@ -63,6 +76,9 @@ public:
 
 private:
     QByteArray m_previous;
+#ifdef Q_OS_MACOS
+    RuntimeContext m_previousRuntime;
+#endif
 };
 
 class ScopedRuntimeContext
@@ -147,7 +163,13 @@ private slots:
     void sourceEditInvalidatesChannelImport();
     void vodSourceMutationGuardPreservesCredentialsOnFailure();
     void vodDefaultsMigrationRetriesAndPreservesOptOut();
-    void initTestCase() { OKILTV::Core::useIsolatedSecretKeyForTests(); }
+    void initTestCase()
+    {
+        OKILTV::Core::useIsolatedSecretKeyForTests();
+#ifdef Q_OS_MACOS
+        QStandardPaths::setTestModeEnabled(true);
+#endif
+    }
     void channelTrackPreferencesRoundTrip();
     void trackPreferencesMatchIdentity();
     void uiTransparencySettingsCompatibility();
@@ -838,15 +860,20 @@ void CoreTests::appDataPathsSupportPortableOverridesAndFallback()
     ScopedAppDataEnv appData(tempDir.path());
     ScopedRuntimeContext runtimeContext;
 
-    QCOMPARE(AppDataPaths::defaultDataDirectory(), tempDir.filePath(QStringLiteral("OKILTV")));
-    QCOMPARE(AppDataPaths::dataDirectory(), tempDir.filePath(QStringLiteral("OKILTV")));
+#ifdef Q_OS_MACOS
+    const auto defaultRoot = QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath(QStringLiteral("OKILTV"));
+#else
+    const auto defaultRoot = tempDir.filePath(QStringLiteral("OKILTV"));
+#endif
+    QCOMPARE(AppDataPaths::defaultDataDirectory(), defaultRoot);
+    QCOMPARE(AppDataPaths::dataDirectory(), defaultRoot);
 
     RuntimeContext portableContext;
     portableContext.launchMode = LaunchMode::Portable;
     portableContext.portableBootstrapPath = tempDir.filePath(QStringLiteral("portable-bootstrap.json"));
     portableContext.dataRootOverride = QStringLiteral("relative/path");
     AppDataPaths::initializeRuntime(portableContext);
-    QCOMPARE(AppDataPaths::dataDirectory(), tempDir.filePath(QStringLiteral("OKILTV")));
+    QCOMPARE(AppDataPaths::dataDirectory(), defaultRoot);
 
     portableContext.dataRootOverride = tempDir.filePath(QStringLiteral("portable-data"));
     AppDataPaths::initializeRuntime(portableContext);
@@ -871,8 +898,17 @@ void CoreTests::appDataPathsMigratesLegacyRootIntoOKILTVDirectory()
     legacySettings.write("{\"theme\":\"Dark\"}");
     legacySettings.close();
 
+#ifdef Q_OS_MACOS
+    RuntimeContext context;
+    context.launchMode = LaunchMode::Portable;
+    context.dataRootOverride = newRoot;
+    AppDataPaths::initializeRuntime(context);
+    QCOMPARE(AppDataPaths::dataDirectory(), newRoot);
+    QVERIFY(!QFile::exists(QDir(newRoot).filePath(QStringLiteral("settings.json"))));
+#else
     QCOMPARE(AppDataPaths::dataDirectory(), newRoot);
     QVERIFY(QFile::exists(QDir(newRoot).filePath(QStringLiteral("settings.json"))));
+#endif
     QVERIFY(QFile::exists(QDir(legacyRoot).filePath(QStringLiteral("settings.json"))));
 }
 
