@@ -29,9 +29,11 @@ The release workflow also configures a native `macos-15` arm64 beta job through
 `build_macos_native.sh` and `qt-macos-arm64-native-release`. It installs the pinned
 Qt SDK and Homebrew media dependencies, builds the app and platform test, packages
 with Apple's ad-hoc signer, verifies an extracted archive and runs the disposable
-Keychain/SQLite/helper suite and bundle mutation tests. Native workflow execution
-still needs its first GitHub run; full runtime/hardware acceptance and Developer
-ID signing/notarization remain pending. See [macOS build](macos-build.md#native-release-ci-beta).
+Keychain/SQLite/helper suite and bundle mutation tests. Packaging contract tests
+cover symlinked Homebrew/temporary paths and reject installed kegs outside the
+canonical Cellar. A successful native GitHub build and platform test run, full
+runtime/hardware acceptance and Developer ID signing/notarization remain pending.
+See [macOS build](macos-build.md#native-release-ci-beta).
 
 ## EPG presentation clock validation
 
@@ -536,9 +538,17 @@ DPAPI, native-dialog and installer checks.
 ## CI and releases
 
 [pr-tests.yml](../.github/workflows/pr-tests.yml) owns grouped test execution.
+Application coverage is split into `app-models` (controllers/models, EPG search
+and VOD integration/contracts) and `app-downloads` (archive downloads) on separate
+runners. The models shard builds the application test, EPG model and VOD contract
+targets; downloads builds only `OKILTVQtDownloadTests`. Tests retain the
+`app` label for local full-group execution and have exactly one app shard label;
+`ctest --preset qt-linux-debug -L '^app$' -j2` still runs the full application group.
 Non-desktop groups run with two CTest workers; desktop shards use one worker
-and retain their shared desktop resource lock. Linux Qt and Windows Qt/MinGW
-SDK caches include OS, architecture, Qt/aqt version and module/tool selection;
+and retain their shared desktop resource lock. CMake requires each registered
+test to have a concrete CI group label, including shard labels for app and UI.
+Hosted build/test timing for the application split remains pending.
+Linux Qt and Windows Qt/MinGW SDK caches include OS, architecture, Qt/aqt version and module/tool selection;
 media dependencies and availability checks run even after a cache hit.
 The QML group builds `OKILTVQtEpgSearchQmlTests` before running its label; this
 runner embeds the EPG action icons, while other QML suites use the SDK's

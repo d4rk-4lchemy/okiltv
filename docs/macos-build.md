@@ -16,8 +16,9 @@ signing/notarization are outside the current workflow.
 [release.yml](../.github/workflows/release.yml) runs `macOS arm64 beta` alongside
 the Windows/Linux jobs after version validation. A published application release
 starts all jobs; `deps-*` releases are excluded. Manual dispatch only saves
-Actions artifacts and does not attach packages to a Release. The first native
-GitHub run is still pending; local Linux checks do not establish native execution.
+Actions artifacts and does not attach packages to a Release. A successful native
+GitHub build and platform test run remain pending; local Linux checks do not
+establish native execution.
 
 The native job installs Qt at the version shared by the CI/macOS dependency pins,
 with `aqtinstall` and `macholib` pinned, and installs Ninja, mpv, FFmpeg and OpenSSL
@@ -25,7 +26,11 @@ through Homebrew. It uses the runner's Xcode SDK rather than redistributing an
 Apple SDK or relying on `/opt/okiltv-macos`. Homebrew formulae and runner images
 can change; the Linux bottle lock does not apply to native CI. The build manifest
 records each installed runtime dependency's actual keg version, formula reference,
-installed formula commit when available and receipt digest. Builds are not
+installed formula commit when available and receipt digest. Inventory checks
+resolve both the selected Cellar and installed keg paths before checking
+containment, supporting macOS temporary paths through `/var` → `/private/var`
+and symlinked Homebrew prefixes while rejecting kegs outside the selected Cellar.
+These contracts have a regression test that also runs on Linux. Builds are not
 guaranteed to be byte-for-byte reproducible.
 
 `build_macos_native.sh` configures `qt-macos-arm64-native-release`, then builds only
