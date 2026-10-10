@@ -23,8 +23,10 @@ jobs:
         include:
           - group: core
             targets: OKILTVQtEpgSearchStoreTests OKILTVQtCoreTests OKILTVQtDatabaseStartupTests OKILTVQtVodDomainTests OKILTVQtVodProviderTests OKILTVQtVodStorageTests
-          - group: app
-            targets: OKILTVQtEpgSearchModelTests OKILTVQtAppTests OKILTVQtDownloadTests OKILTVQtVodContractTests
+          - group: app-models
+            targets: OKILTVQtEpgSearchModelTests OKILTVQtAppTests OKILTVQtVodContractTests
+          - group: app-downloads
+            targets: OKILTVQtDownloadTests
           - group: playback
             targets: OKILTVQtPlaybackTests OKILTVQtCatchupTests OKILTVQtVodMpvTests OKILTVQtVodRangeTests
           - group: qml
@@ -97,7 +99,7 @@ jobs:
         run: |
           mkdir -p reports
           # Desktop scenarios share an X display reservation within one runner.
-          # Other suites use isolated fixtures and can overlap the download waits.
+          # Other suites use isolated fixtures and can run with two workers.
           parallel=2
           if [[ "$TEST_GROUP" == ui-* ]]; then parallel=1; fi
           ctest --preset qt-linux-debug -L "^$TEST_GROUP$" --no-tests=error -j"$parallel" \

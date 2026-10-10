@@ -8,7 +8,8 @@ same PR; a failed group does not cancel other groups.
 | Job group | Coverage |
 | --- | --- |
 | `core` | Services, settings, database and database startup |
-| `app` | Controllers, models, archive downloads and real libmpv integration |
+| `app-models` | Controllers, models, EPG search, VOD contracts and real libmpv integration |
+| `app-downloads` | Archive download integration with real retry/stall windows |
 | `playback` | Playback decisions, synthetic catch-up transport, VOD mpv and HTTP range cache |
 | `qml` | Component suites using qmltestrunner, including the VOD library and playback panels |
 | `ui-live` | Channel, inactivity, Guide, pointer and transparency scenarios on Xvfb/Openbox |
@@ -17,9 +18,14 @@ same PR; a failed group does not cancel other groups.
 | `windows` | Native Windows process ownership, cleanup and DVR reconciliation |
 
 Linux jobs use CTest labels and build only their required targets. Non-desktop
-suites run with two CTest workers, allowing the real download retry/stall waits
-to overlap other app suites. Desktop scenarios run serially within each of three
-balanced shards, on separate runners; all retain the `ui` label for local serial
+suites run with two CTest workers. The application suites run on separate
+`app-models` and `app-downloads` runners: models builds `OKILTVQtAppTests`,
+`OKILTVQtEpgSearchModelTests` and `OKILTVQtVodContractTests`; downloads builds
+only `OKILTVQtDownloadTests`, avoiding the large application test translation
+unit on the download runner. All retain the `app` label for local full-group
+execution and receive exactly one app shard label. The download retry/stall
+windows and test timeouts remain unchanged. Desktop scenarios run serially
+within each of three balanced shards, on separate runners; all retain the `ui` label for local serial
 execution and the `okiltv_ui_desktop` resource lock. The shard labels are
 `ui-live`, `ui-movies` and `ui-playback`; every UI scenario has exactly one.
 Qt SDKs (and Windows MinGW) are cached by OS, architecture, Qt/aqt version and
@@ -49,6 +55,9 @@ cmake --build --preset qt-linux-debug -j"$(scripts/build_jobs.sh)"
 ctest --preset qt-linux-debug --output-on-failure
 # One group:
 ctest --preset qt-linux-debug -L '^ui$' --output-on-failure
+# Both application shards locally, or one CI shard:
+ctest --preset qt-linux-debug -L '^app$' -j2 --output-on-failure
+ctest --preset qt-linux-debug -L '^app-downloads$' --output-on-failure
 ```
 
 `copy_clean_repo.sh` copies both workflows, test sources and the UI harness,

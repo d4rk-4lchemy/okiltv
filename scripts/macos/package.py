@@ -38,13 +38,14 @@ def source_fingerprint():
 
 def native_packages(deps):
     """Inventory the installed Homebrew runtime closure, not today's formula versions."""
+    cellar = (deps / 'Cellar').resolve(strict=True)
     names = sorted(set(['mpv', 'ffmpeg', 'openssl@3'] +
                        run('brew', 'deps', '--installed', '--union',
                            'mpv', 'ffmpeg', 'openssl@3').splitlines()))
     packages = {}
     for name in names:
         prefix = Path(run('brew', '--prefix', '--installed', name).strip()).resolve(strict=True)
-        if not prefix.is_relative_to(deps / 'Cellar'):
+        if not prefix.is_relative_to(cellar):
             raise ValueError(f'Homebrew package outside the selected Cellar: {name}')
         receipt = prefix / 'INSTALL_RECEIPT.json'
         installed = json.loads(receipt.read_text())

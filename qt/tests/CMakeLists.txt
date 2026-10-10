@@ -323,7 +323,7 @@ set_tests_properties(OKILTVQtPlaybackTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFO
 
 # Stable group names shared by local CTest runs and the PR workflow matrix.
 set_tests_properties(OKILTVQtCoreTests OKILTVQtDatabaseStartupTests PROPERTIES LABELS core)
-set_tests_properties(OKILTVQtAppTests PROPERTIES LABELS app TIMEOUT 600)
+set_tests_properties(OKILTVQtAppTests PROPERTIES LABELS "app;app-models" TIMEOUT 600)
 set_tests_properties(OKILTVQtPlaybackTests OKILTVQtCatchupTests PROPERTIES LABELS playback TIMEOUT 300)
 if (WIN32)
     set_tests_properties(OKILTVQtWindowsProcessJobTests OKILTVQtWindowsDvrTests
@@ -404,7 +404,7 @@ target_link_libraries(OKILTVQtDownloadTests PRIVATE Qt6::Widgets Qt6::Core Qt6::
 add_test(NAME OKILTVQtDownloadTests COMMAND OKILTVQtDownloadTests)
 # Real 10/30-second retry cooldowns and the 60-second stall case put this suite
 # near nine minutes locally. Leave room for slower hosted runners.
-set_tests_properties(OKILTVQtDownloadTests PROPERTIES LABELS app TIMEOUT 900
+set_tests_properties(OKILTVQtDownloadTests PROPERTIES LABELS "app;app-downloads" TIMEOUT 900
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;OKILTV_HEADLESS_TEST=1")
 
 if (NOT CMAKE_CROSSCOMPILING AND OKILTV_QMLTESTRUNNER)
@@ -429,7 +429,7 @@ set_tests_properties(OKILTVQtVodDomainTests PROPERTIES LABELS "core;vod")
 qt_add_executable(OKILTVQtVodContractTests vod/tst_vod_contracts.cpp)
 target_link_libraries(OKILTVQtVodContractTests PRIVATE OKILTVVodApplication Qt6::Test)
 add_test(NAME OKILTVQtVodContractTests COMMAND OKILTVQtVodContractTests)
-set_tests_properties(OKILTVQtVodContractTests PROPERTIES LABELS "app;vod" TIMEOUT 60)
+set_tests_properties(OKILTVQtVodContractTests PROPERTIES LABELS "app;app-models;vod" TIMEOUT 60)
 
 qt_add_executable(OKILTVQtVodProviderTests vod/tst_vod_provider.cpp)
 target_link_libraries(OKILTVQtVodProviderTests PRIVATE OKILTVVodInfrastructure Qt6::Network Qt6::Test ${OKILTV_ZLIB_LINK_LIB})
@@ -461,13 +461,13 @@ find_program(OKILTV_VOD_XVFB_RUN xvfb-run)
 if (APPLE)
     add_test(NAME OKILTVQtVodMpvTests COMMAND OKILTVQtVodMpvTests)
     add_test(NAME OKILTVQtVodRuntimeTests COMMAND OKILTVQtAppTests vodRuntimeNativePlayback -v2)
-    set_tests_properties(OKILTVQtVodRuntimeTests PROPERTIES LABELS "app;vod" TIMEOUT 90
+    set_tests_properties(OKILTVQtVodRuntimeTests PROPERTIES LABELS "app;app-models;vod" TIMEOUT 90
         ENVIRONMENT "QT_QPA_PLATFORM=cocoa;QSG_RHI_BACKEND=opengl;OKILTV_HEADLESS_TEST=0;OKILTV_VOD_RENDER_TEST=1")
     set_tests_properties(OKILTVQtVodMpvTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=cocoa;QSG_RHI_BACKEND=opengl;OKILTV_HEADLESS_TEST=0")
 elseif (OKILTV_VOD_XVFB_RUN AND NOT CMAKE_CROSSCOMPILING)
     add_test(NAME OKILTVQtVodMpvTests COMMAND ${OKILTV_VOD_XVFB_RUN} -a $<TARGET_FILE:OKILTVQtVodMpvTests>)
     add_test(NAME OKILTVQtVodRuntimeTests COMMAND ${OKILTV_VOD_XVFB_RUN} -a $<TARGET_FILE:OKILTVQtAppTests> vodRuntimeNativePlayback -v2)
-    set_tests_properties(OKILTVQtVodRuntimeTests PROPERTIES LABELS "app;vod" TIMEOUT 90
+    set_tests_properties(OKILTVQtVodRuntimeTests PROPERTIES LABELS "app;app-models;vod" TIMEOUT 90
         ENVIRONMENT "QT_QPA_PLATFORM=xcb;QSG_RHI_BACKEND=opengl;OKILTV_HEADLESS_TEST=0;OKILTV_VOD_RENDER_TEST=1;LIBGL_ALWAYS_SOFTWARE=1;GALLIUM_DRIVER=softpipe")
     # The container's llvmpipe intermittently renders black despite valid decoded
     # frames. Mesa softpipe exercises the same real OpenGL/render-API path reliably.
@@ -478,9 +478,9 @@ endif ()
 set_tests_properties(OKILTVQtVodMpvTests PROPERTIES LABELS "playback;vod" TIMEOUT 90)
 
 add_test(NAME OKILTVQtVodSeriesTests COMMAND OKILTVQtAppTests vodSeriesRuntime)
-set_tests_properties(OKILTVQtVodSeriesTests PROPERTIES LABELS "app;vod" TIMEOUT 90 ENVIRONMENT "QT_QPA_PLATFORM=offscreen;OKILTV_HEADLESS_TEST=1")
+set_tests_properties(OKILTVQtVodSeriesTests PROPERTIES LABELS "app;app-models;vod" TIMEOUT 90 ENVIRONMENT "QT_QPA_PLATFORM=offscreen;OKILTV_HEADLESS_TEST=1")
 add_test(NAME OKILTVQtVodStorageStartupTests COMMAND OKILTVQtAppTests vodLibraryWaitsForStorage)
-set_tests_properties(OKILTVQtVodStorageStartupTests PROPERTIES LABELS "app;vod" TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=offscreen;OKILTV_HEADLESS_TEST=1")
+set_tests_properties(OKILTVQtVodStorageStartupTests PROPERTIES LABELS "app;app-models;vod" TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=offscreen;OKILTV_HEADLESS_TEST=1")
 
 if (OKILTV_QMLTESTRUNNER)
     add_test(NAME OKILTVQtVodPlaybackUiTests COMMAND "${OKILTV_QMLTESTRUNNER}"
@@ -530,7 +530,7 @@ foreach(target OKILTVQtEpgSearchStoreTests OKILTVQtEpgSearchModelTests)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;OKILTV_HEADLESS_TEST=1")
 endforeach()
 set_property(TEST OKILTVQtEpgSearchStoreTests APPEND PROPERTY LABELS core)
-set_property(TEST OKILTVQtEpgSearchModelTests APPEND PROPERTY LABELS app)
+set_property(TEST OKILTVQtEpgSearchModelTests APPEND PROPERTY LABELS app app-models)
 
 if (APPLE)
     qt_add_executable(OKILTVQtMacosPlatformTests tst_macos_platform.cpp
@@ -546,7 +546,7 @@ endif ()
 get_property(OKILTV_REGISTERED_TESTS DIRECTORY PROPERTY TESTS)
 foreach(test IN LISTS OKILTV_REGISTERED_TESTS)
     get_property(labels TEST "${test}" PROPERTY LABELS)
-    if (NOT "${labels}" MATCHES "(^|;)(core|app|playback|qml|ui|windows)(;|$)")
+    if (NOT "${labels}" MATCHES "(^|;)(core|app-models|app-downloads|playback|qml|ui-live|ui-movies|ui-playback|windows)(;|$)")
         message(FATAL_ERROR "CTest ${test} has no PR matrix group label")
     endif ()
 endforeach()

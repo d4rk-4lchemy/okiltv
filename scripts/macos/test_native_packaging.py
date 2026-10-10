@@ -40,9 +40,42 @@ class NativePackagingTests(unittest.TestCase):
     def test_inventory_rejects_packages_outside_homebrew_cellar(self):
         with tempfile.TemporaryDirectory() as directory:
             deps = Path(directory)
+            (deps / 'Cellar').mkdir()
             with patch.object(packaging, 'run', side_effect=['', str(deps)]):
                 with self.assertRaisesRegex(ValueError, 'outside the selected Cellar'):
                     packaging.native_packages(deps)
+
+    def test_inventory_accepts_symlinked_prefix_and_rejects_escaped_keg(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            deps = root / 'homebrew'
+            (deps / 'opt').mkdir(parents=True)
+            alias = root / 'homebrew-alias'
+            alias.symlink_to(deps, target_is_directory=True)
+            names = ['mpv', 'ffmpeg', 'openssl@3']
+            for name in names:
+                keg = deps / 'Cellar' / name / '1.0_2'
+                keg.mkdir(parents=True)
+                (keg / 'INSTALL_RECEIPT.json').write_text('{}')
+                (deps / 'opt' / name).symlink_to(keg, target_is_directory=True)
+
+            def brew(*args):
+                if args[1] == 'deps':
+                    return ''
+                return str(alias / 'opt' / args[-1]) + '\n'
+
+            with patch.object(packaging, 'run', side_effect=brew):
+                inventory = packaging.native_packages(alias)
+                self.assertEqual(set(inventory), set(names))
+                self.assertEqual(inventory['mpv']['prefix'], str(deps / 'Cellar/mpv/1.0_2'))
+
+                outside = root / 'outside/ffmpeg/1.0_2'
+                outside.mkdir(parents=True)
+                (outside / 'INSTALL_RECEIPT.json').write_text('{}')
+                (deps / 'opt/ffmpeg').unlink()
+                (deps / 'opt/ffmpeg').symlink_to(outside, target_is_directory=True)
+                with self.assertRaisesRegex(ValueError, 'outside the selected Cellar: ffmpeg'):
+                    packaging.native_packages(alias)
 
     def test_release_version_mismatch_is_rejected_before_bundle_assembly(self):
         with tempfile.TemporaryDirectory() as directory:
