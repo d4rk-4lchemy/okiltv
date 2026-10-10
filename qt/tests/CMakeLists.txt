@@ -357,8 +357,16 @@ if (OKILTV_BUILD_UI_TESTS)
                 "${CMAKE_SOURCE_DIR}/ui-tests/tests/${scenario}.py"
                 "$<TARGET_FILE:OKILTVQt>"
                 "${CMAKE_BINARY_DIR}/ui-artifacts/${scenario}")
+        # Separate runners keep each desktop serial while CI runs balanced shards.
+        if (scenario MATCHES "^(05|06|07|08)-")
+            set(ui_shard ui-live)
+        elseif (scenario STREQUAL "12-vod-movies")
+            set(ui_shard ui-movies)
+        else ()
+            set(ui_shard ui-playback)
+        endif ()
         set_tests_properties("UI-${scenario}" PROPERTIES
-            LABELS ui TIMEOUT 600 RESOURCE_LOCK okiltv_ui_desktop)
+            LABELS "ui;${ui_shard}" TIMEOUT 600 RESOURCE_LOCK okiltv_ui_desktop)
     endforeach()
 endif ()
 

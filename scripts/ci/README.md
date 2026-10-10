@@ -11,13 +11,23 @@ same PR; a failed group does not cancel other groups.
 | `app` | Controllers, models, archive downloads and real libmpv integration |
 | `playback` | Playback decisions, synthetic catch-up transport, VOD mpv and HTTP range cache |
 | `qml` | Component suites using qmltestrunner, including the VOD library and playback panels |
-| `ui` | Local-media scenarios on Xvfb/Openbox |
+| `ui-live` | Channel, inactivity, Guide, pointer and transparency scenarios on Xvfb/Openbox |
+| `ui-movies` | Full movie library, playback and source-settings scenario on Xvfb/Openbox |
+| `ui-playback` | Downloads, multiview, series and EPG search scenarios on Xvfb/Openbox |
 | `windows` | Native Windows process ownership, cleanup and DVR reconciliation |
 
-Linux jobs use CTest labels and build only their required targets. CTest verbose
-output shows individual Qt Test results while the group is running. The QML job
-builds `OKILTVQtEpgSearchQmlTests` for the EPG overlay's embedded action icons;
-the other component suites run through the SDK's `qmltestrunner`. The UI job
+Linux jobs use CTest labels and build only their required targets. Non-desktop
+suites run with two CTest workers, allowing the real download retry/stall waits
+to overlap other app suites. Desktop scenarios run serially within each of three
+balanced shards, on separate runners; all retain the `ui` label for local serial
+execution and the `okiltv_ui_desktop` resource lock. The shard labels are
+`ui-live`, `ui-movies` and `ui-playback`; every UI scenario has exactly one.
+Qt SDKs (and Windows MinGW) are cached by OS, architecture, Qt/aqt version and
+module/tool set. Cache hits skip SDK installation; system/media dependencies and
+backend availability checks still run. Reports have a distinct name per shard.
+CTest verbose output shows individual Qt Test results while the group is
+running. The QML job builds `OKILTVQtEpgSearchQmlTests` for the EPG overlay's embedded action icons;
+the other component suites run through the SDK's `qmltestrunner`. Each UI shard
 uses FFmpeg-generated media and a separate unlocked disposable Secret Service
 keyring for each scenario. Linux dependencies include ImageMagick (`convert`)
 for UI-14's rendered station-logo pixel assertions. No IPTV account or private

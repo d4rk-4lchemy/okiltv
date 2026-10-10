@@ -486,9 +486,21 @@ D-Bus session and disposable keyring. The harness uses Xvfb, Openbox, xdotool an
 generated local media; ImageMagick's `convert` is required for UI-14's rendered
 station-logo pixel assertions. Setup is documented in
 [ui-tests/linux-ui-tests.md](../ui-tests/linux-ui-tests.md) and
-[scripts/ci/README.md](../scripts/ci/README.md). CTest serializes desktop scenarios.
+[scripts/ci/README.md](../scripts/ci/README.md). CTest serializes desktop scenarios
+within a runner. CI splits the `ui` label into `ui-live`, `ui-movies` and `ui-playback` shards on separate runners; local
+`-L '^ui$'` still executes the complete suite.
 Each harness invocation keeps a unique appdata/artifact directory; do not reuse
 encrypted fixture data with a new keyring.
+
+The shared UI-12/UI-13 local fixture sets mpv `gpu-dumb-mode=yes` when the runner
+enables software rendering, using the native VOD render suite's mpv workaround
+for Ubuntu 24.04's advanced-renderer stall. QML keeps the runner's normal Mesa
+driver so full-window rendering remains fast. Real OpenGL playback and the
+original seek/resume, track and UI assertions remain enabled; hardware picture-shader
+quality is a separate manual check. Other UI fixtures keep their GPU settings.
+Both VOD scenarios have been checked locally with libmpv 0.37; hosted validation
+of sporadic resume stability and the new workflow's timings/cache restoration
+remains pending.
 
 All desktop UI scenarios have a 600-second CTest limit to accommodate CI software
 rendering, including the full movie library, playback, responsive-layout and
@@ -524,6 +536,10 @@ DPAPI, native-dialog and installer checks.
 ## CI and releases
 
 [pr-tests.yml](../.github/workflows/pr-tests.yml) owns grouped test execution.
+Non-desktop groups run with two CTest workers; desktop shards use one worker
+and retain their shared desktop resource lock. Linux Qt and Windows Qt/MinGW
+SDK caches include OS, architecture, Qt/aqt version and module/tool selection;
+media dependencies and availability checks run even after a cache hit.
 The QML group builds `OKILTVQtEpgSearchQmlTests` before running its label; this
 runner embeds the EPG action icons, while other QML suites use the SDK's
 `qmltestrunner` directly.
