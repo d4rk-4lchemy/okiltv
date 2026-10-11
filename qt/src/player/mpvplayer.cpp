@@ -23,6 +23,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <type_traits>
 
 namespace OKILTV::Player {
@@ -438,7 +439,9 @@ void MpvPlayer::configureLibraryPath(const QString &path)
     }
 
     m_libraryPath = normalizedPath;
-    QMutexLocker locker(&m_state->mutex);
+    // State is never reset. A reference-based guard avoids GCC 13 diagnosing
+    // QMutexLocker's null-mutex branch at the following atomic load.
+    std::lock_guard locker(m_state->mutex);
     if (m_state->initialized) {
         m_reinitializePending = true;
     }
@@ -451,7 +454,7 @@ void MpvPlayer::configureOptions(const QMap<QString, QString> &options)
     }
 
     m_options = options;
-    QMutexLocker locker(&m_state->mutex);
+    std::lock_guard locker(m_state->mutex);
     if (m_state->initialized) {
         m_reinitializePending = true;
     }
@@ -549,7 +552,7 @@ void MpvPlayer::applyPicturePresetLocked()
 
 void MpvPlayer::configureImageSmoothing(const bool enabled)
 {
-    QMutexLocker locker(&m_state->mutex);
+    std::lock_guard locker(m_state->mutex);
     m_imageSmoothingEnabled = enabled;
     if (!m_state->initialized) {
         return;
@@ -585,7 +588,7 @@ void MpvPlayer::configurePlaybackTuning(
     m_waitForDataStreamSeconds = normalizedWait;
     m_deinterlaceEnabled = deinterlaceEnabled;
     m_bufferSeconds = normalizedBuffer;
-    QMutexLocker locker(&m_state->mutex);
+    std::lock_guard locker(m_state->mutex);
     if (m_state->initialized) {
         m_reinitializePending = true;
     }
@@ -599,7 +602,7 @@ void MpvPlayer::configureUserAgent(const QString &userAgent)
     }
 
     m_userAgent = normalizedUserAgent;
-    QMutexLocker locker(&m_state->mutex);
+    std::lock_guard locker(m_state->mutex);
     if (m_state->initialized) {
         m_reinitializePending = true;
     }
@@ -693,7 +696,7 @@ bool MpvPlayer::setSteadyStateBufferingPolicy(const SteadyStateBufferingPolicy &
     m_steadyStateDemuxerMaxBytes = normalizedMaxBytes;
     m_steadyStateDemuxerMaxBackBytes = normalizedMaxBackBytes;
 
-    QMutexLocker locker(&m_state->mutex);
+    std::lock_guard locker(m_state->mutex);
     if (!changed || !m_state->initialized || m_state->handle == nullptr) {
         return true;
     }
@@ -795,7 +798,7 @@ bool MpvPlayer::ensureInitialized()
     // Rendering must never wait for a synchronous client API call. libmpv can
     // itself be waiting for the render thread while such a call is in progress.
     if (m_state->initialized.load()) return true;
-    QMutexLocker locker(&m_state->mutex);
+    std::lock_guard locker(m_state->mutex);
     if (m_state->initialized) {
         return true;
     }
@@ -1361,7 +1364,7 @@ void MpvPlayer::stopForHandoff(const QUuid &request)
 
 void MpvPlayer::setHwdec(const QString &mode)
 {
-    QMutexLocker locker(&m_state->mutex);
+    std::lock_guard locker(m_state->mutex);
     if (!m_state->initialized || m_state->handle == nullptr) {
         return;
     }
@@ -2278,7 +2281,7 @@ void MpvPlayer::detectAndApplyDeinterlace()
     // Keep scan-type telemetry for diagnostics/debug overlay.
     m_sourceInterlaced = propertyFlag("video-frame-info/interlaced");
 
-    QMutexLocker locker(&m_state->mutex);
+    std::lock_guard locker(m_state->mutex);
     if (!m_state->initialized || m_state->handle == nullptr) {
         return;
     }

@@ -62,7 +62,11 @@ def sign_native(app):
     """Sign inner code before frameworks and the outer app, using Apple's ad-hoc signer."""
     log = []
     binaries = sorted(path for path in app.rglob('*') if is_macho(path))
-    frameworks = sorted(app.rglob('*.framework'), key=lambda path: len(path.parts), reverse=True)
+    # License copies retain their original paths, including *.framework
+    # directories. Only ancestors of actual code need framework signatures.
+    frameworks = sorted({parent for binary in binaries for parent in binary.parents
+                         if parent.suffix == '.framework' and parent.is_relative_to(app)},
+                        key=lambda path: (-len(path.parts), str(path)))
     for path in [*binaries, *frameworks, app]:
         log.append(run('codesign', '--force', '--sign', '-', '--timestamp=none', path,
                        stderr=subprocess.STDOUT))
