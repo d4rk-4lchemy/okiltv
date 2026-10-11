@@ -42,6 +42,14 @@ player gets independent policy state. The detailed ownership/transition map is i
 Quick. Keep OpenGL startup configuration and `video-timing-offset=0`, which avoids
 mpv timing adjustments fighting the host's vsync.
 
+`MpvPlayer::State` is allocated in the constructor and retained until destruction;
+unload clears its handles and flags without resetting that allocation. Its
+`initialized` flag stays atomic for the render thread's fast path. Scope-only
+configuration, buffering, hardware-decoding, deinterlace and initialization
+blocks use reference-based `std::lock_guard` on the existing `QMutex` to avoid
+MinGW GCC 13's false null-state diagnostics through `QMutexLocker`. Lock scope,
+atomic memory ordering and playback behavior are unchanged.
+
 macOS requests OpenGL 3.2 Core before application creation and logs the actual
 render context/profile and current CGL availability. It retains the existing
 Qt-owned FBO/render API and `hwdec=auto-safe`; VideoToolbox/fallback, audio and

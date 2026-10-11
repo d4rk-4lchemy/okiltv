@@ -104,6 +104,30 @@ class NativePackagingTests(unittest.TestCase):
             self.assertEqual(signed, [binary, framework, app])
             self.assertIn('--verify', run.call_args_list[-1].args)
 
+    def test_native_signing_keeps_license_frameworks_as_resources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / 'OKILTV.app'
+            framework = app / 'Contents/Frameworks/Test.framework'
+            binary = framework / 'Versions/A/Test'
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b'\xcf\xfa\xed\xfe')
+            (framework / 'Versions/Current').symlink_to('A', target_is_directory=True)
+            (framework / 'Test').symlink_to('Versions/Current/Test')
+            notices = app / 'Contents/Resources/third-party-notices/python@3.14/Frameworks/Python.framework'
+            license_file = notices / 'Versions/3.14/Resources/LICENSE.txt'
+            license_file.parent.mkdir(parents=True)
+            license_file.write_text('Retained license text')
+            qml_plugin = app / 'Contents/Resources/qml/Test/plugin.dylib'
+            qml_plugin.parent.mkdir(parents=True)
+            qml_plugin.write_bytes(b'\xcf\xfa\xed\xfe')
+
+            with patch.object(packaging, 'run', return_value='') as run:
+                packaging.sign_native(app)
+            signed = [call.args[-1] for call in run.call_args_list if '--sign' in call.args]
+            self.assertEqual(signed, [binary, qml_plugin, framework, app])
+            self.assertEqual(license_file.read_text(), 'Retained license text')
+            self.assertIn('--verify', run.call_args_list[-1].args)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -31,8 +31,11 @@ Qt SDK and Homebrew media dependencies, builds the app and platform test, packag
 with Apple's ad-hoc signer, verifies an extracted archive and runs the disposable
 Keychain/SQLite/helper suite and bundle mutation tests. Packaging contract tests
 cover symlinked Homebrew/temporary paths and reject installed kegs outside the
-canonical Cellar. A successful native GitHub build and platform test run, full
-runtime/hardware acceptance and Developer ID signing/notarization remain pending.
+canonical Cellar, and keep license-only `.framework` directories as signed app
+resources while signing real frameworks and QML plugins. Native application and
+platform-test compilation have passed on GitHub. Complete native packaging and
+platform-test execution, full runtime/hardware acceptance and Developer ID
+signing/notarization remain pending.
 See [macOS build](macos-build.md#native-release-ci-beta).
 
 ## EPG presentation clock validation
@@ -528,6 +531,16 @@ scripts/package_qt_win64.sh
 windeployqt, CPack/NSIS and 7z through the existing scripts. Do not replace this
 with an incomplete manual deployment. Outputs in `publish/` are the versioned
 Windows ZIP and setup EXE. Only the ZIP receives the portable marker.
+
+The optimized MinGW GCC 13 build can diagnose `MpvPlayer` atomic initialization
+reads as `-Wstringop-overflow` through `QMutexLocker`'s nullable-mutex branch,
+despite the player retaining its state allocation for its lifetime. The affected
+scope-only blocks use `std::lock_guard` with a mutex reference, preserving the
+same mutex, scope and atomic operations. Check this with GCC 13, Release `-O3`
+and `-Werror=stringop-overflow`; GCC 14 alone does not reproduce the warning.
+The playback test group includes catch-up transport and real VOD mpv coverage of
+backend initialization, tuning and playback after the guard change. No compiler
+warning is disabled for this fix.
 
 Installer update/clean-install paths preserve user settings/sources and unrelated
 files. Native launch/foreground handling and maintenance behavior are covered by

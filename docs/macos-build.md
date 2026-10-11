@@ -16,9 +16,10 @@ signing/notarization are outside the current workflow.
 [release.yml](../.github/workflows/release.yml) runs `macOS arm64 beta` alongside
 the Windows/Linux jobs after version validation. A published application release
 starts all jobs; `deps-*` releases are excluded. Manual dispatch only saves
-Actions artifacts and does not attach packages to a Release. A successful native
-GitHub build and platform test run remain pending; local Linux checks do not
-establish native execution.
+Actions artifacts and does not attach packages to a Release. Native application
+and platform-test compilation have passed on GitHub; complete packaging and
+platform-test execution remain pending. Local Linux checks do not establish
+native execution.
 
 The native job installs Qt at the version shared by the CI/macOS dependency pins,
 with `aqtinstall` and `macholib` pinned, and installs Ninja, mpv, FFmpeg and OpenSSL
@@ -39,8 +40,12 @@ directories are `qt/out/build/qt-macos-arm64-native-release` and
 `qt/out/package/qt-macos-arm64-native-release`. Tests are enabled to compile that
 selected platform target. Native `lipo` and `install_name_tool` reuse the same
 recursive collection, arm64 thinning, QML/plugin inventory and closure checks as
-the cross packager. Apple's `codesign` signs inner binaries, frameworks and the
-outer app ad-hoc and verifies the assembled bundle. Packaging checks extraction
+the cross packager. Apple's `codesign` signs inner binaries, frameworks containing
+those binaries and the outer app ad-hoc, then verifies the assembled bundle.
+License-only directories retaining upstream `.framework` paths remain resources
+sealed by the outer app signature; they are not signed as code. The signing
+contract test covers these resources alongside versioned framework symlinks and
+runtime QML plugins. Packaging checks extraction
 and executable modes. The validated release version must match the built Info.plist.
 
 The job extracts the resulting archive and runs `Verify bundle.command`, the
